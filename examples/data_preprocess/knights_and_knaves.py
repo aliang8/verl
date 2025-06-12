@@ -12,51 +12,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Preprocess the GSM8k dataset to parquet format
+Preprocess the Knights and Knaves dataset to parquet format
 """
 
 import argparse
 import os
-import re
 
 import datasets
 
 from verl.utils.hdfs_io import copy, makedirs
 
 
-def extract_solution(solution_str):
-    solution = re.search("#### (\\-?[0-9\\.\\,]+)", solution_str)
-    assert solution is not None
-    final_solution = solution.group(0)
-    final_solution = final_solution.split("#### ")[1].replace(",", "")
-    return final_solution
+def extract_solution(solution_text):
+    """Extract the ground truth solution from the solution_text field."""
+    # The solution_text already contains the formatted conclusion
+    # Example: "(1) Zoey is a knave (2) Oliver is a knight"
+    return solution_text.strip()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_dir", default="~/data/gsm8k")
+    parser.add_argument("--local_dir", default="~/data/knights_and_knaves")
     parser.add_argument("--hdfs_dir", default=None)
+    parser.add_argument("--subset", default="2ppl", 
+                        choices=["2ppl", "3ppl", "4ppl", "5ppl", "6ppl", "7ppl", "8ppl"],
+                        help="Which subset to process (number of people in puzzles)")
 
     args = parser.parse_args()
 
-    data_source = "openai/gsm8k"
+    data_source = "K-and-K/knights-and-knaves"
 
-    dataset = datasets.load_dataset(data_source, "main")
+    print(f"Loading the {data_source} dataset (subset: {args.subset}) from huggingface...", flush=True)
 
-    train_dataset = dataset["train"]
-    test_dataset = dataset["test"]
+    train_dataset = datasets.load_dataset(data_source, "train", split=args.subset)
+    test_dataset = datasets.load_dataset(data_source, "test", split=args.subset)
+    print(f"Train dataset size: {len(train_dataset)}")
+    print(f"Test dataset size: {len(test_dataset)}")
 
-    instruction_following = 'Let\'s think step by step and output the final answer after "####".'
+    instruction_following = 'You must infer the identity of each character. At the end of your answer, you must clearly state the identity of each character by following the format:\n\nCONCLUSION:\n(1) ...\n(2) ...\n(3) ...'
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         def process_fn(example, idx):
-            question_raw = example.pop("question")
+            quiz_raw = example.pop("quiz")
 
-            question = question_raw + " " + instruction_following
+            question = quiz_raw + "\n\n" + instruction_following
 
-            answer_raw = example.pop("answer")
-            solution = extract_solution(answer_raw)
+            solution_text_raw = example.pop("solution_text")
+            solution = extract_solution(solution_text_raw)
             data = {
                 "data_source": data_source,
                 "prompt": [
@@ -65,13 +68,17 @@ if __name__ == "__main__":
                         "content": question,
                     }
                 ],
-                "ability": "math",
+                "ability": "logical_reasoning",
                 "reward_model": {"style": "rule", "ground_truth": solution},
                 "extra_info": {
                     "split": split,
                     "index": idx,
-                    "answer": answer_raw,
-                    "question": question_raw,
+                    "question": quiz_raw,
+                    "answer": solution_text_raw,
+                    # "quiz": quiz_raw,
+                    # "names": example.get("names", []),
+                    # "solution_details": example.get("solution", []),
+                    # "subset": args.subset,
                 },
             }
             return data
@@ -82,15 +89,16 @@ if __name__ == "__main__":
     test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True)
 
     # Print an example of the processed data
-    print(f"\nExample of processed GSM8K data:")
+    print(f"\nExample of processed Knights and Knaves data:")
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Test dataset size: {len(test_dataset)}")
     if len(test_dataset) > 0:
         example = test_dataset[0]
-        print(f"Question preview: {example['prompt'][0]['content']}...")
+        print(f"Question preview: {example['prompt'][0]['content'][:300]}...")
         print(f"Ground truth: {example['reward_model']['ground_truth']}")
         print(f"Data source: {example['data_source']}")
         print(f"Ability: {example['ability']}")
+        # print(f"Subset: {example['extra_info']['subset']}")
         print()
 
     local_dir = args.local_dir
@@ -102,4 +110,4 @@ if __name__ == "__main__":
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
 
-        copy(src=local_dir, dst=hdfs_dir)
+        copy(src=local_dir, dst=hdfs_dir) 

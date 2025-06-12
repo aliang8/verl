@@ -47,6 +47,22 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
 
         # from . import math_verify
         # res = math_verify.compute_score(solution_str, ground_truth)
+    elif data_source in ["HuggingFaceH4/MATH-500"]:
+        from . import math
+
+        res = math.compute_score(solution_str, ground_truth)
+    elif data_source in ["Idavidrein/gpqa"]:
+        from . import gpqa
+
+        res = gpqa.compute_score(solution_str, ground_truth)
+    elif data_source in ["K-and-K/knights-and-knaves"]:
+        from . import knights_and_knaves
+
+        res = knights_and_knaves.compute_score(solution_str, ground_truth)
+    elif data_source in ["dgslibisey/MuSiQue"]:
+        from . import musique
+
+        res = musique.compute_score(solution_str, ground_truth)
     elif data_source == "math_dapo" or data_source.startswith("aime"):
         from . import math_dapo
 

@@ -849,6 +849,8 @@ trainer:
   # Timeout (in seconds) for Ray worker to wait for registration
   ray_wait_register_center_timeout: 300
 
+  rollout_save_path: null
+
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
 
