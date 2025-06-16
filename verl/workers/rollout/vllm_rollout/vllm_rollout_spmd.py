@@ -26,6 +26,8 @@ When working with Megatron:
 - After inference, all the parameters that doesn't belong to this pp rank is freed.
 """
 
+import ast 
+import json
 import logging
 import os
 from contextlib import contextmanager
@@ -47,6 +49,24 @@ from verl.third_party.vllm import vllm_version
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
+
+# Additional imports for tool and MCP functionality
+import re
+import json
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from verl.utils.torch_functional import pad_sequence_to_length
+import asyncio
+import time
+from contextlib import AsyncExitStack
+
+# Conditional MCP imports (may not be available in all environments)
+try:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -414,11 +434,6 @@ class vLLMAsyncRollout:
         else:
             return self.inference_engine.execute_method(method, *args, **kwargs)
 
-import re
-import json
-import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from verl.utils.torch_functional import pad_sequence_to_length
 
 class vLLMRolloutWithTool(vLLMRollout):
     def __init__(self, model_path: str, config: DictConfig, tokenizer, model_hf_config, **kwargs):
@@ -680,18 +695,19 @@ class vLLMRolloutWithTool(vLLMRollout):
                             curr_inputs[idx] += self.gen_ids
                             result_mask_list[idx] += [0] * len(self.gen_ids)
 
-                # check if need to truncate, if yes, truncate, and remove from active; if no, update curr_max_tokens
+                # Update active indices and check length constraints
                 length_checked_active_indices = []
                 for idx in active_indices:
-                    assert len(curr_inputs[idx]) - len(init_inputs[idx]) == len(result_mask_list[idx]), f"curr_inputs: {len(curr_inputs[idx])}, init_inputs: {len(init_inputs[idx])}, result_mask_list: {len(result_mask_list[idx])}"
                     if len(curr_inputs[idx]) - len(init_inputs[idx]) >= self.config.response_length:
-                        curr_inputs[idx] = init_inputs[idx] \
-                            + curr_inputs[idx][len(init_inputs[idx]):len(init_inputs[idx])+self.config.response_length]
+                        # Truncate to response length
+                        curr_inputs[idx] = init_inputs[idx] + \
+                            curr_inputs[idx][len(init_inputs[idx]):len(init_inputs[idx])+self.config.response_length]
                         result_mask_list[idx] = result_mask_list[idx][:self.config.response_length]
                     else:
                         curr_max_tokens[idx] = self.config.response_length - len(curr_inputs[idx]) + len(init_inputs[idx])
                         if idx in new_active_indices:
                             length_checked_active_indices.append(idx)
+                
                 active_indices = length_checked_active_indices
 
             output_ids_list = []
@@ -733,13 +749,13 @@ class vLLMRolloutWithTool(vLLMRollout):
 
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
-        delta_position_id = delta_position_id.unsqueeze(0).repeat(batch_size, 1)
+        delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, 1)
 
         # TODO(sgm): fix position_ids on right_pad
         # prompt: left pad + response: right pad
         # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
         # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
-        response_position_ids = position_ids[:, -1:] + delta_position_id
+        response_position_ids = position_ids[..., -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
                 
         # concat attenion_mask for input and response
@@ -750,15 +766,484 @@ class vLLMRolloutWithTool(vLLMRollout):
         
         # all the tp ranks should contain the same data here. data in all ranks are valid
         batch = TensorDict({
+            "prompts": ori_input_ids,
+            "responses": response,
+            "input_ids": seq,  # here input_ids become the whole sentences
+            "rollout_log_probs": result_mask,  # we will recompute old log prob with actor
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+        }, batch_size=batch_size)
+
+        # free vllm cache engine
+        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
+            self.inference_engine.free_cache_engine()
+
+        return DataProto(batch=batch)
+
+
+class vLLMRolloutWithMCP(vLLMRollout):
+    """
+    vLLM Rollout with MCP (Model Context Protocol) integration.
+    
+    This class extends vLLMRollout to support batch calls to MCP servers
+    during the generation process, enabling retrieval-augmented generation
+    and other external tool integrations.
+    """
+    
+    def __init__(self, model_path: str, config: DictConfig, tokenizer, model_hf_config, **kwargs):
+        super().__init__(model_path, config, tokenizer, model_hf_config, **kwargs)
+        self.tokenizer = tokenizer
+        self.tp_rank = vllm_ps.get_tensor_model_parallel_rank()
+        
+        if not MCP_AVAILABLE:
+            raise ImportError("MCP (Model Context Protocol) is not available. Please install the mcp package.")
+        
+        # MCP server configuration
+        self.mcp_server_params = StdioServerParameters(
+            command=config.get("mcp_command", "python3"),
+            args=config.get("mcp_args", ["-m", "wikipedia_mcp"])
+        )
+        
+        # MCP tool configuration
+        self.mcp_batch_size = config.get("mcp_batch_size", 8)
+        self.mcp_timeout = config.get("mcp_timeout", 10.0)
+        
+        # MCP mode: "search_summary" or "direct_article"
+        self.mcp_mode = config.get("mcp_mode", "direct_article")
+        self.max_article_tokens = config.get("max_article_tokens", 2048)
+        
+        # Generation prompts
+        self.gen_str = "\n<|im_start|>assistant\n"
+        self.gen_ids = self.tokenizer.encode(self.gen_str)
+
+    async def create_mcp_session_and_query(self, query: str, limit: int = 1) -> Dict[str, Any]:
+        """Create a new MCP session and execute a multi-step Wikipedia query."""
+        exit_stack = AsyncExitStack()
+        start_time = time.time()
+        
+        logger.debug(f"[{time.strftime('%H:%M:%S')}] Starting MCP query for: {query}")
+        
+        # Create new server connection
+        stdio_transport = await exit_stack.enter_async_context(
+            stdio_client(self.mcp_server_params)
+        )
+        stdio, write = stdio_transport
+        session = await exit_stack.enter_async_context(
+            ClientSession(stdio, write)
+        )
+        
+        await session.initialize()
+        
+        if self.mcp_mode == "direct_article":
+            # Mode 1: Direct article retrieval
+            # First search to get the actual article title
+            search_args = {"query": query, "limit": 1}
+            search_result = await session.call_tool("search_wikipedia", search_args)
+            
+            # Extract the top result title
+            search_data = search_result.content[0]
+            article_title = json.loads(search_data.text)["results"][0]["title"]
+            
+            # Now get the full article content
+            article_args = {"title": article_title}
+            article_result = await session.call_tool("get_article", article_args)
+            
+            article_data = article_result.content[0]
+            article_content = json.loads(article_data.text)["text"]
+            article_tokens = self.tokenizer.encode(article_content)
+            
+            # if len(article_tokens) > self.max_article_tokens:
+            #     truncated_tokens = article_tokens[:self.max_article_tokens]
+            #     truncated_text = self.tokenizer.decode(truncated_tokens)
+            # else:
+            truncated_text = article_content
+            
+            combined_result = {
+                "mode": "direct_article",
+                "search_query": query,
+                "article_title": article_title,
+                "article_content": truncated_text,
+                "token_count": min(len(article_tokens), self.max_article_tokens),
+                "was_truncated": len(article_tokens) > self.max_article_tokens
+            }
+            
+        else:
+            # Mode 2: Search + Summary + Key Facts (default)
+            # Step 1: Search Wikipedia
+            search_args = {"query": query, "limit": limit}
+            search_result = await session.call_tool("search_wikipedia", search_args)
+            
+            # Extract the top result title
+            search_data = search_result.content[0]
+            article_title = json.loads(search_data.text)["results"][0]["title"]
+            
+            # Step 2: Get summary
+            summary_args = {"title": article_title}
+            summary_result = await session.call_tool("get_summary", summary_args)
+            
+            summary_data = summary_result.content[0] 
+            summary = json.loads(summary_data.text)["summary"]
+            
+            # Step 3: Extract key facts
+            key_facts_args = {"title": article_title, "count": 5}
+            key_facts_result = await session.call_tool("extract_key_facts", key_facts_args)
+            
+            key_facts_data = key_facts_result.content[0]
+            # this is a list
+            key_facts = json.loads(key_facts_data.text)["facts"]
+            
+            # Combine all results
+            combined_result = {
+                "mode": "search_summary",
+                "search_result": search_result.content,
+                "article_title": article_title,
+                "summary": summary,
+                "key_facts": key_facts
+            }
+        
+        end_time = time.time()
+        duration = end_time - start_time
+        logger.debug(f"[{time.strftime('%H:%M:%S')}] Completed MCP query for: {query} (took {duration:.2f}s)")
+        
+        await exit_stack.aclose()
+        
+        return {
+            "query": query,
+            "success": True,
+            "result": combined_result,
+            "error": None,
+            "duration": duration,
+        }
+
+    async def batch_mcp_query(self, queries: List[str], limit: int = 5) -> List[Dict[str, Any]]:
+        """Execute multiple MCP queries with true parallelism."""
+        if not queries:
+            return []
+        
+        logger.info(f"[{time.strftime('%H:%M:%S')}] Executing {len(queries)} MCP queries in parallel...")
+        start_total = time.time()
+        
+        # Create tasks for parallel execution
+        tasks = [self.create_mcp_session_and_query(query, limit) for query in queries]
+        
+        # Execute with timeout
+        results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=self.mcp_timeout
+        )
+        
+        end_total = time.time()
+        total_duration = end_total - start_total
+        logger.info(f"[{time.strftime('%H:%M:%S')}] All MCP queries completed in {total_duration:.2f}s")
+        
+        # Process results and handle exceptions
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                processed_results.append({
+                    "query": queries[i],
+                    "success": False,
+                    "result": None,
+                    "error": str(result),
+                    "duration": 0,
+                })
+            else:
+                processed_results.append(result)
+        
+        return processed_results
+
+    def extract_mcp_queries(self, output_str: str) -> List[str]:
+        """Extract MCP queries from model output using regex patterns."""
+        patterns = [
+            r'<search>([^<]+)</search>',
+        ]
+        
+        queries = []
+        for pattern in patterns:
+            matches = re.findall(pattern, output_str, re.IGNORECASE)
+            queries.extend([match.strip() for match in matches])
+        
+        return list(set(queries))  # Remove duplicates
+
+    def format_mcp_response(self, query: str, mcp_result: Dict[str, Any]) -> str:
+        """Format MCP response for inclusion in the generation."""
+        if mcp_result["success"]:
+            result_data = mcp_result["result"]
+            mode = result_data.get("mode", "search_summary")
+            
+            if mode == "direct_article":
+                # Format direct article response
+                search_query = result_data.get('search_query', query)
+                article_title = result_data.get('article_title', 'Unknown')
+                article_content = result_data.get('article_content', 'No content available')
+                token_count = result_data.get('token_count', 0)
+                was_truncated = result_data.get('was_truncated', False)
+                
+                formatted_content = f"Search: {search_query}\nArticle: {article_title}\n\n"
+                formatted_content += f"Content:\n{article_content}"
+                
+            else:
+                # Format search+summary response
+                formatted_content = f"Article: {result_data.get('article_title', 'Unknown')}\n\n"
+                
+                # Add summary
+                summary = result_data.get('summary', 'No summary available')
+                if isinstance(summary, dict):
+                    summary = summary.get('summary', str(summary))
+                formatted_content += f"Summary: {summary}\n\n"
+                
+                # Add key facts
+                key_facts = result_data.get('key_facts', 'No key facts available')
+                if isinstance(key_facts, dict):
+                    facts_list = key_facts.get('facts', [])
+                    if facts_list:
+                        formatted_content += "Key Facts:\n"
+                        for i, fact in enumerate(facts_list[:5], 1):
+                            formatted_content += f"{i}. {fact}\n"
+                    else:
+                        formatted_content += f"Key Facts: {str(key_facts)}\n"
+                elif isinstance(key_facts, list):
+                    formatted_content += "Key Facts:\n"
+                    for i, fact in enumerate(key_facts[:5], 1):
+                        formatted_content += f"{i}. {fact}\n"
+                else:
+                    formatted_content += f"Key Facts: {str(key_facts)}\n"
+            
+            # Truncate if too long
+            if len(formatted_content) > 3000:
+                formatted_content = formatted_content[:3000] + "..."
+            
+            return f"<result>\n{formatted_content}</result>\n"
+        else:
+            return f"<error>{mcp_result['error']}</error>\n"
+
+    @torch.no_grad()
+    def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+        """Generate sequences with MCP integration."""
+        # Rebuild vllm cache engine
+        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
+            self.inference_engine.init_cache_engine()
+
+        ori_input_ids = prompts.batch['input_ids']  # (bs, prompt_length)
+        attention_mask = prompts.batch['attention_mask']
+        position_ids = prompts.batch['position_ids']
+        eos_token_id = prompts.meta_info['eos_token_id']
+        batch_size = ori_input_ids.size(0)
+
+        # Parse input IDs
+        idx_list = []
+        for i in range(batch_size):
+            idx_list.append(_pre_process_inputs(self.pad_token_id, ori_input_ids[i]))
+
+        # Set up sampling parameters
+        do_sample = prompts.meta_info.get('do_sample', True)
+        is_validate = prompts.meta_info.get('validate', False)
+        if not do_sample:
+            kwargs = {
+                'best_of': 1,
+                'top_p': 1.0,
+                'top_k': -1,
+                'min_p': 0.0,
+                'temperature': 0,
+                'n': 1
+            }
+        elif is_validate:
+            kwargs = {
+                'top_k': self.config.val_kwargs.top_k,
+                'top_p': self.config.val_kwargs.top_p,
+                'temperature': self.config.val_kwargs.temperature,
+                'n': 1,
+            }
+
+        kwargs.update(
+            {"stop": ["</search>"], "detokenize": True}
+        )
+
+        with self.update_sampling_params(**kwargs):
+            # Prepare inputs for generation
+            curr_inputs = []
+            for input_ids in idx_list:
+                for _ in range(self.sampling_params.n):
+                    curr_inputs.append(input_ids.copy())
+            init_inputs = [ids.copy() for ids in curr_inputs]
+
+            # Track generation state
+            curr_max_tokens = [self.sampling_params.max_tokens] * len(curr_inputs)
+            active_indices = list(range(len(curr_inputs)))
+            result_mask_list = [[] for _ in range(len(curr_inputs))]
+
+            # Multi-turn generation with MCP integration
+            for step in range(self.config.get("max_turns", 3)):
+                if len(active_indices) == 0:
+                    break
+
+                # Generate for active inputs
+                active_inputs = [curr_inputs[i] for i in active_indices]
+                active_max_tokens = [curr_max_tokens[i] for i in active_indices]
+                
+                with self.update_sampling_params(
+                    n=1,
+                    max_tokens=min(512, max(active_max_tokens)),
+                    top_p=0.95,
+                    **kwargs
+                ):
+                    vllm_inputs = [{'prompt_token_ids': raw_prompt_ids} for raw_prompt_ids in active_inputs]
+                    outputs = self.inference_engine.generate(
+                        prompts=vllm_inputs,
+                        sampling_params=self.sampling_params,
+                        use_tqdm=False
+                    )
+
+                # Collect MCP queries from outputs
+                mcp_queries = []
+                query_indices = []
+                
+                new_active_indices = []
+                
+                for i, idx in enumerate(active_indices):
+                    output_ids = outputs[i].outputs[0].token_ids
+                    finish_reason = outputs[i].outputs[0].finish_reason
+                    
+                    # Add generated tokens
+                    curr_inputs[idx] += output_ids
+                    result_mask_list[idx] += [1] * len(output_ids)
+                    
+                    # Extract MCP queries from the output
+                    output_str = self.tokenizer.decode(output_ids)
+                    queries = self.extract_mcp_queries(output_str)
+                    
+                    if queries and finish_reason != 'length':
+                        mcp_queries.extend(queries)
+                        query_indices.extend([idx] * len(queries))
+                        new_active_indices.append(idx)
+
+                # Execute MCP queries in batch (only on rank 0)
+                if mcp_queries:
+                    if self.tp_rank == 0:
+                        # Run MCP queries asynchronously
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        mcp_results = loop.run_until_complete(
+                            self.batch_mcp_query(mcp_queries, limit=1)
+                        )
+                        loop.close()
+                        
+                        broadcast_data = {
+                            'mcp_queries': mcp_queries,
+                            'query_indices': query_indices,
+                            'mcp_results': mcp_results
+                        }
+                    else:
+                        broadcast_data = None
+                    
+                    # Broadcast results to all ranks
+                    broadcast_data = vllm_ps._TP.broadcast_object(broadcast_data, src=0)
+                    
+                    if broadcast_data is not None:
+                        # Process MCP results
+                        query_to_result = {}
+                        for query, result in zip(broadcast_data['mcp_queries'], broadcast_data['mcp_results']):
+                            if query not in query_to_result:  # Avoid duplicates
+                                query_to_result[query] = result
+                        
+                        # Add MCP responses to generation
+                        for idx in set(broadcast_data['query_indices']):
+                            if idx in new_active_indices:
+                                mcp_response_str = ""
+                                for query, result in query_to_result.items():
+                                    mcp_response_str += self.format_mcp_response(query, result)
+                                
+                                # Add MCP responses and continue generation prompt
+                                mcp_response_str += self.gen_str
+                                mcp_response_ids = self.tokenizer.encode(mcp_response_str)
+                                
+                                curr_inputs[idx] += mcp_response_ids
+                                result_mask_list[idx] += [0] * len(mcp_response_ids)
+
+                # Update active indices and check length constraints
+                length_checked_active_indices = []
+                for idx in active_indices:
+                    if len(curr_inputs[idx]) - len(init_inputs[idx]) >= self.config.response_length:
+                        # Truncate to response length
+                        curr_inputs[idx] = init_inputs[idx] + \
+                            curr_inputs[idx][len(init_inputs[idx]):len(init_inputs[idx])+self.config.response_length]
+                        result_mask_list[idx] = result_mask_list[idx][:self.config.response_length]
+                    else:
+                        curr_max_tokens[idx] = self.config.response_length - len(curr_inputs[idx]) + len(init_inputs[idx])
+                        if idx in new_active_indices:
+                            length_checked_active_indices.append(idx)
+                
+                active_indices = length_checked_active_indices
+
+            # Collect final outputs
+            output_ids_list = []
+            for i, input_ids in enumerate(idx_list):
+                for j in range(self.sampling_params.n):
+                    idx = i * self.sampling_params.n + j
+                    input_len = len(input_ids)
+                    output_ids_list.append(curr_inputs[idx][input_len:])
+
+        # Process outputs into tensors
+        response_attention_mask_list = []
+        response_list = []
+        result_mask_list_padded = []
+        
+        for output_ids, result_mask in zip(output_ids_list, result_mask_list):
+            # Convert to tensors
+            response = torch.tensor(output_ids, device=ori_input_ids.device)
+            result_mask = torch.tensor(result_mask, device=ori_input_ids.device)
+            
+            # Create attention mask
+            response_attention_mask = torch.ones_like(response, dtype=torch.int64)
+            response_attention_mask = pad_sequence_to_length(response_attention_mask, self.config.response_length, 0)
+            response_attention_mask_list.append(response_attention_mask)
+            
+            # Pad response
+            response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
+            response_list.append(response)
+            
+            # Pad result mask
+            result_mask = pad_sequence_to_length(result_mask, self.config.response_length, 0)
+            result_mask_list_padded.append(result_mask)
+        
+        response_attention_mask = torch.stack(response_attention_mask_list, dim=0)
+        response = torch.stack(response_list, dim=0)
+        result_mask = torch.stack(result_mask_list_padded, dim=0)
+
+        # Handle multiple samples
+        if self.config.n > 1 and do_sample:
+            ori_input_ids = ori_input_ids.repeat_interleave(self.config.n, dim=0)
+            attention_mask = attention_mask.repeat_interleave(self.config.n, dim=0)
+            position_ids = position_ids.repeat_interleave(self.config.n, dim=0)
+            batch_size = batch_size * self.config.n
+
+        # Concatenate input and response
+        seq = torch.cat([ori_input_ids, response], dim=-1)
+
+        # Update position IDs
+        response_length = response.size(1)
+        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
+        delta_position_id = delta_position_id.unsqueeze(0).repeat(batch_size, 1)
+        response_position_ids = position_ids[:, -1:] + delta_position_id
+        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+
+        # Update attention mask
+        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+
+        # Create loss mask (0 for MCP results, 1 for model-generated content)
+        loss_mask = result_mask * response_attention_mask
+
+        # Create final batch
+        batch = TensorDict({
             'prompts': ori_input_ids,
             'responses': response,
-            'input_ids': seq,  # here input_ids become the whole sentences
+            'input_ids': seq,
             'attention_mask': attention_mask,
             'loss_mask': loss_mask,
             'position_ids': position_ids
         }, batch_size=batch_size)
 
-        # free vllm cache engine
+        # Free vllm cache engine
         if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
             self.inference_engine.free_cache_engine()
 
