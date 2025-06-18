@@ -123,17 +123,6 @@ if __name__ == "__main__":
                     if dataset_id.startswith(f"{hop_type}_"):
                         extra_info["hop_type"] = hop_type
                         break
-            if "paragraphs" in example:
-                extra_info["paragraphs"] = example.pop("paragraphs")
-            if "question_decomposition" in example:
-                extra_info["question_decomposition"] = example.pop("question_decomposition")
-            if "answer_aliases" in example:
-                extra_info["answer_aliases"] = example.pop("answer_aliases")
-            if "answerable" in example:
-                extra_info["answerable"] = example.pop("answerable")
-            
-            # Add any remaining fields to extra_info
-            extra_info.update(example)
 
             data = {
                 "data_source": data_source,

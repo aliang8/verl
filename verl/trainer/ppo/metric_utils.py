@@ -424,3 +424,37 @@ def process_validation_metrics(data_sources: list[str], sample_inputs: list[str]
                 data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(prompt_vals)
 
     return data_src2var2metric2val
+
+
+def process_training_reward_metrics(data_sources: list[str], reward_extra_infos_dict: dict[str, list]) -> dict[str, float]:
+    """
+    Process training reward metrics by data source for simple plotting.
+    
+    Args:
+        data_sources: List of data source identifiers for each sample
+        reward_extra_infos_dict: Dictionary mapping variable names to lists of values
+        
+    Returns:
+        Dictionary with format_score and content_score metrics per data source
+    """
+    if not reward_extra_infos_dict:
+        return {}
+    
+    # Group rewards by data source
+    data_src_to_indices = defaultdict(list)
+    for idx, data_source in enumerate(data_sources):
+        data_src_to_indices[data_source].append(idx)
+    
+    metrics = {}
+    
+    # Process format_score and content_score for each data source
+    for metric_name in ["format_score", "content_score"]:
+        if metric_name in reward_extra_infos_dict:
+            metric_values = reward_extra_infos_dict[metric_name]
+            
+            for data_source, indices in data_src_to_indices.items():
+                if indices and len(metric_values) > max(indices):  # Safety check
+                    data_source_values = [metric_values[i] for i in indices]
+                    metrics[f"rewards/{data_source}/{metric_name}"] = np.mean(data_source_values)
+    
+    return metrics

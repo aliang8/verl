@@ -48,6 +48,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_throughout_metrics,
     compute_timing_metrics,
     process_validation_metrics,
+    process_training_reward_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.utils.checkpoint.checkpoint_manager import BaseCheckpointManager, find_latest_ckpt_path
@@ -991,6 +992,16 @@ class RayPPOTrainer:
                             future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                    
+                    # log some reward metrics
+                    if "format_score" in reward_extra_infos_dict:    
+                        # Add data source breakdown for format/content rewards
+                        if hasattr(batch, 'non_tensor_batch') and 'data_source' in batch.non_tensor_batch:
+                            data_sources = batch.non_tensor_batch['data_source']
+                            if isinstance(data_sources, np.ndarray):
+                                data_sources = data_sources.tolist()
+                            training_reward_metrics = process_training_reward_metrics(data_sources, reward_extra_infos_dict)
+                            metrics.update(training_reward_metrics)
 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
