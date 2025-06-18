@@ -45,29 +45,63 @@ def extract_final_answer(answer_text):
     return answer.strip()
 
 
+def filter_by_hops(dataset, hop_types):
+    """
+    Filter dataset to include only questions with specified hop counts.
+    Args:
+        dataset: The dataset to filter
+        hop_types: List of hop types to include (e.g., ["3hop", "4hop"])
+    """
+    def should_include(example):
+        if "id" not in example:
+            return False
+        
+        dataset_id = example["id"]
+        for hop_type in hop_types:
+            if dataset_id.startswith(f"{hop_type}"):
+                return True
+        return False
+    
+    return dataset.filter(should_include)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_dir", default="~/data/musique")
     parser.add_argument("--hdfs_dir", default=None)
+    parser.add_argument("--hop_types", nargs='+', default=["3hop", "4hop"],
+                        choices=["2hop", "3hop", "4hop"],
+                        help="Which hop types to include (e.g., 3hop 4hop)")
 
     args = parser.parse_args()
 
     data_source = "dgslibisey/MuSiQue"
+
+    print(f"Loading the {data_source} dataset from huggingface...", flush=True)
 
     # Load the dataset - MuSiQue has train and validation splits
     dataset = datasets.load_dataset(data_source)
 
     train_dataset = dataset["train"]
     test_dataset = dataset["validation"]  # MuSiQue uses "validation" as test split
+    
+    print(f"Original train dataset size: {len(train_dataset)}")
+    print(f"Original test dataset size: {len(test_dataset)}")
 
-    instruction_following = 'Please read the following context carefully and answer the question. Think step by step and provide your final answer.'
+    # Filter datasets by hop types
+    print(f"Filtering for hop types: {args.hop_types}")
+    train_dataset = filter_by_hops(train_dataset, args.hop_types)
+    test_dataset = filter_by_hops(test_dataset, args.hop_types)
+    
+    print(f"Filtered train dataset size: {len(train_dataset)}")
+    print(f"Filtered test dataset size: {len(test_dataset)}")
 
     # Add a row to each data item that represents a unique id
     def make_map_fn(split):
         def process_fn(example, idx):
             question_raw = example.pop("question")
 
-            question = question_raw + " " + instruction_following
+            question = question_raw
 
             answer_raw = example.pop("answer")
             solution = extract_final_answer(answer_raw)
@@ -82,7 +116,13 @@ if __name__ == "__main__":
             
             # Add other available fields from the dataset
             if "id" in example:
-                extra_info["dataset_id"] = example.pop("id")
+                dataset_id = example.pop("id")
+                extra_info["dataset_id"] = dataset_id
+                # Extract hop type from id
+                for hop_type in ["2hop", "3hop", "4hop"]:
+                    if dataset_id.startswith(f"{hop_type}_"):
+                        extra_info["hop_type"] = hop_type
+                        break
             if "paragraphs" in example:
                 extra_info["paragraphs"] = example.pop("paragraphs")
             if "question_decomposition" in example:
@@ -128,6 +168,8 @@ if __name__ == "__main__":
         # Show some extra info if available
         if "dataset_id" in example['extra_info']:
             print(f"Dataset ID: {example['extra_info']['dataset_id']}")
+        if "hop_type" in example['extra_info']:
+            print(f"Hop type: {example['extra_info']['hop_type']}")
         if "answerable" in example['extra_info']:
             print(f"Answerable: {example['extra_info']['answerable']}")
         print()
