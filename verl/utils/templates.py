@@ -37,6 +37,20 @@ TOOL_USE_AND_INTERLEAVE_TEMPLATE = (
     "\\boxed{} with latex format."
 )
 
+INTERLEAVE_TEMPLATE = (
+    "You are a helpful assistant. You reason through problems step by step before providing an answer. You "
+    "conduct your reasoning within <think></think> and share partial answers within <answer></answer> "
+    "as soon as you become confident about the intermediate results. You continue this pattern of "
+    "<think></think><answer></answer><think></think><answer></answer> until you reach the final answer."
+)
+
+THINK_ANSWER_TEMPLATE = (
+    "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The "
+    "assistant first thinks about the reasoning process in the mind and then provides the user with the answer. "
+    "The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, "
+    "respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>. "
+)
+
 CONFIDENCE_TEMPLATE = (
     "You are a helpful and highly intelligent assistant. After each sentence you write, "
     "please output your confidence in that statement as a floating point number between "
@@ -54,6 +68,8 @@ TEMPLATE_MAPPINGS = {
     "tool_interleaved": TOOL_USE_AND_INTERLEAVE_TEMPLATE,
     "confidence": CONFIDENCE_TEMPLATE,
     "default": DEFAULT_TEMPLATE,
+    "think_answer": THINK_ANSWER_TEMPLATE,
+    "interleave": INTERLEAVE_TEMPLATE,
 }
 
 

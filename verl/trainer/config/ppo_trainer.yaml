@@ -353,6 +353,9 @@ actor_rollout_ref:
     # typically the same as data max response length
     response_length: ${data.max_response_length}
 
+    # template type
+    template_type: null
+
     # for vllm rollout
     # Rollout model parameters type. Align with actor model's FSDP/Megatron type.
     dtype: bfloat16

@@ -83,17 +83,13 @@ class TaskRunner:
             original_template = None
         
         # Get template type from config (default to "tool" if not specified)
-        template_type = config.get("template_type", "tool")
+        template_type = config.actor_rollout_ref.rollout.get("template_type", "tool")
         print(f"\nUsing template type: {template_type}")
         
         # Get the system template content
         system_template = get_system_template(template_type)
         
-        # Create a modified chat template that automatically injects our system message
-        # This template checks if there's already a system message, and if not, adds ours
-        if original_template:
-            pass
-        else:
+        if template_type is not None:
             # Fallback template for tokenizers without chat templates
             new_chat_template = (
                 "{% if messages[0]['role'] != 'system' %}"
