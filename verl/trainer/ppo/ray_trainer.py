@@ -531,11 +531,10 @@ class RayPPOTrainer:
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path):
-        """Dump rollout/validation samples as JSONL."""
+    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path, data_sources=None):
+        """Dump rollout/validation samples as JSONL, optionally separated by data source."""
         os.makedirs(dump_path, exist_ok=True)
-        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
-
+        
         n = len(inputs)
         base_data = {
             "input": inputs,
@@ -548,12 +547,55 @@ class RayPPOTrainer:
             if len(v) == n:
                 base_data[k] = v
 
-        with open(filename, "w") as f:
+        # Add data sources if provided
+        if data_sources is not None:
+            if len(data_sources) == n:
+                base_data["data_source"] = data_sources
+            else:
+                print(f"Warning: data_sources length ({len(data_sources)}) doesn't match inputs length ({n})")
+                data_sources = None
+
+        # If no data sources provided or they don't match, dump everything to one file
+        if data_sources is None:
+            filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
+            with open(filename, "w") as f:
+                for i in range(n):
+                    entry = {k: v[i] for k, v in base_data.items()}
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            print(f"Dumped generations to {filename}")
+            return
+
+        # Group entries by data source
+        from collections import defaultdict
+        data_source_groups = defaultdict(list)
+        
+        for i in range(n):
+            data_source = data_sources[i] if isinstance(data_sources[i], str) else str(data_sources[i])
+            data_source_groups[data_source].append(i)
+
+        # Create separate files for each data source
+        for data_source, indices in data_source_groups.items():
+            # Sanitize data source name for filename
+            safe_data_source = "".join(c for c in data_source if c.isalnum() or c in ('-', '_')).rstrip()
+            if not safe_data_source:
+                safe_data_source = "unknown"
+            
+            filename = os.path.join(dump_path, f"{self.global_steps}_{safe_data_source}.jsonl")
+            
+            with open(filename, "w") as f:
+                for i in indices:
+                    entry = {k: v[i] for k, v in base_data.items()}
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            
+            print(f"Dumped {len(indices)} generations for '{data_source}' to {filename}")
+
+        # Also create a combined file with all data sources
+        combined_filename = os.path.join(dump_path, f"{self.global_steps}_all.jsonl")
+        with open(combined_filename, "w") as f:
             for i in range(n):
                 entry = {k: v[i] for k, v in base_data.items()}
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-        print(f"Dumped generations to {filename}")
+        print(f"Dumped combined generations to {combined_filename}")
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -664,12 +706,21 @@ class RayPPOTrainer:
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
+            # Flatten data_source_lst for passing to _dump_generations
+            flattened_data_sources = []
+            for ds_batch in data_source_lst:
+                if isinstance(ds_batch, (list, tuple, np.ndarray)):
+                    flattened_data_sources.extend(ds_batch)
+                else:
+                    flattened_data_sources.append(ds_batch)
+            
             self._dump_generations(
                 inputs=sample_inputs,
                 outputs=sample_outputs,
                 scores=sample_scores,
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=val_data_dir,
+                data_sources=flattened_data_sources,
             )
 
         for key_info, lst in reward_extra_infos_dict.items():
@@ -994,7 +1045,7 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
                     
                     # log some reward metrics
-                    if "format_score" in reward_extra_infos_dict:    
+                    if "format_score" in reward_extra_infos_dict:
                         # Add data source breakdown for format/content rewards
                         if hasattr(batch, 'non_tensor_batch') and 'data_source' in batch.non_tensor_batch:
                             data_sources = batch.non_tensor_batch['data_source']
@@ -1002,7 +1053,7 @@ class RayPPOTrainer:
                                 data_sources = data_sources.tolist()
                             training_reward_metrics = process_training_reward_metrics(data_sources, reward_extra_infos_dict)
                             metrics.update(training_reward_metrics)
-
+                    
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
@@ -1116,6 +1167,7 @@ class RayPPOTrainer:
                                 scores=scores,
                                 reward_extra_infos_dict=reward_extra_infos_dict,
                                 dump_path=rollout_data_dir,
+                                data_sources=batch.non_tensor_batch.get("data_source", None),
                             )
 
                     # validate
