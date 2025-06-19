@@ -638,6 +638,7 @@ reward_model:
   reward_kwargs:
     enable_format_reward: False
     format_reward_weight: 0.1
+    enable_reward_shaping: True
 
   # model config for reward scoring
   model:

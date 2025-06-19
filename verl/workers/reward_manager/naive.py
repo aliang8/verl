@@ -27,7 +27,7 @@ from verl.trainer.ppo.reward_fns import format_check_reward
 class NaiveRewardManager:
     """The reward manager."""
 
-    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source", enable_format_reward=False, format_reward_weight=0.1) -> None:
+    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source", enable_format_reward=False, format_reward_weight=0.1, enable_reward_shaping=False) -> None:
         """
         Initialize the NaiveRewardManager instance.
 
@@ -38,6 +38,7 @@ class NaiveRewardManager:
             reward_fn_key: The key used to access the data source in the non-tensor batch data. Defaults to "data_source".
             enable_format_reward: Whether to enable format reward checking. Defaults to False.
             format_reward_weight: Weight for the format reward component. Defaults to 0.1.
+            enable_reward_shaping: Whether to enable reward shaping (1->2, 0->-1.5). Defaults to False.
         """
         self.tokenizer = tokenizer  # Store the tokenizer for decoding token IDs
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
@@ -45,6 +46,28 @@ class NaiveRewardManager:
         self.reward_fn_key = reward_fn_key  # Store the key for accessing the data source
         self.enable_format_reward = enable_format_reward
         self.format_reward_weight = format_reward_weight
+        self.enable_reward_shaping = enable_reward_shaping
+
+    def _apply_reward_shaping(self, score):
+        """
+        Apply reward shaping transformation: 1 -> 2, 0 -> -1.5
+        
+        Args:
+            score: The original score value
+            
+        Returns:
+            The transformed score
+        """
+        if not self.enable_reward_shaping:
+            return score
+            
+        if score == 1.0:
+            return 2.0
+        elif score == 0.0:
+            return -1.5
+        else:
+            # For other values, keep them as is or you could define other transformations
+            return score
 
     def __call__(self, data: DataProto, return_dict=False):
         """We will expand this function gradually based on the available datasets"""
@@ -101,6 +124,13 @@ class NaiveRewardManager:
                 for key, value in score.items():
                     reward_extra_info[key].append(value)
                 
+                # Apply reward shaping if enabled
+                original_reward = reward
+                if self.enable_reward_shaping:
+                    reward = self._apply_reward_shaping(reward)
+                    reward_extra_info["original_score"].append(original_reward)
+                    reward_extra_info["shaped_score"].append(reward)
+                
                 # Add format reward if enabled
                 if self.enable_format_reward:
                     reward_extra_info["format_score"].append(format_score)
@@ -109,8 +139,16 @@ class NaiveRewardManager:
                     reward_extra_info["combined_score"].append(reward)
             else:
                 reward = score
+                
+                # Apply reward shaping if enabled
+                original_reward = reward
+                if self.enable_reward_shaping:
+                    reward = self._apply_reward_shaping(reward)
+                    reward_extra_info["original_score"].append(original_reward)
+                    reward_extra_info["shaped_score"].append(reward)
+                
                 if self.enable_format_reward:
-                    reward_extra_info["content_score"].append(score)
+                    reward_extra_info["content_score"].append(reward)
                     reward_extra_info["format_score"].append(format_score)
                     # Combine scores
                     reward = (1 - self.format_reward_weight) * reward + self.format_reward_weight * format_score
@@ -131,6 +169,10 @@ class NaiveRewardManager:
                         print(f"[{key}]", value)
                 else:
                     print("[content_score]", score)
+                
+                if self.enable_reward_shaping:
+                    print("[original_score]", original_reward)
+                    print("[shaped_score]", reward if not self.enable_format_reward else reward_extra_info["shaped_score"][-1])
                 
                 if self.enable_format_reward:
                     print("[format_score]", format_score)
