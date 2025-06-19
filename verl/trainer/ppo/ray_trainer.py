@@ -75,6 +75,7 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    AutoRater = 7
 
 
 @dataclass
@@ -786,6 +787,13 @@ class RayPPOTrainer:
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
 
+        # create AutoRater if configured
+        self.use_autorater = Role.AutoRater in self.role_worker_mapping
+        if self.use_autorater:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.AutoRater)
+            autorater_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.AutoRater], config=self.config.get("autorater", {}))
+            self.resource_pool_to_cls[resource_pool]["autorater"] = autorater_cls
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -813,6 +821,11 @@ class RayPPOTrainer:
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
+
+        # Initialize AutoRater worker group if configured
+        if self.use_autorater:
+            self.autorater_wg = all_wg["autorater"]
+            self.autorater_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]

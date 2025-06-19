@@ -64,13 +64,14 @@ def exact_match_score(prediction, ground_truth):
     return normalize_answer(prediction) == normalize_answer(ground_truth)
 
 
-def extract_solution(response, strict=True):
+def extract_solution(response, method="strict"):
     """
     Extract the answer from the model's response.
     
     Args:
         response: The model's response text
-        strict: If True, use strict patterns; if False, use flexible patterns
+        method: If "strict", prioritize #### format and require specific patterns.
+                If "flexible", use broader patterns as fallback.
         
     Returns:
         Extracted answer string or None if not found
@@ -80,39 +81,42 @@ def extract_solution(response, strict=True):
     
     response = response.strip()
     
-    if strict:
-        # Look for answers after specific markers
-        patterns = [
-            r"(?:final answer|answer|conclusion):\s*(.+?)(?:\n|$)",
-            r"####\s*(.+?)(?:\n|$)",  # GSM8K style
-            r"the answer is\s*(.+?)(?:\n|\.|\n|$)",
-        ]
+    if method == "strict":
+        # Prioritize GSM8K style #### format (as per instruction following requirement)
+        gsm8k_pattern = r"####\s*(.+?)(?:\n|$)"
+        match = re.search(gsm8k_pattern, response, re.DOTALL)
+        if match:
+            answer = match.group(1).strip()
+            # Clean up common endings
+            answer = re.sub(r'\.$', '', answer)
+            return answer
         
-        for pattern in patterns:
-            match = re.search(pattern, response, re.IGNORECASE | re.DOTALL)
-            if match:
-                answer = match.group(1).strip()
-                # Clean up common endings
-                answer = re.sub(r'\.$', '', answer)
-                return answer
-    else:
-        # More flexible extraction patterns
+        # If no #### format found, return None for strict mode
+        # This enforces the instruction following format requirement
+        return None
+        
+    else:  # flexible mode
+        # First try GSM8K style #### format
+        gsm8k_pattern = r"####\s*(.+?)(?:\n|$)"
+        match = re.search(gsm8k_pattern, response, re.DOTALL)
+        if match:
+            answer = match.group(1).strip()
+            answer = re.sub(r'\.$', '', answer)
+            return answer
+        
+        # Fallback to other patterns for flexible extraction
         patterns = [
             # Look for answers after various markers
             r"(?:final answer|answer|conclusion|result|solution):\s*(.+?)(?:\n|$)",
-            r"####\s*(.+?)(?:\n|$)",
             r"the answer is\s*(.+?)(?:\n|\.|\n|$)",
             r"therefore,?\s*(.+?)(?:\n|\.|\n|$)",
             r"so,?\s*(.+?)(?:\n|\.|\n|$)",
             r"thus,?\s*(.+?)(?:\n|\.|\n|$)",
             r"hence,?\s*(.+?)(?:\n|\.|\n|$)",
-            
-            # Look for standalone answers (last line that's not too long)
-            r"^(.{1,100})$",  # Last line under 100 chars
         ]
         
         # Try patterns in order
-        for pattern in patterns[:-1]:  # Skip the last line pattern for now
+        for pattern in patterns:
             match = re.search(pattern, response, re.IGNORECASE | re.DOTALL)
             if match:
                 answer = match.group(1).strip()
@@ -121,7 +125,7 @@ def extract_solution(response, strict=True):
                 if answer and len(answer) <= 200:  # Reasonable length check
                     return answer
         
-        # Try the last line pattern
+        # Try the last line pattern as final fallback
         lines = response.strip().split('\n')
         if lines:
             last_line = lines[-1].strip()
@@ -133,26 +137,28 @@ def extract_solution(response, strict=True):
     return None
 
 
-def compute_score(response: str, ground_truth: Union[str, List[str]], format_score: float = 0.1):
+def compute_score(response: str, ground_truth: Union[str, List[str]], method: str = "strict", format_score: float = 0.0, score: float = 1.0):
     """
-    Compute the score for MuSiQue multi-hop question answering.
+    Compute the score for MuSiQue multi-hop question answering with GSM8K-style format enforcement.
     
     Args:
         response: The model's response
         ground_truth: The correct answer (string or list of possible answers)
-        format_score: Score given for wrong format/extraction failure (default: 0.1)
+        method: "strict" (requires #### format) or "flexible" (allows fallback patterns)
+        format_score: Score given for wrong format/extraction failure (default: 0.0)
+        score: Score given for correct answer (default: 1.0)
         
     Returns:
-        Score between 0.0 and 1.0
+        Score between 0.0 and score value
     """
     # Extract the predicted answer from the response
-    predicted_answer = extract_solution(response, strict=True)
+    predicted_answer = extract_solution(response, method=method)
     
-    # If strict extraction fails, try flexible extraction
-    if predicted_answer is None:
-        predicted_answer = extract_solution(response, strict=False)
+    # If strict mode and no #### format found, return format_score (like GSM8K)
+    if method == "strict" and predicted_answer is None:
+        return format_score
     
-    # If no answer could be extracted, return format_score
+    # If flexible mode and still no answer could be extracted, return format_score
     if predicted_answer is None:
         return format_score
     
@@ -169,17 +175,13 @@ def compute_score(response: str, ground_truth: Union[str, List[str]], format_sco
         if not isinstance(gt_answer, str):
             continue
             
-        # Compute both exact match and F1 score
-        em_score = exact_match_score(predicted_answer, gt_answer)
+        # Check for exact match first
+        if exact_match_score(predicted_answer, gt_answer):
+            return score  # Perfect match gets full score
+        
+        # Compute F1 score for partial credit
         f1 = f1_score(predicted_answer, gt_answer)
-        
-        # Use F1 score as the primary metric (common in QA evaluation)
-        score = f1
-        
-        # If we get a perfect exact match, give it a slight boost
-        if em_score == 1.0:
-            score = 1.0
-        
-        best_score = max(best_score, score)
+        best_score = max(best_score, f1)
     
-    return best_score 
+    # Scale the F1 score by the maximum possible score
+    return best_score * score if best_score > 0 else format_score 

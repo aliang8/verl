@@ -278,7 +278,7 @@ actor_rollout_ref:
   # Reference model will be enabled when actor.use_kl_loss or/and algorithm.use_kl_in_reward is/are True.
   ref:
 
-    # actor_rollout_ref.ref: FSDP config same as actor. For models larger than 7B, it’s recommended to turn on offload for ref by default
+    # actor_rollout_ref.ref: FSDP config same as actor. For models larger than 7B, it's recommended to turn on offload for ref by default
     strategy: fsdp
 
     # config for FSDP strategy
@@ -643,12 +643,12 @@ reward_model:
   # model config for reward scoring
   model:
 
-    # Input tokenizer. If the reward model’s chat template is inconsistent with the policy,
-    # we need to first decode to plaintext, then apply the rm’s chat_template.
+    # Input tokenizer. If the reward model's chat template is inconsistent with the policy,
+    # we need to first decode to plaintext, then apply the rm's chat_template.
     # Then score with RM. If chat_templates are consistent, it can be set to null.
     input_tokenizer: ${actor_rollout_ref.model.path}
 
-    # RM’s HDFS path or local path. Note that RM only supports AutoModelForSequenceClassification.
+    # RM's HDFS path or local path. Note that RM only supports AutoModelForSequenceClassification.
     # Other model types need to define their own RewardModelWorker and pass it from the code.
     path: ~/models/FsfairX-LLaMA3-RM-v0.1
 
@@ -723,6 +723,94 @@ reward_model:
 
     # Max concurrent requests allowed to sandbox
     max_concurrent: 64
+
+# configs for AutoRater LLM-based evaluation
+autorater:
+
+  # Whether to enable AutoRater for LLM-based evaluation
+  enable: False
+
+  # FSDP strategy: "fsdp" or "fsdp2"
+  strategy: fsdp
+
+  # AutoRater model configuration
+  model:
+
+    # Path to the AutoRater model (e.g., Qwen2.5-7B-Instruct, GPT-2, etc.)
+    path: Qwen/Qwen2.5-1.5B-Instruct
+
+    # Whether to use shared memory for loading the model
+    use_shm: False
+
+    # External model implementation (optional)
+    external_lib: ${actor_rollout_ref.model.external_lib}
+
+    # Whether to enable loading a remote code model
+    trust_remote_code: True
+
+    # FSDP-specific config
+    fsdp_config:
+
+      # Policy for wrapping layers with FSDP
+      wrap_policy:
+
+        # Minimum number of parameters to trigger wrapping
+        min_num_params: 0
+
+      # Whether to offload model parameters to CPU
+      param_offload: False
+
+      # Only for FSDP2: Reshard after forward pass to reduce memory footprint
+      reshard_after_forward: True
+
+      # Number of GPUs in each FSDP shard group; -1 means auto
+      fsdp_size: -1
+
+      # Only for FSDP1: FSDP1 configuration, prefetch the next forward-pass all-gather
+      # before the current forward computation.
+      forward_prefetch: False
+
+  # Text generation parameters for AutoRater
+  generation:
+
+    # Maximum number of new tokens to generate
+    max_new_tokens: 10
+
+    # Whether to use sampling (True) or greedy decoding (False)
+    do_sample: False
+
+    # Sampling temperature (0.0 for deterministic, higher for more random)
+    temperature: 0.0
+
+    # Top-p nucleus sampling parameter
+    top_p: 1.0
+
+  # [Deprecated] Global micro batch size
+  micro_batch_size: null
+
+  # Local per-GPU micro batch size
+  micro_batch_size_per_gpu: null
+
+  # Maximum sequence length to process for evaluation
+  max_length: null
+
+  # Whether to dynamically adjust batch size at runtime
+  use_dynamic_bsz: ${critic.use_dynamic_bsz}
+
+  # Maximum number of tokens per GPU in one forward pass
+  forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
+
+  # Reward function configuration for AutoRater
+  reward_config:
+
+    # Weight of AutoRater evaluation in final reward (0.0 to 1.0)
+    autorater_weight: 1.0
+
+    # Penalty for responses without proper format (0.0 to 1.0)
+    format_penalty: 0.1
+
+    # Whether to provide detailed per-sample breakdown in metrics
+    detailed_breakdown: False
 
 # custom reward function definition
 custom_reward_function:

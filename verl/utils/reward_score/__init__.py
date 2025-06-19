@@ -62,7 +62,7 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
     elif data_source in ["dgslibisey/MuSiQue"]:
         from . import musique
 
-        res = musique.compute_score(solution_str, ground_truth)
+        res = musique.compute_score(solution_str, ground_truth, method="strict")
     elif data_source == "math_dapo" or data_source.startswith("aime"):
         from . import math_dapo
 

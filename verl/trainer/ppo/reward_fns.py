@@ -55,7 +55,7 @@ def extract_intermediate_answers(thinking_text):
 def format_check_reward(generated_text):
     has_think = '<think>' in generated_text and '</think>' in generated_text
     has_answer = '<answer>' in generated_text and '</answer>' in generated_text
-    return 1.0 if (has_think and has_answer) else 0.0
+    return 1.0 if (has_think and has_answer) else -1.0
 
 def final_answer_reward(generated_text, ground_truth, lambda_a=1.0):
     """

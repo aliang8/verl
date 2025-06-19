@@ -20,7 +20,8 @@ import logging
 import os
 import warnings
 from dataclasses import asdict
-from typing import Union
+from typing import Union, Tuple
+import re
 
 import psutil
 import torch
@@ -1497,3 +1498,360 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         await self.rollout.sleep()
         # return something to block the caller
         return True
+
+
+class AutoRaterWorker(Worker):
+    """
+    AutoRater worker for distributed LLM-based evaluation.
+    
+    This worker loads a small LLM model and uses it to evaluate whether predicted answers
+    contain the ground truth information, providing a more nuanced evaluation than simple
+    rule-based metrics.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        import torch.distributed
+
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(backend="nccl" if is_cuda_available else "hccl")
+        self.config = config
+
+        # build device mesh for FSDP
+        world_size = torch.distributed.get_world_size()
+        from torch.distributed.device_mesh import init_device_mesh
+
+        fsdp_size = self.config.model.fsdp_config.get("fsdp_size", -1)
+        self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=fsdp_size)
+
+        # AutoRater template for evaluation
+        self.auto_rater_template = """===Task===
+I need your help in evaluating an answer provided by an LLM against a ground truth
+answer. Your task is to determine if the ground truth answer is present in the LLM's response.
+Please analyze the provided data and make a decision.
+===Instructions===
+1. Carefully compare the "Predicted Answer" with the "Ground Truth Answer".
+2. Consider the substance of the answers – look for equivalent information or correct answers. Do
+not focus on exact wording unless the exact wording is crucial to the meaning.
+3. Your final decision should be based on whether the meaning and the vital facts of the "Ground
+Truth Answer" are present in the "Predicted Answer:"
+===Input Data===
+- Question: {question}
+- Predicted Answer: {predicted_answer}
+- Ground Truth Answer: {ground_truth_answer}
+===Output Format===
+Provide your final evaluation in the following format:
+"Decision:" ("TRUE" or "FALSE")
+
+Please proceed with the evaluation.
+Decision: """
+
+    def _build_autorater_model(self, config):
+        """Build the AutoRater model with FSDP."""
+        from torch.distributed.fsdp import CPUOffload, MixedPrecision
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+        use_shm = config.model.get("use_shm", False)
+        local_path = copy_to_local(config.model.path, use_shm=use_shm)
+
+        # Load tokenizer
+        trust_remote_code = config.model.get("trust_remote_code", False)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            local_path,
+            trust_remote_code=trust_remote_code
+        )
+        
+        # Add padding token if it doesn't exist
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # Load model config
+        model_config = AutoConfig.from_pretrained(
+            local_path, 
+            trust_remote_code=trust_remote_code,
+            attn_implementation="flash_attention_2"
+        )
+
+        # Initialize model with meta tensor for memory efficiency
+        init_context = get_init_weight_context_manager(
+            use_meta_tensor=not model_config.tie_word_embeddings, 
+            mesh=self.device_mesh
+        )
+
+        with init_context(), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            autorater_module = AutoModelForCausalLM.from_pretrained(
+                pretrained_model_name_or_path=local_path,
+                config=model_config,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=trust_remote_code
+            )
+
+            # Apply monkey patch for optimization
+            apply_monkey_patch(
+                model=autorater_module,
+                use_remove_padding=False,  # Keep simple for AutoRater
+                ulysses_sp_size=1,
+            )
+
+            autorater_module.to(torch.bfloat16)
+
+        # FSDP configuration
+        auto_wrap_policy = get_fsdp_wrap_policy(
+            module=autorater_module, 
+            config=self.config.model.fsdp_config.get("wrap_policy", {})
+        )
+
+        fsdp_mesh = self.device_mesh
+        sharding_strategy = get_sharding_strategy(fsdp_mesh)
+
+        # Mixed precision settings
+        mixed_precision = MixedPrecision(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            buffer_dtype=torch.float32
+        )
+
+        if config.strategy == "fsdp":
+            autorater_module = FSDP(
+                autorater_module,
+                param_init_fn=init_fn,
+                use_orig_params=False,
+                auto_wrap_policy=auto_wrap_policy,
+                device_id=get_torch_device().current_device(),
+                sharding_strategy=sharding_strategy,
+                mixed_precision=mixed_precision,
+                sync_module_states=True,
+                cpu_offload=CPUOffload(offload_params=True),  # Offload to save memory
+                forward_prefetch=self.config.model.fsdp_config.get("forward_prefetch", False),
+                device_mesh=self.device_mesh,
+            )
+        elif config.strategy == "fsdp2":
+            assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
+            from verl.utils.torch_dtypes import PrecisionType
+            
+            mp_policy = MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.float32,
+                cast_forward_inputs=True
+            )
+            cpu_offload = CPUOffloadPolicy(pin_memory=True)
+            
+            fsdp_kwargs = {
+                "mesh": fsdp_mesh,
+                "mp_policy": mp_policy,
+                "offload_policy": cpu_offload,
+                "reshard_after_forward": config.model.fsdp_config.get("reshard_after_forward", True),
+            }
+            full_state = autorater_module.state_dict()
+            apply_fsdp2(autorater_module, fsdp_kwargs, config.model.fsdp_config)
+            fsdp2_load_full_state_dict(autorater_module, full_state, fsdp_mesh, cpu_offload)
+        else:
+            raise NotImplementedError(f"Unknown strategy: {config.strategy}")
+
+        return autorater_module
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        """Initialize the AutoRater model."""
+        # Import external libraries if specified
+        import_external_libs(self.config.model.get("external_lib", None))
+        
+        log_gpu_memory_usage("Before AutoRater model init", logger=logger)
+        self.autorater_module = self._build_autorater_model(config=self.config)
+        log_gpu_memory_usage("After AutoRater model init", logger=logger)
+
+    def format_prompt(self, question: str, predicted_answer: str, ground_truth_answer: str) -> str:
+        """Format the auto-rater prompt with the given inputs."""
+        return self.auto_rater_template.format(
+            question=question,
+            predicted_answer=predicted_answer,
+            ground_truth_answer=ground_truth_answer
+        )
+
+    def parse_response(self, response: str) -> Tuple[str, str]:
+        """
+        Parse the model's response to extract explanation and decision.
+        
+        Returns:
+            Tuple of (explanation, decision)
+        """
+        # Multiple parsing patterns to catch TRUE/FALSE decisions
+        decision_patterns = [
+            r'Decision:\s*["\']?(TRUE|FALSE)["\']?',
+            r'\b(TRUE|FALSE)\b',
+            r'(true|false)',
+            r'answer is\s+(TRUE|FALSE)',
+            r'decision is\s+(TRUE|FALSE)',
+        ]
+        
+        explanation = response.strip()
+        decision = "UNKNOWN"
+        
+        # Try to find decision
+        for pattern in decision_patterns:
+            match = re.search(pattern, response, re.IGNORECASE)
+            if match:
+                decision = match.group(1).upper()
+                break
+        
+        return explanation, decision
+
+    def _forward_micro_batch(self, micro_batch):
+        """Forward pass for a micro batch of AutoRater evaluations."""
+        with torch.no_grad(), torch.autocast(device_type=device_name, dtype=torch.bfloat16):
+            input_ids = micro_batch["input_ids"]
+            attention_mask = micro_batch["attention_mask"]
+            
+            # Generate responses
+            generation_config = self.config.generation
+            max_new_tokens = generation_config.get("max_new_tokens", 10)
+            do_sample = generation_config.get("do_sample", False)
+            temperature = generation_config.get("temperature", 0.0)
+            top_p = generation_config.get("top_p", 1.0)
+            
+            outputs = self.autorater_module.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample,
+                temperature=temperature,
+                top_p=top_p,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+            
+            # Extract generated text (remove prompt)
+            generated_texts = []
+            for i, output in enumerate(outputs):
+                prompt_length = input_ids[i].shape[0]
+                generated_part = output[prompt_length:]
+                generated_text = self.tokenizer.decode(generated_part, skip_special_tokens=True)
+                generated_texts.append(generated_text)
+            
+            return generated_texts
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_autorater_score(self, data: DataProto) -> DataProto:
+        """
+        Compute auto-rater scores for the given data batch.
+        
+        Args:
+            data: DataProto containing the batch data
+            
+        Returns:
+            DataProto with auto-rater evaluation results
+        """
+        # Support all hardwares
+        data = data.to(get_torch_device().current_device())
+        
+        # Extract necessary information from the batch
+        responses = data.batch["responses"]
+        batch_size = responses.shape[0]
+        
+        # Decode questions and responses
+        if "prompts" in data.batch:
+            questions = [self.tokenizer.decode(prompt, skip_special_tokens=True) 
+                        for prompt in data.batch["prompts"]]
+        else:
+            # Fallback: extract from input_ids if prompts not available
+            input_ids = data.batch.get("input_ids", data.batch.get("prompt_ids", None))
+            if input_ids is not None:
+                questions = [self.tokenizer.decode(ids, skip_special_tokens=True) 
+                           for ids in input_ids]
+            else:
+                questions = [""] * batch_size
+
+        predicted_answers = [self.tokenizer.decode(response, skip_special_tokens=True) 
+                           for response in responses]
+        
+        # Get ground truth from reward_model metadata
+        ground_truth_answers = []
+        if "reward_model" in data.non_tensor_batch:
+            reward_info = data.non_tensor_batch["reward_model"]
+            if isinstance(reward_info, list):
+                for rm_info in reward_info:
+                    if isinstance(rm_info, dict) and "ground_truth" in rm_info:
+                        ground_truth_answers.append(str(rm_info["ground_truth"]))
+                    else:
+                        ground_truth_answers.append("Unknown")
+            else:
+                # Single reward info for all samples
+                gt = reward_info.get("ground_truth", "Unknown") if isinstance(reward_info, dict) else "Unknown"
+                ground_truth_answers = [str(gt)] * batch_size
+        else:
+            ground_truth_answers = ["Unknown"] * batch_size
+
+        # Generate evaluation prompts
+        evaluation_prompts = []
+        for i in range(batch_size):
+            prompt = self.format_prompt(
+                question=questions[i],
+                predicted_answer=predicted_answers[i],
+                ground_truth_answer=ground_truth_answers[i]
+            )
+            evaluation_prompts.append(prompt)
+            
+        # Tokenize prompts
+        max_length = self.config.get("max_length", 1024)
+        tokenized = self.tokenizer(
+            evaluation_prompts,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+            max_length=max_length
+        )
+        
+        # Move to device
+        input_ids = tokenized["input_ids"].to(get_torch_device().current_device())
+        attention_mask = tokenized["attention_mask"].to(get_torch_device().current_device())
+        
+        # Process in micro batches
+        micro_batch_size = self.config.get("micro_batch_size_per_gpu", 4)
+        all_generated_texts = []
+        
+        for i in range(0, batch_size, micro_batch_size):
+            end_idx = min(i + micro_batch_size, batch_size)
+            micro_batch = {
+                "input_ids": input_ids[i:end_idx],
+                "attention_mask": attention_mask[i:end_idx]
+            }
+            generated_texts = self._forward_micro_batch(micro_batch)
+            all_generated_texts.extend(generated_texts)
+        
+        # Parse responses to extract decisions
+        explanations = []
+        decisions = []
+        raw_responses = []
+        
+        for generated_text in all_generated_texts:
+            explanation, decision = self.parse_response(generated_text)
+            explanations.append(explanation)
+            decisions.append(decision == "TRUE")  # Convert to boolean
+            raw_responses.append(generated_text)
+            
+        # Convert decisions to scores (TRUE=1.0, FALSE=0.0)
+        scores = [1.0 if d else 0.0 for d in decisions]
+        
+        # Create output DataProto
+        output_data = DataProto(
+            batch={
+                "autorater_scores": torch.tensor(scores, dtype=torch.float32),
+                "autorater_decisions": torch.tensor([1 if d else 0 for d in decisions], dtype=torch.long)
+            },
+            non_tensor_batch={
+                "autorater_explanations": explanations,
+                "autorater_raw_responses": raw_responses
+            }
+        )
+        
+        # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
+        # unshard the root FSDP module
+        if self.world_size > 1 and fsdp_version(self.autorater_module) == 1:
+            self.autorater_module._handle.reshard(True)
+        
+        output_data = output_data.to("cpu")
+        return output_data
+
+
+# ================================= Async related workers =================================

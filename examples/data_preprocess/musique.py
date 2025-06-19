@@ -85,6 +85,8 @@ if __name__ == "__main__":
     train_dataset = dataset["train"]
     test_dataset = dataset["validation"]  # MuSiQue uses "validation" as test split
     
+    instruction_following = 'Let\'s think step by step and output the final answer after "####".'
+
     print(f"Original train dataset size: {len(train_dataset)}")
     print(f"Original test dataset size: {len(test_dataset)}")
 
@@ -101,7 +103,7 @@ if __name__ == "__main__":
         def process_fn(example, idx):
             question_raw = example.pop("question")
 
-            question = question_raw
+            question = question_raw + " " + instruction_following
 
             answer_raw = example.pop("answer")
             solution = extract_final_answer(answer_raw)

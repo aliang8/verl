@@ -20,37 +20,61 @@ def extract_solution(solution_str, method="strict"):
     assert method in ["strict", "flexible"]
 
     if method == "strict":
-        # Look for the exact format with CONCLUSION: followed by numbered items
-        conclusion_pattern = r"CONCLUSION:\s*((?:\([^)]+\)[^\n]*\n?)+)"
-        match = re.search(conclusion_pattern, solution_str, re.IGNORECASE | re.MULTILINE)
+        # Look for CONCLUSION: and capture everything after it
+        conclusion_pattern = r"CONCLUSION:\s*(.*)"
+        match = re.search(conclusion_pattern, solution_str, re.IGNORECASE | re.DOTALL)
         if match:
             conclusion_text = match.group(1).strip()
-            # Extract individual conclusion lines
-            lines = re.findall(r"\((\d+)\)\s*(.+)", conclusion_text)
-            if lines:
+            
+            # Extract individual numbered lines from the conclusion text
+            lines = conclusion_text.split('\n')
+            numbered_lines = []
+            
+            for line in lines:
+                line = line.strip()
+                if line:  # Skip empty lines
+                    # Look for pattern like "(1) David is a knight"
+                    match_line = re.match(r"\((\d+)\)\s*(.+)", line)
+                    if match_line:
+                        number, content = match_line.groups()
+                        numbered_lines.append((int(number), content.strip()))
+            
+            if numbered_lines:
                 # Sort by the number and extract just the conclusion part
-                sorted_lines = sorted(lines, key=lambda x: int(x[0]))
-                conclusions = [line[1].strip() for line in sorted_lines]
+                sorted_lines = sorted(numbered_lines, key=lambda x: x[0])
+                conclusions = [line[1] for line in sorted_lines]
                 return conclusions
         return None
     
     elif method == "flexible":
         # More flexible extraction patterns
         patterns = [
-            r"CONCLUSION:\s*((?:\([^)]+\)[^\n]*\n?)+)",  # Standard CONCLUSION format
-            r"(?:Therefore|Thus|So):\s*((?:\([^)]+\)[^\n]*\n?)+)",  # Alternative markers
-            r"Answer:\s*((?:\([^)]+\)[^\n]*\n?)+)",  # Answer format
-            r"Solution:\s*((?:\([^)]+\)[^\n]*\n?)+)",  # Solution format
+            r"CONCLUSION:\s*(.*)",  # Standard CONCLUSION format
+            r"(?:Therefore|Thus|So):\s*(.*)",  # Alternative markers
+            r"Answer:\s*(.*)",  # Answer format
+            r"Solution:\s*(.*)",  # Solution format
         ]
         
         for pattern in patterns:
-            match = re.search(pattern, solution_str, re.IGNORECASE | re.MULTILINE)
+            match = re.search(pattern, solution_str, re.IGNORECASE | re.DOTALL)
             if match:
                 conclusion_text = match.group(1).strip()
-                lines = re.findall(r"\((\d+)\)\s*(.+)", conclusion_text)
-                if lines:
-                    sorted_lines = sorted(lines, key=lambda x: int(x[0]))
-                    conclusions = [line[1].strip() for line in sorted_lines]
+                
+                # Same improved parsing as strict method
+                lines = conclusion_text.split('\n')
+                numbered_lines = []
+                
+                for line in lines:
+                    line = line.strip()
+                    if line:
+                        match_line = re.match(r"\((\d+)\)\s*(.+)", line)
+                        if match_line:
+                            number, content = match_line.groups()
+                            numbered_lines.append((int(number), content.strip()))
+                
+                if numbered_lines:
+                    sorted_lines = sorted(numbered_lines, key=lambda x: x[0])
+                    conclusions = [line[1] for line in sorted_lines]
                     return conclusions
         
         # If no structured format found, look for knight/knave statements anywhere

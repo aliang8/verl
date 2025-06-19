@@ -174,6 +174,16 @@ class TaskRunner:
             role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
             mapping[Role.RewardModel] = global_pool_id
 
+        # Add AutoRater worker if enabled
+        if config.autorater.enable:
+            if config.autorater.strategy in ["fsdp", "fsdp2"]:
+                from verl.workers.fsdp_workers import AutoRaterWorker
+            else:
+                raise NotImplementedError(f"AutoRater strategy {config.autorater.strategy} not supported")
+            role_worker_mapping[Role.AutoRater] = ray.remote(AutoRaterWorker)
+            mapping[Role.AutoRater] = global_pool_id
+            print(f"AutoRater enabled with model: {config.autorater.model.path}")
+
         # Add a reference policy worker if KL loss or KL reward is used.
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
@@ -209,6 +219,25 @@ class TaskRunner:
         )
         # Initialize the workers of the trainer.
         trainer.init_workers()
+        
+        # Setup AutoRater hybrid reward if enabled
+        if config.autorater.enable:
+            from verl.utils.reward_score.autorater_reward import create_autorater_only_reward_fn
+            
+            autorater_wg = trainer.autorater_wg if hasattr(trainer, 'autorater_wg') else None
+            
+            # Choose reward function based on configuration
+            autorater_weight = config.autorater.reward_config.get("autorater_weight", 0.8)
+            
+            # Use AutoRater-only reward
+            autorater_reward_fn = create_autorater_only_reward_fn(config, autorater_wg)
+            print("Using AutoRater-only reward")
+            
+            # Replace the reward functions with AutoRater versions
+            trainer.reward_fn = autorater_reward_fn
+            trainer.val_reward_fn = autorater_reward_fn
+            print("AutoRater reward functions initialized successfully")
+        
         # Start the training process.
         trainer.fit()
 
