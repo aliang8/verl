@@ -222,15 +222,10 @@ class TaskRunner:
         
         # Setup AutoRater hybrid reward if enabled
         if config.autorater.enable:
-            from verl.utils.reward_score.autorater_reward import create_autorater_only_reward_fn
-            
-            autorater_wg = trainer.autorater_wg if hasattr(trainer, 'autorater_wg') else None
-            
-            # Choose reward function based on configuration
-            autorater_weight = config.autorater.reward_config.get("autorater_weight", 0.8)
-            
+            from verl.utils.reward_score.autorater_reward import create_autorater_reward_fn
+                                    
             # Use AutoRater-only reward
-            autorater_reward_fn = create_autorater_only_reward_fn(config, autorater_wg)
+            autorater_reward_fn = create_autorater_reward_fn(trainer.autorater_wg, config)
             print("Using AutoRater-only reward")
             
             # Replace the reward functions with AutoRater versions

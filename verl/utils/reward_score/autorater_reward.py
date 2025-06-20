@@ -8,10 +8,8 @@ from typing import Dict, Any, Tuple, Union, List
 import numpy as np
 
 from verl import DataProto
-from verl.utils.reward_score.base import BaseRewardModel
 
-
-class AutoRaterReward(BaseRewardModel):
+class AutoRaterReward:
     """
     AutoRater-based reward function that uses a distributed LLM worker for evaluation.
     
