@@ -176,10 +176,8 @@ class TaskRunner:
 
         # Add AutoRater worker if enabled
         if config.autorater.enable:
-            if config.autorater.strategy in ["fsdp", "fsdp2"]:
-                from verl.workers.fsdp_workers import AutoRaterWorker
-            else:
-                raise NotImplementedError(f"AutoRater strategy {config.autorater.strategy} not supported")
+            # Use the simple AutoRater implementation instead of FSDP version
+            from verl.workers.autorater import AutoRaterWorker
             role_worker_mapping[Role.AutoRater] = ray.remote(AutoRaterWorker)
             mapping[Role.AutoRater] = global_pool_id
             print(f"AutoRater enabled with model: {config.autorater.model.path}")

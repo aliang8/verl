@@ -5,11 +5,14 @@ AutoRater Worker for distributed LLM-based evaluation in VERL framework.
 
 import re
 import torch
+import numpy as np
+import warnings
 from typing import Dict, List, Tuple, Any, Union
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 
 from verl import DataProto
 from verl.single_controller.base import Worker
+from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils.model import compute_position_id_with_mask
 
 
@@ -22,7 +25,7 @@ class AutoRaterWorker(Worker):
     rule-based metrics.
     """
 
-    def __init__(self, config, **kwargs):
+    def __init__(self, config):
         """
         Initialize the AutoRater worker.
         
@@ -30,8 +33,35 @@ class AutoRaterWorker(Worker):
             config: Configuration object containing autorater settings
         """
         super().__init__()
+        import torch.distributed
+        
+        # Import device utilities
+        from verl.utils.device import get_device_name, is_cuda_available, is_npu_available
+        
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(backend="nccl" if is_cuda_available else "hccl")
         self.config = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # build device mesh for distributed processing
+        world_size = torch.distributed.get_world_size()
+        from torch.distributed.device_mesh import init_device_mesh
+        from verl.workers.fsdp_workers import create_device_mesh
+        
+        # Use simple device mesh for AutoRater (no complex sharding needed)
+        fsdp_size = self.config.model.get("fsdp_size", -1)
+        self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=fsdp_size)
+        
+        # AutoRater uses simple processing - no Ulysses sequence parallel needed
+        self.ulysses_sequence_parallel_size = 1
+        
+        # normalize config
+        if self.config.get("micro_batch_size") is not None:
+            self.config.micro_batch_size //= torch.distributed.get_world_size()
+            self.config.micro_batch_size_per_gpu = self.config.micro_batch_size
+        
+        # Solution extraction settings
+        self.extraction_method = self.config.get("extraction_method", "flexible")  # "strict", "flexible", or "both"
+        self.answer_formats = self.config.get("answer_formats", ["boxed", "hash"])  # Support both \boxed{} and ####
         
         # AutoRater template for evaluation
         self.auto_rater_template = """===Task===
@@ -45,7 +75,6 @@ not focus on exact wording unless the exact wording is crucial to the meaning.
 3. Your final decision should be based on whether the meaning and the vital facts of the "Ground
 Truth Answer" are present in the "Predicted Answer:"
 ===Input Data===
-- Question: {question}
 - Predicted Answer: {predicted_answer}
 - Ground Truth Answer: {ground_truth_answer}
 ===Output Format===
@@ -55,34 +84,54 @@ Provide your final evaluation in the following format:
 Please proceed with the evaluation.
 Decision: """
 
-    def init_model(self):
-        """Initialize the AutoRater model and tokenizer."""
-        model_name = self.config.model.get("path", "Qwen/Qwen2.5-7B-Instruct")
+    def _build_model(self, config):
+        """Build the AutoRater model following the same pattern as RewardModelWorker."""
+        from transformers import AutoConfig, AutoModelForCausalLM
+        from verl.utils.fs import copy_to_local
+        from verl.utils import hf_tokenizer
+        from verl.utils.device import get_torch_device
         
-        print(f"Loading AutoRater model: {model_name}")
+        use_shm = config.model.get("use_shm", False)
+        # download the checkpoint
+        local_path = copy_to_local(config.model.path, use_shm=use_shm)
         
-        # Load tokenizer and model
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            trust_remote_code=True,
-            **self.config.model.get("tokenizer_kwargs", {})
-        )
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            trust_remote_code=True,
-            **self.config.model.get("model_kwargs", {})
-        )
+        trust_remote_code = config.model.get("trust_remote_code", False)
+        model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        
+        # Load tokenizer
+        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         
         # Add padding token if it doesn't exist
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
+
+        # Create model - use simple initialization for AutoRater without device_map
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            autorater_module = AutoModelForCausalLM.from_pretrained(
+                config.model.path
+            )
+            
+            # Ensure model is in the correct dtype and move to device
+            autorater_module.to(torch.bfloat16)
+            autorater_module.to(get_torch_device().current_device())
+        
+        return autorater_module
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        """Initialize the AutoRater model."""
+        # This is used to import external_lib into the huggingface systems
+        from verl.utils.import_utils import import_external_libs
+        import_external_libs(self.config.model.get("external_lib", None))
+        
+        self.autorater_module = self._build_model(config=self.config)
         
         # Create text generation pipeline
         self.generator = pipeline(
             "text-generation",
-            model=self.model,
+            model=self.autorater_module,
             tokenizer=self.tokenizer,
             max_new_tokens=self.config.get("max_new_tokens", 10),
             do_sample=self.config.get("do_sample", False),
@@ -135,7 +184,7 @@ Decision: """
                       predicted_answers: List[str], 
                       ground_truth_answers: List[str]) -> Dict[str, List[Any]]:
         """
-        Evaluate a batch of responses using the AutoRater LLM.
+        Evaluate a batch of responses using the AutoRater LLM in parallel.
         
         Args:
             questions: List of questions
@@ -149,34 +198,43 @@ Decision: """
         assert len(predicted_answers) == batch_size
         assert len(ground_truth_answers) == batch_size
         
+        # Generate all evaluation prompts at once
+        evaluation_prompts = []
+        for i in range(batch_size):
+            prompt = self.format_prompt(
+                questions[i], 
+                predicted_answers[i], 
+                ground_truth_answers[i]
+            )
+            evaluation_prompts.append(prompt)
+        
         decisions = []
         explanations = []
         raw_responses = []
         
-        # Process each item in the batch
-        for i in range(batch_size):
-            try:
-                # Format prompt
-                prompt = self.format_prompt(
-                    questions[i], 
-                    predicted_answers[i], 
-                    ground_truth_answers[i]
-                )
-                
-                # Generate response
-                response = self.generator(prompt)[0]['generated_text']
-                raw_responses.append(response)
-                
-                # Parse response
-                explanation, decision = self.parse_response(response)
-                explanations.append(explanation)
-                decisions.append(decision)
-                
-            except Exception as e:
-                print(f"Error evaluating item {i}: {e}")
-                decisions.append("ERROR")
-                explanations.append(f"Error: {str(e)}")
-                raw_responses.append("")
+        # Process the entire batch at once using the pipeline
+        # The pipeline will handle batching internally for efficiency
+        batch_responses = self.generator(
+            evaluation_prompts,
+            batch_size=min(batch_size, 8),  # Process in chunks to avoid memory issues
+            truncation=True,
+            padding=True,
+            repetition_penalty=1.1,
+            num_return_sequences=1,
+            do_sample=False,
+            temperature=0.0,
+            max_new_tokens=10,
+        )
+        
+        # Process results
+        for i, response_data in enumerate(batch_responses):
+            response = response_data[0]['generated_text']
+            raw_responses.append(response)
+            
+            # Parse response
+            explanation, decision = self.parse_response(response)
+            explanations.append(explanation)
+            decisions.append(decision)
         
         return {
             "decisions": decisions,
@@ -184,18 +242,91 @@ Decision: """
             "raw_responses": raw_responses
         }
 
-    def compute_autorater_scores(self, data: DataProto) -> DataProto:
+    def extract_solution(self, solution_str: str, method: str = "flexible") -> Union[str, None]:
         """
-        Compute auto-rater scores for the given data batch.
+        Extract the numerical answer from a solution string.
+        Supports both #### format and \boxed{} format.
         
         Args:
-            data: DataProto containing the batch data
+            solution_str: The solution text
+            method: "strict", "flexible", or "both"
+            
+        Returns:
+            Extracted answer as string, or None if not found
+        """
+        if method == "strict":
+            # Try #### format first (GSM8K style)
+            if "hash" in self.answer_formats:
+                solution = re.search(r"#### (\\-?[0-9\\.\\,]+)", solution_str)
+                if solution is not None:
+                    final_answer = solution.group(0)
+                    final_answer = final_answer.split("#### ")[1].replace(",", "").replace("$", "")
+                    return final_answer
+            
+            # Try \boxed{} format
+            if "boxed" in self.answer_formats:
+                boxed_match = re.search(r"\\boxed\{([^}]+)\}", solution_str)
+                if boxed_match is not None:
+                    final_answer = boxed_match.group(1).replace(",", "").replace("$", "")
+                    return final_answer
+            
+            return None
+            
+        elif method == "flexible":
+            # Try structured formats first
+            if "hash" in self.answer_formats:
+                solution = re.search(r"#### (\\-?[0-9\\.\\,]+)", solution_str)
+                if solution is not None:
+                    final_answer = solution.group(0)
+                    final_answer = final_answer.split("#### ")[1].replace(",", "").replace("$", "")
+                    return final_answer
+            
+            if "boxed" in self.answer_formats:
+                boxed_match = re.search(r"\\boxed\{([^}]+)\}", solution_str)
+                if boxed_match is not None:
+                    final_answer = boxed_match.group(1).replace(",", "").replace("$", "")
+                    return final_answer
+            
+            # Fallback: find any numbers in the text
+            answer = re.findall(r"(\\-?[0-9\\.\\,]+)", solution_str)
+            final_answer = None
+            if len(answer) == 0:
+                return None
+            else:
+                invalid_str = ["", "."]
+                # Find the last number that is not '.'
+                for final_answer in reversed(answer):
+                    if final_answer not in invalid_str:
+                        break
+                return final_answer.replace(",", "").replace("$", "") if final_answer else None
+                
+        elif method == "both":
+            # Try strict first, then flexible
+            strict_result = self.extract_solution(solution_str, "strict")
+            if strict_result is not None:
+                return strict_result
+            return self.extract_solution(solution_str, "flexible")
+        
+        return None
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_autorater_score(self, data: DataProto) -> DataProto:
+        """
+        Compute auto-rater scores for a batch of data items.
+        
+        Args:
+            data: DataProto containing batch data
             
         Returns:
             DataProto with auto-rater evaluation results
         """
+        from verl.utils.device import get_torch_device
+        
+        # Support all hardwares
+        data = data.to(get_torch_device().current_device())
+        
         # Extract necessary information from the batch
-        responses = data.batch["responses"]
+        responses = data.batch["responses"]  # Shape: (batch_size, seq_len)
         batch_size = responses.shape[0]
         
         # Decode questions and responses
@@ -214,21 +345,31 @@ Decision: """
         predicted_answers = [self.tokenizer.decode(response, skip_special_tokens=True) 
                            for response in responses]
         
+        # Extract solutions from predicted answers
+        extracted_predictions = []
+        for pred_answer in predicted_answers:
+            extracted = self.extract_solution(pred_answer, method=self.extraction_method)
+            # If extraction fails, use the original answer for evaluation
+            extracted_predictions.append(extracted if extracted is not None else pred_answer)
+        
         # Get ground truth from reward_model metadata
         ground_truth_answers = []
         if "reward_model" in data.non_tensor_batch:
             for rm_info in data.non_tensor_batch["reward_model"]:
                 if isinstance(rm_info, dict) and "ground_truth" in rm_info:
-                    ground_truth_answers.append(str(rm_info["ground_truth"]))
+                    # Also try to extract from ground truth if it's in a formatted form
+                    gt_raw = str(rm_info["ground_truth"])
+                    gt_extracted = self.extract_solution(gt_raw, method=self.extraction_method)
+                    ground_truth_answers.append(gt_extracted if gt_extracted is not None else gt_raw)
                 else:
                     ground_truth_answers.append("Unknown")
         else:
             ground_truth_answers = ["Unknown"] * batch_size
 
-        # Evaluate using the AutoRater
+        # Evaluate using the AutoRater with extracted solutions
         evaluation_results = self.evaluate_batch(
             questions=questions,
-            predicted_answers=predicted_answers,
+            predicted_answers=extracted_predictions,  # Use extracted solutions
             ground_truth_answers=ground_truth_answers
         )
         
@@ -240,17 +381,19 @@ Decision: """
             else:  # FALSE, ERROR, UNKNOWN
                 scores.append(0.0)
         
-        # Create output DataProto
-        output_data = DataProto(
-            batch={
-                "autorater_scores": torch.tensor(scores, dtype=torch.float32, device=self.device),
-                "autorater_decisions": torch.tensor([1 if d == "TRUE" else 0 for d in evaluation_results["decisions"]], 
-                                                  dtype=torch.long, device=self.device)
+        # Create output DataProto with batch dimension
+        output_data = DataProto.from_dict(
+            tensors={
+                "autorater_scores": torch.tensor(scores, dtype=torch.float32),
+                "autorater_decisions": torch.tensor([1 if d == "TRUE" else 0 for d in evaluation_results["decisions"]], dtype=torch.long)
             },
-            non_tensor_batch={
-                "autorater_explanations": evaluation_results["explanations"],
-                "autorater_raw_responses": evaluation_results["raw_responses"]
+            non_tensors={
+                "autorater_explanations": np.array(evaluation_results["explanations"], dtype=object),
+                "autorater_raw_responses": np.array(evaluation_results["raw_responses"], dtype=object),
+                "extracted_predictions": np.array(extracted_predictions, dtype=object),  # Include extracted solutions for debugging
+                "original_predictions": np.array(predicted_answers, dtype=object)  # Keep original for reference
             }
         )
         
+        output_data = output_data.to("cpu")
         return output_data 
