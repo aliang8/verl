@@ -120,6 +120,10 @@ Decision: """
         return autorater_module
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_tokenizer(self):
+        return self.tokenizer
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         """Initialize the AutoRater model."""
         # This is used to import external_lib into the huggingface systems
@@ -349,9 +353,9 @@ Decision: """
         extracted_predictions = []
         for pred_answer in predicted_answers:
             extracted = self.extract_solution(pred_answer, method=self.extraction_method)
-            # If extraction fails, use the original answer for evaluation
             extracted_predictions.append(extracted if extracted is not None else pred_answer)
-        
+            # extracted_predictions.append(extracted)
+
         # Get ground truth from reward_model metadata
         ground_truth_answers = []
         if "reward_model" in data.non_tensor_batch:
@@ -377,15 +381,27 @@ Decision: """
         scores = []
         for decision in evaluation_results["decisions"]:
             if decision == "TRUE":
-                scores.append(1.0)
-            else:  # FALSE, ERROR, UNKNOWN
-                scores.append(0.0)
-        
+                scores.append(2.0)
+            elif decision == "FALSE":
+                scores.append(-1.5)
+            else:  # ERROR, UNKNOWN
+                scores.append(-2.0)
+
+        # Convert decisions to numerical values (TRUE=1, FALSE=0, ERROR/UNKNOWN=-1)
+        autorater_decisions = []
+        for decision in evaluation_results["decisions"]:
+            if decision == "TRUE":
+                autorater_decisions.append(1)
+            elif decision == "FALSE":
+                autorater_decisions.append(0)
+            else:  # ERROR, UNKNOWN
+                autorater_decisions.append(-1)
+
         # Create output DataProto with batch dimension
         output_data = DataProto.from_dict(
             tensors={
                 "autorater_scores": torch.tensor(scores, dtype=torch.float32),
-                "autorater_decisions": torch.tensor([1 if d == "TRUE" else 0 for d in evaluation_results["decisions"]], dtype=torch.long)
+                "autorater_decisions": torch.tensor(autorater_decisions, dtype=torch.long)
             },
             non_tensors={
                 "autorater_explanations": np.array(evaluation_results["explanations"], dtype=object),

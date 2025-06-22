@@ -9,6 +9,7 @@ import numpy as np
 from collections import defaultdict
 
 from verl import DataProto
+from verl.trainer.ppo.reward_fns import format_check_reward
 
 class AutoRaterReward:
     """
@@ -31,10 +32,12 @@ class AutoRaterReward:
         self.autorater_wg = autorater_worker_group
         self.config = config or {}
         self.tokenizer = tokenizer
+
+        if self.autorater_wg is not None:
+            self.tokenizer = self.autorater_wg.get_tokenizer()[0]
         
         # Reward weights
         self.autorater_weight = self.config.get("autorater_weight", 1.0)
-        self.format_penalty = self.config.get("format_penalty", 0.0)
         
     def __call__(self, data: DataProto, return_dict: bool = False) -> Union[torch.Tensor, Dict[str, Any]]:
         """
@@ -53,52 +56,34 @@ class AutoRaterReward:
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
         
-        # Extract all questions, responses, and ground truths for batch processing
-        questions = []
-        predicted_answers = []
-        ground_truth_answers = []
+        # # Extract all questions, responses, and ground truths for batch processing
+        # questions = []
+        # predicted_answers = []
+        # ground_truth_answers = []
         
-        for i in range(len(data)):
-            data_item = data[i]  # DataProtoItem
+        # for i in range(len(data)):
+        #     data_item = data[i]  # DataProtoItem
             
-            # Extract prompt and response for this item
-            prompt_ids = data_item.batch["prompts"]
-            prompt_length = prompt_ids.shape[-1]
+        #     # Extract prompt and response for this item
+        #     prompt_ids = data_item.batch["prompts"]
+        #     prompt_length = prompt_ids.shape[-1]
             
-            valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
-            valid_prompt_ids = prompt_ids[-valid_prompt_length:]
+        #     valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
+        #     valid_prompt_ids = prompt_ids[-valid_prompt_length:]
             
-            response_ids = data_item.batch["responses"]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
-            valid_response_ids = response_ids[:valid_response_length]
+        #     response_ids = data_item.batch["responses"]
+        #     valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+        #     valid_response_ids = response_ids[:valid_response_length]
+          
+        #     question = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
+        #     predicted_answer = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+
+        #     # Get ground truth
+        #     ground_truth_answer = data_item.non_tensor_batch["reward_model"]["ground_truth"]
             
-            # Decode to text
-            # Try to get tokenizer from autorater worker group if not provided
-            tokenizer = self.tokenizer
-            if tokenizer is None and self.autorater_wg is not None:
-                # Try to get tokenizer from the worker group
-                try:
-                    tokenizer = self.autorater_wg.execute_rank_zero_sync("get_tokenizer")
-                except:
-                    # Fallback: use a simple approach without tokenizer
-                    question = str(valid_prompt_ids.tolist())  # Fallback to raw IDs
-                    predicted_answer = str(valid_response_ids.tolist())  # Fallback to raw IDs
-                    tokenizer = None
-            
-            if tokenizer is not None:
-                question = tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
-                predicted_answer = tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-            else:
-                # Fallback: use raw IDs as strings
-                question = str(valid_prompt_ids.tolist())
-                predicted_answer = str(valid_response_ids.tolist())
-            
-            # Get ground truth
-            ground_truth_answer = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-            
-            questions.append(question)
-            predicted_answers.append(predicted_answer)
-            ground_truth_answers.append(ground_truth_answer)
+        #     questions.append(question)
+        #     predicted_answers.append(predicted_answer)
+        #     ground_truth_answers.append(ground_truth_answer)
         
         # Create a single batch DataProto for all items
         # This will be distributed across workers
@@ -139,11 +124,11 @@ class AutoRaterReward:
         
         # Evaluate using the AutoRater worker (will be distributed across workers)
         autorater_output = self.autorater_wg.compute_autorater_score(batch_data)
-        
+                
         # Extract scores and decisions
         autorater_scores = autorater_output.batch["autorater_scores"]  # Shape: (batch_size,)
         autorater_decisions = autorater_output.batch["autorater_decisions"]  # Shape: (batch_size,)
-        
+
         # Remove padding from results if we padded
         if remainder > 0:
             autorater_scores = autorater_scores[:batch_size]
@@ -164,30 +149,16 @@ class AutoRaterReward:
             valid_response_ids = response_ids[:valid_response_length]
             
             # Decode for format checking
-            tokenizer = self.tokenizer
-            if tokenizer is None and self.autorater_wg is not None:
-                try:
-                    tokenizer = self.autorater_wg.execute_rank_zero_sync("get_tokenizer")
-                except:
-                    tokenizer = None
-            
-            if tokenizer is not None:
-                predicted_answer = tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-            else:
-                predicted_answer = str(valid_response_ids.tolist())
+            predicted_answer = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
             
             autorater_score = autorater_scores[i].item()
             autorater_decision = autorater_decisions[i].item()
             
-            # Apply format penalty if no valid format detected
-            format_score = 1.0
-            if self.format_penalty > 0:
-                # Check if responses follow expected format (could be customized)
-                if not any(marker in predicted_answer for marker in ["####", "Answer:", "Final answer:"]):
-                    format_score = 1.0 - self.format_penalty
+            # Apply format penalty using the format_check_reward function
+            format_score = format_check_reward(predicted_answer)
             
             # Combine autorater and format scores
-            final_score = self.autorater_weight * autorater_score * format_score
+            final_score = self.autorater_weight * autorater_score
             
             # Store the reward at the last token of the response
             reward_tensor[i, valid_response_length - 1] = final_score
@@ -219,15 +190,7 @@ class AutoRaterReward:
                 "format_scores": reward_extra_info["format_scores"],
                 "final_scores": reward_extra_info["final_scores"],
             }
-            
-            # Add per-sample breakdown if requested
-            if self.config.get("detailed_breakdown", False):
-                extra_info.update({
-                    "autorater_scores_per_sample": reward_extra_info["autorater_scores"],
-                    "format_scores_per_sample": reward_extra_info["format_scores"],
-                    "final_scores_per_sample": reward_extra_info["final_scores"],
-                })
-            
+
             return {
                 "reward_tensor": reward_tensor,
                 "reward_extra_info": extra_info

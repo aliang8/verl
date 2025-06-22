@@ -733,6 +733,12 @@ autorater:
   # FSDP strategy: "fsdp" or "fsdp2"
   strategy: fsdp
 
+  extraction_method: flexible
+
+  answer_formats:
+    - boxed
+    - hash
+
   # AutoRater model configuration
   model:
 
@@ -805,12 +811,6 @@ autorater:
 
     # Weight of AutoRater evaluation in final reward (0.0 to 1.0)
     autorater_weight: 1.0
-
-    # Penalty for responses without proper format (0.0 to 1.0)
-    format_penalty: 0.1
-
-    # Whether to provide detailed per-sample breakdown in metrics
-    detailed_breakdown: False
 
 # custom reward function definition
 custom_reward_function:
