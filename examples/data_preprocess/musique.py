@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
     print(f"Original train dataset size: {len(train_dataset)}")
     print(f"Original test dataset size: {len(test_dataset)}")
-
+    
     # Filter datasets by hop types
     print(f"Filtering for hop types: {args.hop_types}")
     train_dataset = filter_by_hops(train_dataset, args.hop_types)

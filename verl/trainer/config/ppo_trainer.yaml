@@ -326,6 +326,24 @@ actor_rollout_ref:
     # recompute entropy
     entropy_checkpointing: False
 
+  # # AutoRater configuration for reusing rollout engine
+  # autorater:
+
+  #   # Method for extracting solutions from text: "flexible", "strict", "regex"
+  #   extraction_method: flexible
+
+  #   # Answer formats to look for when extracting solutions
+  #   answer_formats: ["boxed", "hash"]
+
+  #   # Maximum prompt length for AutoRater evaluation prompts
+  #   max_prompt_length: 512
+
+  #   # Maximum number of new tokens for AutoRater responses (TRUE/FALSE/UNKNOWN)
+  #   max_new_tokens: 10
+
+  #   # Weight of AutoRater score in final reward computation
+  #   autorater_weight: 1.0
+
   # Rollout model config.
   rollout:
 
@@ -724,93 +742,130 @@ reward_model:
     # Max concurrent requests allowed to sandbox
     max_concurrent: 64
 
-# configs for AutoRater LLM-based evaluation
-autorater:
+# # configs for AutoRater LLM-based evaluation
+# autorater:
 
-  # Whether to enable AutoRater for LLM-based evaluation
-  enable: False
+#   # Whether to enable AutoRater for LLM-based evaluation
+#   enable: False
 
-  # FSDP strategy: "fsdp" or "fsdp2"
-  strategy: fsdp
+#   # Worker type: "standard" for AutoRaterWorker, "vllm" for vLLMAutoRaterWorker
+#   worker_type: standard
 
-  extraction_method: flexible
+#   # FSDP strategy: "fsdp" or "fsdp2" (only used for standard worker)
+#   strategy: fsdp
 
-  answer_formats:
-    - boxed
-    - hash
+#   # Solution extraction method: "strict", "flexible", or "both"
+#   extraction_method: flexible
 
-  # AutoRater model configuration
-  model:
+#   # Supported answer formats for extraction
+#   answer_formats:
+#     - boxed
+#     - hash
 
-    # Path to the AutoRater model (e.g., Qwen2.5-7B-Instruct, GPT-2, etc.)
-    path: Qwen/Qwen2.5-1.5B-Instruct
+#   # AutoRater model configuration
+#   model:
 
-    # Whether to use shared memory for loading the model
-    use_shm: False
+#     # Path to the AutoRater model (e.g., Qwen2.5-7B-Instruct, GPT-2, etc.)
+#     path: Qwen/Qwen2.5-7B-Instruct
 
-    # External model implementation (optional)
-    external_lib: ${actor_rollout_ref.model.external_lib}
+#     # Whether to use shared memory for loading the model
+#     use_shm: False
 
-    # Whether to enable loading a remote code model
-    trust_remote_code: True
+#     # External model implementation (optional)
+#     external_lib: ${actor_rollout_ref.model.external_lib}
 
-    # FSDP-specific config
-    fsdp_config:
+#     # Whether to enable loading a remote code model
+#     trust_remote_code: True
 
-      # Policy for wrapping layers with FSDP
-      wrap_policy:
+#     # FSDP-specific config
+#     fsdp_config:
 
-        # Minimum number of parameters to trigger wrapping
-        min_num_params: 0
+#       # Policy for wrapping layers with FSDP
+#       wrap_policy:
 
-      # Whether to offload model parameters to CPU
-      param_offload: False
+#         # Minimum number of parameters to trigger wrapping
+#         min_num_params: 0
 
-      # Only for FSDP2: Reshard after forward pass to reduce memory footprint
-      reshard_after_forward: True
+#       # Whether to offload model parameters to CPU
+#       param_offload: False
 
-      # Number of GPUs in each FSDP shard group; -1 means auto
-      fsdp_size: -1
+#       # Only for FSDP2: Reshard after forward pass to reduce memory footprint
+#       reshard_after_forward: True
 
-      # Only for FSDP1: FSDP1 configuration, prefetch the next forward-pass all-gather
-      # before the current forward computation.
-      forward_prefetch: False
+#       # Number of GPUs in each FSDP shard group; -1 means auto
+#       fsdp_size: -1
 
-  # Text generation parameters for AutoRater
-  generation:
+#       # Only for FSDP1: FSDP1 configuration, prefetch the next forward-pass all-gather
+#       # before the current forward computation.
+#       forward_prefetch: False
 
-    # Maximum number of new tokens to generate
-    max_new_tokens: 10
+#   # vLLM-specific configuration (only used when worker_type: "vllm")
+#   vllm_config:
 
-    # Whether to use sampling (True) or greedy decoding (False)
-    do_sample: False
+#     # Tensor parallelism size for vLLM AutoRater
+#     tensor_model_parallel_size: 1
 
-    # Sampling temperature (0.0 for deterministic, higher for more random)
-    temperature: 0.0
+#     # Maximum model length for vLLM
+#     max_model_len: 1024
 
-    # Top-p nucleus sampling parameter
-    top_p: 1.0
+#     # GPU memory utilization for vLLM (0.0-1.0)
+#     gpu_memory_utilization: 0.1
 
-  # [Deprecated] Global micro batch size
-  micro_batch_size: null
+#     # Maximum number of batched tokens
+#     max_num_batched_tokens: 2048
 
-  # Local per-GPU micro batch size
-  micro_batch_size_per_gpu: null
+#     # Data type for vLLM model weights
+#     dtype: bfloat16
 
-  # Maximum sequence length to process for evaluation
-  max_length: null
+#     # Whether to enforce eager mode (more memory efficient)
+#     enforce_eager: true
 
-  # Whether to dynamically adjust batch size at runtime
-  use_dynamic_bsz: ${critic.use_dynamic_bsz}
+#     # Whether to disable vLLM logging statistics
+#     disable_log_stats: true
 
-  # Maximum number of tokens per GPU in one forward pass
-  forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
+#     # Whether to enable CPU offloading
+#     cpu_offload_gb: 2
 
-  # Reward function configuration for AutoRater
-  reward_config:
+#     # Additional engine kwargs for vLLM
+#     engine_kwargs:
+#       block_size: 16
+#       swap_space: 4
 
-    # Weight of AutoRater evaluation in final reward (0.0 to 1.0)
-    autorater_weight: 1.0
+  # # Text generation parameters for AutoRater
+  # generation:
+
+  #   # Maximum number of new tokens to generate
+  #   max_new_tokens: 10
+
+  #   # Whether to use sampling (True) or greedy decoding (False)
+  #   do_sample: False
+
+  #   # Sampling temperature (0.0 for deterministic, higher for more random)
+  #   temperature: 0.0
+
+  #   # Top-p nucleus sampling parameter
+  #   top_p: 1.0
+
+  # # [Deprecated] Global micro batch size
+  # micro_batch_size: null
+
+  # # Local per-GPU micro batch size for AutoRater evaluation
+  # micro_batch_size_per_gpu: 2
+
+  # # Maximum sequence length to process for evaluation
+  # max_length: null
+
+  # # Whether to dynamically adjust batch size at runtime
+  # use_dynamic_bsz: false
+
+  # # Maximum number of tokens per GPU in one forward pass
+  # forward_max_token_len_per_gpu: 2048
+
+  # # Reward function configuration for AutoRater
+  # reward_config:
+
+  #   # Weight of AutoRater evaluation in final reward (0.0 to 1.0)
+  #   autorater_weight: 1.0
 
 # custom reward function definition
 custom_reward_function:

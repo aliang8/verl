@@ -105,6 +105,8 @@ class vLLMRollout(BaseRollout):
             model_hf_config: the huggingface config to initiallize the generating model in vllm
             **kwargs: train_tp, for Megatron Backend to initialize hybrid engine (zero redundancy) process group
         """
+        print(f"\n\n\n")
+        print(f"Initializing vLLMRollout!!!")
         super().__init__()
         self.config = config
         self.tokenizer = tokenizer
@@ -167,6 +169,11 @@ class vLLMRollout(BaseRollout):
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
 
+        print(f"Initializing vLLM engine")
+        print(f"="*100)
+        print(f"engine_kwargs: {engine_kwargs}")
+        print(f"="*100)
+
         self.inference_engine = LLM(
             model=model_path,
             enable_sleep_mode=True,
@@ -189,6 +196,8 @@ class vLLMRollout(BaseRollout):
             **lora_kwargs,
             **engine_kwargs,
         )
+        print(f"Done initializing vLLM engine")
+        print(f"="*100)
 
         # Offload vllm model to reduce peak memory usage
         self.inference_engine.sleep(level=1)
@@ -208,8 +217,11 @@ class vLLMRollout(BaseRollout):
             if hasattr(SamplingParams(), str(k)):
                 kwargs[k] = config.get(k)
 
-        print(f"kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)
+        
+        print(f"Done initializing sampling params")
+        print(f"kwargs: {kwargs}")
+        print(f"="*100)
 
         self.pad_token_id = tokenizer.pad_token_id
 
@@ -223,6 +235,11 @@ class vLLMRollout(BaseRollout):
                     old_value = getattr(self.sampling_params, key)
                     old_sampling_params_args[key] = old_value
                     setattr(self.sampling_params, key, value)
+        
+        # print(f"Updating sampling params")
+        # print(f"="*100)
+        # print(f"self.sampling_params: {self.sampling_params}")
+        # print(f"="*100)
         yield
         # roll back to previous sampling params
         # if len(old_sampling_params_args):
@@ -277,8 +294,9 @@ class vLLMRollout(BaseRollout):
 
         do_sample = prompts.meta_info.get("do_sample", True)
         is_validate = prompts.meta_info.get("validate", False)
+
         if not do_sample:
-            kwargs = {
+            reg_kwargs = {
                 "best_of": 1,
                 "top_p": 1.0,
                 "top_k": -1,
@@ -288,12 +306,16 @@ class vLLMRollout(BaseRollout):
             }
         elif is_validate:
             # TODO: try **
-            kwargs = {
+            reg_kwargs = {
                 "top_k": self.config.val_kwargs.top_k,
                 "top_p": self.config.val_kwargs.top_p,
                 "temperature": self.config.val_kwargs.temperature,
                 "n": 1,  # if validate, already repeat in ray_trainer
             }
+        else:
+            reg_kwargs = {}
+
+        kwargs = {**reg_kwargs, **kwargs}
 
         lora_requests = None
         if self.lora_kwargs:

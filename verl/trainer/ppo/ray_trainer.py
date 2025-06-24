@@ -705,7 +705,8 @@ class RayPPOTrainer:
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         # dump generations
-        val_data_dir = self.config.trainer.get("validation_data_dir", None)
+        val_data_dir = self.config.trainer.get("validation_data_dir", None) 
+        val_data_dir = os.path.join(val_data_dir, self.config.trainer.experiment_name)
         if val_data_dir:
             # Flatten data_source_lst for passing to _dump_generations
             flattened_data_sources = []
@@ -752,12 +753,15 @@ class RayPPOTrainer:
         1. Ray resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
         """
+        print(f"Initializing workers")
+        print(f"="*100)
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
         # create actor and rollout
         if self.hybrid_engine:
+            print(f"\tCreating actor rollout")
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.ActorRollout],
@@ -770,18 +774,21 @@ class RayPPOTrainer:
 
         # create critic
         if self.use_critic:
+            print(f"\tCreating critic")
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=self.config.critic)
             self.resource_pool_to_cls[resource_pool]["critic"] = critic_cls
 
         # create reference policy if needed
         if self.use_reference_policy:
+            print(f"\tCreating reference policy")
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
             ref_policy_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RefPolicy], config=self.config.actor_rollout_ref, role="ref")
             self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
 
         # create a reward model if reward_fn is None
         if self.use_rm:
+            print(f"\tCreating reward model")
             # we create a RM here
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
@@ -790,6 +797,7 @@ class RayPPOTrainer:
         # create AutoRater if configured
         self.use_autorater = Role.AutoRater in self.role_worker_mapping
         if self.use_autorater:
+            print(f"\tCreating AutoRater")
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.AutoRater)
             autorater_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.AutoRater], config=self.config.get("autorater", {}))
             self.resource_pool_to_cls[resource_pool]["autorater"] = autorater_cls
@@ -804,11 +812,20 @@ class RayPPOTrainer:
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
 
+        print(f"Creating worker groups")
+        print(f"="*100)
+        print(f"resource_pool_to_cls: {self.resource_pool_to_cls}")
+
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            print(f"\tCreating worker group for {resource_pool}")
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls, device_name=self.device_name, **wg_kwargs)
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
+            print(f"\tDone creating worker group for {resource_pool}")
+        print(f"Done creating worker groups")
+        print(f"="*100)
+        print("\n\n\n")
 
         if self.use_critic:
             self.critic_wg = all_wg["critic"]
@@ -822,14 +839,16 @@ class RayPPOTrainer:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
 
-        # Initialize AutoRater worker group if configured
-        if self.use_autorater:
-            self.autorater_wg = all_wg["autorater"]
-            self.autorater_wg.init_model()
+        # # Initialize AutoRater worker group if configured
+        # if self.use_autorater:
+        #     self.autorater_wg = all_wg["autorater"]
+        #     self.autorater_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()
+        print(f"Done initializing actor rollout")
+        print(f"="*100)
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
@@ -1020,11 +1039,21 @@ class RayPPOTrainer:
                             gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
 
                             batch = batch.union(gen_baseline_output)
-                            reward_baseline_tensor = self.reward_fn(batch)
-                            reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
+
+                            # Use AutoRater for baseline reward computation if available
+                            if hasattr(self.actor_rollout_wg, 'compute_autorater_score') and hasattr(self.config.actor_rollout_ref, 'autorater'):
+                                baseline_autorater_output = self.actor_rollout_wg.compute_autorater_score(batch)
+                                baseline_autorater_scores = baseline_autorater_output.batch["autorater_scores"]
+                                # autorater_weight = getattr(self.config.actor_rollout_ref.autorater, 'autorater_weight', 1.0)
+                                # reward_baseline_tensor = autorater_weight * baseline_autorater_scores
+                                reward_baseline_tensor = baseline_autorater_scores
+                            else:
+                                import ipdb; ipdb.set_trace()
+                                # # Fallback to regular reward function
+                                # reward_baseline_tensor = self.reward_fn(batch)
+                                # reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                             batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
-
                             batch.batch["reward_baselines"] = reward_baseline_tensor
 
                             del gen_baseline_batch, gen_baseline_output
@@ -1052,11 +1081,59 @@ class RayPPOTrainer:
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
                             batch = batch.union(reward_tensor)
 
-                        # TODO: add this back async stuff
-                        # if self.config.reward_model.launch_reward_fn_async:
-                        #     future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
-                        # else:
-                        reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                        # Use AutoRater function from actor_rollout_wg if available, otherwise use reward_fn
+                        if hasattr(self.actor_rollout_wg, 'compute_autorater_score'):
+                            # Compute AutoRater scores using the rollout worker
+                            autorater_output = self.actor_rollout_wg.compute_autorater_score(batch)
+                            
+                            # Extract scores and convert to reward format
+                            autorater_scores = autorater_output.batch["autorater_scores"]  # Shape: (batch_size,)
+                            autorater_decisions = autorater_output.batch["autorater_decisions"]  # Shape: (batch_size,)
+                            
+                            # Convert to token-level rewards (put reward at last token of response)
+                            response_length = batch.batch["responses"].shape[-1]
+                            reward_tensor = torch.zeros_like(batch.batch["responses"], dtype=torch.float32)
+                            
+                            # Apply AutoRater weight from config
+                            # autorater_weight = getattr(self.config.actor_rollout_ref.autorater, 'autorater_weight', 1.0)
+                            autorater_weight = 1.0
+                            
+                            for i in range(len(batch)):
+                                # Get valid response length for this item
+                                attention_mask = batch.batch["attention_mask"][i]
+                                prompt_length = batch.batch["prompts"].shape[-1]
+                                valid_response_length = attention_mask[prompt_length:].sum()
+                                
+                                if valid_response_length > 0:
+                                    # Place reward at the last valid token of the response
+                                    reward_tensor[i, valid_response_length - 1] = autorater_weight * autorater_scores[i]
+                            
+                            # Create reward_extra_infos_dict in the expected format
+                            reward_extra_infos_dict = {
+                                "autorater_scores": autorater_scores.tolist(),
+                                "autorater_decisions": autorater_decisions.tolist(),
+                            }
+                            
+                            # Add format scores if available
+                            if "format_scores" in autorater_output.batch:
+                                format_scores = autorater_output.batch["format_scores"]
+                                reward_extra_infos_dict["format_scores"] = format_scores.tolist()
+                            
+                            # Add explanations if available
+                            if "autorater_explanations" in autorater_output.non_tensor_batch:
+                                reward_extra_infos_dict["autorater_explanations"] = autorater_output.non_tensor_batch["autorater_explanations"].tolist()
+                            if "autorater_raw_responses" in autorater_output.non_tensor_batch:
+                                reward_extra_infos_dict["autorater_raw_responses"] = autorater_output.non_tensor_batch["autorater_raw_responses"].tolist()
+                            if "autorater_prompts" in autorater_output.non_tensor_batch:
+                                reward_extra_infos_dict["autorater_prompts"] = autorater_output.non_tensor_batch["autorater_prompts"].tolist()
+                        else:
+                            import ipdb; ipdb.set_trace()
+                        #     # Fallback to regular reward function
+                        #     # TODO: add this back async stuff
+                        #     # if self.config.reward_model.launch_reward_fn_async:
+                        #     #     future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
+                        #     # else:
+                        #     reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
                     
                     # log some reward metrics
                     if "format_scores" in reward_extra_infos_dict:
@@ -1169,6 +1246,7 @@ class RayPPOTrainer:
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                    rollout_data_dir = os.path.join(rollout_data_dir, self.config.trainer.experiment_name)
                     if rollout_data_dir:
                         with _timer("dump_rollout_generations", timing_raw):
                             print(batch.batch.keys())

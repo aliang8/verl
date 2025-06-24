@@ -33,6 +33,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 from safetensors.torch import save_file
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+import numpy as np
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
@@ -652,7 +653,7 @@ class ActorRolloutRefWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def generate_sequences(self, prompts: DataProto):
+    def generate_sequences(self, prompts: DataProto, **kwargs):
         # Support all hardwares
         prompts = prompts.to(get_torch_device().current_device())
 
@@ -669,7 +670,8 @@ class ActorRolloutRefWorker(Worker):
 
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
             with _timer("generate_sequences", timing_generate):
-                output = self.rollout.generate_sequences(prompts=prompts)
+                print(f"Generating sequences with kwargs: {kwargs}")
+                output = self.rollout.generate_sequences(prompts=prompts, **kwargs)
 
             log_gpu_memory_usage("After rollout generation", logger=logger)
 
@@ -763,6 +765,194 @@ class ActorRolloutRefWorker(Worker):
             self.ref_policy.actor_module._handle.reshard(True)
 
         return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_autorater_score(self, data: DataProto) -> DataProto:
+        """
+        Compute auto-rater scores by reusing the existing vLLM rollout engine.
+        This is much more memory efficient than creating a separate vLLM instance.
+        """
+        assert self._is_rollout, "AutoRater evaluation requires rollout capability"
+        
+        # Import AutoRater utilities
+        from verl.workers.autorater.autorater_utils import AUTO_RATER_TEMPLATE, format_autorater_prompt, parse_autorater_response, extract_solution
+        
+        # Support all hardwares
+        data = data.to(get_torch_device().current_device())
+        
+        # Extract information from the input data
+        responses = data.batch["responses"]
+        batch_size = responses.shape[0]
+        
+        # Decode questions and responses using the tokenizer
+        if "prompts" in data.batch:
+            questions = [self.tokenizer.decode(prompt, skip_special_tokens=True) 
+                        for prompt in data.batch["prompts"]]
+        else:
+            # Fallback: extract from input_ids if prompts not available
+            input_ids = data.batch.get("input_ids", data.batch.get("prompt_ids", None))
+            if input_ids is not None:
+                questions = [self.tokenizer.decode(ids, skip_special_tokens=True) 
+                           for ids in input_ids]
+            else:
+                questions = [""] * batch_size
+
+        predicted_answers = [self.tokenizer.decode(response, skip_special_tokens=True) 
+                           for response in responses]
+        
+        # Extract solutions from predicted answers
+        autorater_config = getattr(self.config, 'autorater', {})
+        extraction_method = autorater_config.get("extraction_method", "strict")
+        answer_formats = autorater_config.get("answer_formats", ["boxed", "hash", "conclusion"])
+        
+        extracted_predictions = []
+        for pred_answer in predicted_answers:
+            extracted = extract_solution(pred_answer, method=extraction_method, answer_formats=answer_formats)
+            extracted_predictions.append(extracted)
+
+        # Get ground truth from reward_model metadata
+        ground_truth_answers = []
+        if "reward_model" in data.non_tensor_batch:
+            for rm_info in data.non_tensor_batch["reward_model"]:
+                if isinstance(rm_info, dict) and "ground_truth" in rm_info:
+                    # Also try to extract from ground truth if it's in a formatted form
+                    gt_raw = str(rm_info["ground_truth"])
+                    gt_extracted = extract_solution(gt_raw, method=extraction_method, answer_formats=answer_formats)
+                    ground_truth_answers.append(gt_extracted if gt_extracted is not None else gt_raw)
+                else:
+                    ground_truth_answers.append("Unknown")
+        else:
+            ground_truth_answers = ["Unknown"] * batch_size
+
+        # Format AutoRater evaluation prompts
+        autorater_prompts = []
+        for i in range(batch_size):
+            prompt = format_autorater_prompt(
+                questions[i], 
+                extracted_predictions[i], 
+                ground_truth_answers[i],
+                AUTO_RATER_TEMPLATE
+            )
+            autorater_prompts.append(prompt)
+        
+        # Tokenize AutoRater prompts for the rollout engine
+        # Follow the same pattern as generate_sequences
+        tokenizer = self.tokenizer
+        tokenizer.padding_side = "left"  # vLLM expects left padding
+        
+        # Use a shorter max length for AutoRater prompts since they're simpler
+        max_prompt_length = autorater_config.get("max_prompt_length", 2048)
+        
+        encoded = tokenizer(
+            autorater_prompts,
+            padding="max_length",
+            max_length=max_prompt_length,
+            truncation=True,
+            return_tensors="pt",
+            add_special_tokens=True
+        )
+        
+        input_ids = encoded["input_ids"]
+        attention_mask = encoded["attention_mask"]
+        
+        # Create position_ids (similar to what's done in generate_sequences)
+        position_ids = torch.zeros_like(attention_mask)
+        for i in range(batch_size):
+            valid_length = attention_mask[i].sum().item()
+            start_pos = len(position_ids[i]) - valid_length
+            position_ids[i, start_pos:] = torch.arange(valid_length)
+        
+        # Create DataProto for AutoRater evaluation
+        autorater_data = DataProto.from_dict({
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids
+        })
+        
+        # Set metadata for deterministic evaluation
+        autorater_data.meta_info = {
+            "eos_token_id": self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id,
+            "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
+            "do_sample": False,  # Use deterministic evaluation
+            "validate": True,
+            "temperature": 0.0,
+        }
+
+        # Use the existing rollout infrastructure for AutoRater evaluation
+        with self.rollout_sharding_manager:
+            autorater_data = self.rollout_sharding_manager.preprocess_data(autorater_data)
+            
+            # Generate AutoRater responses using the existing vLLM engine
+            # Pass max_tokens to limit response length for AutoRater evaluation
+            autorater_output = self.rollout.generate_sequences(prompts=autorater_data, max_tokens=10)
+            
+            autorater_output = self.rollout_sharding_manager.postprocess_data(autorater_output)
+        
+        # Decode AutoRater responses
+        autorater_responses = autorater_output.batch["responses"]
+        decoded_responses = [self.tokenizer.decode(response, skip_special_tokens=True) 
+                            for response in autorater_responses]
+    
+        # Parse AutoRater decisions
+        decisions = []
+        explanations = []
+        for response in decoded_responses:
+            explanation, decision = parse_autorater_response(response)
+            explanations.append(explanation)
+            decisions.append(decision)
+        
+        # Import format checking function
+        from verl.trainer.ppo.reward_fns import format_check_reward
+        
+        # Convert decisions to scores and apply format checking
+        scores = []
+        autorater_decisions = []
+        format_scores = []
+        autorater_scores = []
+        
+        for i, decision in enumerate(decisions):
+            # Get AutoRater score
+            if decision == "TRUE":
+                autorater_score = 2.0
+                autorater_decisions.append(1)
+            elif decision == "FALSE":
+                autorater_score = -1.5
+                autorater_decisions.append(0)
+            else:  # ERROR, UNKNOWN
+                autorater_score = -2.0
+                autorater_decisions.append(-1)
+            
+            # Get format score for the original predicted answer
+            format_score = format_check_reward(predicted_answers[i])
+            format_scores.append(format_score)
+            
+            # Combine AutoRater and format scores
+            final_score = autorater_score + format_score  # Add format penalty/bonus
+            scores.append(final_score)
+            autorater_scores.append(autorater_score)
+
+        # import ipdb; ipdb.set_trace()
+
+        # Create output DataProto
+        output_data = DataProto.from_dict(
+            tensors={
+                "autorater_scores": torch.tensor(autorater_scores, dtype=torch.float32),
+                "autorater_decisions": torch.tensor(autorater_decisions, dtype=torch.long),
+                "format_scores": torch.tensor(format_scores, dtype=torch.float32)
+            },
+            non_tensors={
+                "autorater_explanations": np.array(explanations, dtype=object),
+                "autorater_raw_responses": np.array(decoded_responses, dtype=object),
+                "extracted_predictions": np.array(extracted_predictions, dtype=object),
+                "original_predictions": np.array(predicted_answers, dtype=object),
+                "autorater_prompts": np.array(autorater_prompts, dtype=object)
+            }
+        )
+        
+        # Clear GPU cache
+        get_torch_device().empty_cache()
+        
+        return output_data.to("cpu")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
@@ -1472,7 +1662,7 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         return rollout, rollout_sharding_manager
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def generate_sequences(self, prompts: DataProto):
+    def generate_sequences(self, prompts: DataProto, **kwargs):
         raise NotImplementedError("AsyncActorRolloutRefWorker does not support generate_sequences")
 
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)

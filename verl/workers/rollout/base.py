@@ -23,6 +23,6 @@ class BaseRollout(ABC):
     """Base class for rollout."""
 
     @abstractmethod
-    def generate_sequences(self, prompts: DataProto) -> DataProto:
+    def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
         """Generate sequences"""
         pass

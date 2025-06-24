@@ -174,13 +174,20 @@ class TaskRunner:
             role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
             mapping[Role.RewardModel] = global_pool_id
 
-        # Add AutoRater worker if enabled
-        if config.autorater.enable:
-            # Use the simple AutoRater implementation instead of FSDP version
-            from verl.workers.autorater import AutoRaterWorker
-            role_worker_mapping[Role.AutoRater] = ray.remote(AutoRaterWorker)
-            mapping[Role.AutoRater] = global_pool_id
-            print(f"AutoRater enabled with model: {config.autorater.model.path}")
+        # # Add AutoRater worker if enabled
+        # if config.autorater.enable:
+        #     worker_type = config.autorater.get("worker_type", "standard")
+        #     if worker_type == "vllm":
+        #         # Use vLLM-based AutoRater for memory-efficient inference
+        #         from verl.workers.autorater.vllm_autorater_worker import vLLMAutoRaterWorker
+        #         role_worker_mapping[Role.AutoRater] = ray.remote(vLLMAutoRaterWorker)
+        #         print(f"vLLM AutoRater enabled with model: {config.autorater.model.path}")
+        #     else:
+        #         # Use standard AutoRater implementation
+        #         from verl.workers.autorater import AutoRaterWorker
+        #         role_worker_mapping[Role.AutoRater] = ray.remote(AutoRaterWorker)
+        #         print(f"Standard AutoRater enabled with model: {config.autorater.model.path}")
+        #     mapping[Role.AutoRater] = global_pool_id
 
         # Add a reference policy worker if KL loss or KL reward is used.
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
@@ -188,16 +195,20 @@ class TaskRunner:
             mapping[Role.RefPolicy] = global_pool_id
 
         # Load the reward manager for training and validation.
-        reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-        val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
+        # reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
+        # val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         from verl.utils.dataset.rl_dataset import collate_fn
 
         # Create training and validation datasets.
+        print(f"="*100)
+        print("Creating training and validation datasets")
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
         train_sampler = create_rl_sampler(config.data, train_dataset)
+        print(f"Done creating training and validation datasets")
+        print(f"="*100)
 
         # Initialize the PPO trainer.
         trainer = RayPPOTrainer(
@@ -207,8 +218,8 @@ class TaskRunner:
             role_worker_mapping=role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=ray_worker_group_cls,
-            reward_fn=reward_fn,
-            val_reward_fn=val_reward_fn,
+            # reward_fn=reward_fn,
+            # val_reward_fn=val_reward_fn,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             collate_fn=collate_fn,
@@ -218,18 +229,18 @@ class TaskRunner:
         # Initialize the workers of the trainer.
         trainer.init_workers()
         
-        # Setup AutoRater hybrid reward if enabled
-        if config.autorater.enable:
-            from verl.utils.reward_score.autorater_reward import create_autorater_reward_fn
+        # # Setup AutoRater hybrid reward if enabled
+        # if config.autorater.enable:
+        #     from verl.utils.reward_score.autorater_reward import create_autorater_reward_fn
                                     
-            # Use AutoRater-only reward
-            autorater_reward_fn = create_autorater_reward_fn(trainer.autorater_wg, config)
-            print("Using AutoRater-only reward")
+        #     # Use AutoRater-only reward
+        #     autorater_reward_fn = create_autorater_reward_fn(trainer.autorater_wg, config)
+        #     print("Using AutoRater-only reward")
             
-            # Replace the reward functions with AutoRater versions
-            trainer.reward_fn = autorater_reward_fn
-            trainer.val_reward_fn = autorater_reward_fn
-            print("AutoRater reward functions initialized successfully")
+        #     # Replace the reward functions with AutoRater versions
+        #     trainer.reward_fn = autorater_reward_fn
+        #     trainer.val_reward_fn = autorater_reward_fn
+        #     print("AutoRater reward functions initialized successfully")
         
         # Start the training process.
         trainer.fit()

@@ -14,7 +14,7 @@ from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils.model import compute_position_id_with_mask
-
+from .autorater_utils import AUTO_RATER_TEMPLATE, extract_solution, format_autorater_prompt, parse_autorater_response
 
 class AutoRaterWorker(Worker):
     """
@@ -63,26 +63,8 @@ class AutoRaterWorker(Worker):
         self.extraction_method = self.config.get("extraction_method", "flexible")  # "strict", "flexible", or "both"
         self.answer_formats = self.config.get("answer_formats", ["boxed", "hash"])  # Support both \boxed{} and ####
         
-        # AutoRater template for evaluation
-        self.auto_rater_template = """===Task===
-I need your help in evaluating an answer provided by an LLM against a ground truth
-answer. Your task is to determine if the ground truth answer is present in the LLM's response.
-Please analyze the provided data and make a decision.
-===Instructions===
-1. Carefully compare the "Predicted Answer" with the "Ground Truth Answer".
-2. Consider the substance of the answers – look for equivalent information or correct answers. Do
-not focus on exact wording unless the exact wording is crucial to the meaning.
-3. Your final decision should be based on whether the meaning and the vital facts of the "Ground
-Truth Answer" are present in the "Predicted Answer:"
-===Input Data===
-- Predicted Answer: {predicted_answer}
-- Ground Truth Answer: {ground_truth_answer}
-===Output Format===
-Provide your final evaluation in the following format:
-"Decision:" ("TRUE" or "FALSE")
-
-Please proceed with the evaluation.
-Decision: """
+        # Use shared template from utils
+        self.auto_rater_template = AUTO_RATER_TEMPLATE
 
     def _build_model(self, config):
         """Build the AutoRater model following the same pattern as RewardModelWorker."""
@@ -149,39 +131,11 @@ Decision: """
 
     def format_prompt(self, question: str, predicted_answer: str, ground_truth_answer: str) -> str:
         """Format the auto-rater prompt with the given inputs."""
-        return self.auto_rater_template.format(
-            question=question,
-            predicted_answer=predicted_answer,
-            ground_truth_answer=ground_truth_answer
-        )
+        return format_autorater_prompt(question, predicted_answer, ground_truth_answer, self.auto_rater_template)
 
     def parse_response(self, response: str) -> Tuple[str, str]:
-        """
-        Parse the model's response to extract explanation and decision.
-        
-        Returns:
-            Tuple of (explanation, decision)
-        """
-        # Multiple parsing patterns to catch TRUE/FALSE decisions
-        decision_patterns = [
-            r'Decision:\s*["\']?(TRUE|FALSE)["\']?',
-            r'\b(TRUE|FALSE)\b',
-            r'(true|false)',
-            r'answer is\s+(TRUE|FALSE)',
-            r'decision is\s+(TRUE|FALSE)',
-        ]
-        
-        explanation = response.strip()
-        decision = "UNKNOWN"
-        
-        # Try to find decision
-        for pattern in decision_patterns:
-            match = re.search(pattern, response, re.IGNORECASE)
-            if match:
-                decision = match.group(1).upper()
-                break
-        
-        return explanation, decision
+        """Parse the model's response to extract explanation and decision."""
+        return parse_autorater_response(response)
 
     def evaluate_batch(self, 
                       questions: List[str], 
@@ -247,71 +201,8 @@ Decision: """
         }
 
     def extract_solution(self, solution_str: str, method: str = "flexible") -> Union[str, None]:
-        """
-        Extract the numerical answer from a solution string.
-        Supports both #### format and \boxed{} format.
-        
-        Args:
-            solution_str: The solution text
-            method: "strict", "flexible", or "both"
-            
-        Returns:
-            Extracted answer as string, or None if not found
-        """
-        if method == "strict":
-            # Try #### format first (GSM8K style)
-            if "hash" in self.answer_formats:
-                solution = re.search(r"#### (\\-?[0-9\\.\\,]+)", solution_str)
-                if solution is not None:
-                    final_answer = solution.group(0)
-                    final_answer = final_answer.split("#### ")[1].replace(",", "").replace("$", "")
-                    return final_answer
-            
-            # Try \boxed{} format
-            if "boxed" in self.answer_formats:
-                boxed_match = re.search(r"\\boxed\{([^}]+)\}", solution_str)
-                if boxed_match is not None:
-                    final_answer = boxed_match.group(1).replace(",", "").replace("$", "")
-                    return final_answer
-            
-            return None
-            
-        elif method == "flexible":
-            # Try structured formats first
-            if "hash" in self.answer_formats:
-                solution = re.search(r"#### (\\-?[0-9\\.\\,]+)", solution_str)
-                if solution is not None:
-                    final_answer = solution.group(0)
-                    final_answer = final_answer.split("#### ")[1].replace(",", "").replace("$", "")
-                    return final_answer
-            
-            if "boxed" in self.answer_formats:
-                boxed_match = re.search(r"\\boxed\{([^}]+)\}", solution_str)
-                if boxed_match is not None:
-                    final_answer = boxed_match.group(1).replace(",", "").replace("$", "")
-                    return final_answer
-            
-            # Fallback: find any numbers in the text
-            answer = re.findall(r"(\\-?[0-9\\.\\,]+)", solution_str)
-            final_answer = None
-            if len(answer) == 0:
-                return None
-            else:
-                invalid_str = ["", "."]
-                # Find the last number that is not '.'
-                for final_answer in reversed(answer):
-                    if final_answer not in invalid_str:
-                        break
-                return final_answer.replace(",", "").replace("$", "") if final_answer else None
-                
-        elif method == "both":
-            # Try strict first, then flexible
-            strict_result = self.extract_solution(solution_str, "strict")
-            if strict_result is not None:
-                return strict_result
-            return self.extract_solution(solution_str, "flexible")
-        
-        return None
+        """Extract the answer from a solution string using shared utilities."""
+        return extract_solution(solution_str, method, self.answer_formats)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_autorater_score(self, data: DataProto) -> DataProto:

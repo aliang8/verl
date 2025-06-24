@@ -448,7 +448,7 @@ def process_training_reward_metrics(data_sources: list[str], reward_extra_infos_
     metrics = {}
     
     # Process format_score and content_score for each data source
-    for metric_name in ["format_scores", "content_scores", "auto_rater_scores"]:
+    for metric_name in ["format_scores", "content_scores", "autorater_scores"]:
         if metric_name in reward_extra_infos_dict:
             metric_values = reward_extra_infos_dict[metric_name]
             
