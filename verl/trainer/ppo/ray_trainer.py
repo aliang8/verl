@@ -590,13 +590,13 @@ class RayPPOTrainer:
             
             print(f"Dumped {len(indices)} generations for '{data_source}' to {filename}")
 
-        # Also create a combined file with all data sources
-        combined_filename = os.path.join(dump_path, f"{self.global_steps}_all.jsonl")
-        with open(combined_filename, "w") as f:
-            for i in range(n):
-                entry = {k: v[i] for k, v in base_data.items()}
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        print(f"Dumped combined generations to {combined_filename}")
+        # # Also create a combined file with all data sources
+        # combined_filename = os.path.join(dump_path, f"{self.global_steps}_all.jsonl")
+        # with open(combined_filename, "w") as f:
+        #     for i in range(n):
+        #         entry = {k: v[i] for k, v in base_data.items()}
+        #         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # print(f"Dumped combined generations to {combined_filename}")
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -689,16 +689,77 @@ class RayPPOTrainer:
 
             test_batch = test_batch.union(test_output_gen_batch)
 
-            # evaluate using reward_function
-            result = self.val_reward_fn(test_batch, return_dict=True)
-            reward_tensor = result["reward_tensor"]
-            scores = reward_tensor.sum(-1).cpu().tolist()
-            sample_scores.extend(scores)
+            # evaluate using AutoRater if available, otherwise use val_reward_fn
+            if hasattr(self.actor_rollout_wg, 'compute_autorater_score'):
+                print("Using AutoRater for validation evaluation")
+                print(f"Test batch size: {len(test_batch)}")
+                
+                # Pad test_batch to be divisible by worker count for AutoRater
+                test_batch_padded, autorater_pad_size = pad_dataproto_to_divisor(test_batch, self.actor_rollout_wg.world_size)
+                autorater_output_padded = self.actor_rollout_wg.compute_autorater_score(test_batch_padded)
+                
+                # Unpad the AutoRater results
+                if autorater_pad_size > 0:
+                    autorater_scores = autorater_output_padded.batch["autorater_scores"][:-autorater_pad_size]
+                    format_scores = autorater_output_padded.batch["format_scores"][:-autorater_pad_size]
+                    
+                    # Create unpadded tensors dict
+                    unpadded_tensors = {
+                        "autorater_scores": autorater_scores,
+                        "format_scores": format_scores,
+                    }
+                    if "autorater_decisions" in autorater_output_padded.batch:
+                        unpadded_tensors["autorater_decisions"] = autorater_output_padded.batch["autorater_decisions"][:-autorater_pad_size]
+                    
+                    # Create unpadded non-tensors dict
+                    unpadded_non_tensors = {}
+                    for key, val in autorater_output_padded.non_tensor_batch.items():
+                        if isinstance(val, np.ndarray):
+                            unpadded_non_tensors[key] = val[:-autorater_pad_size]
+                        else:
+                            unpadded_non_tensors[key] = val
+                    
+                    # Create new DataProto with unpadded data
+                    autorater_output = DataProto.from_dict(
+                        tensors=unpadded_tensors,
+                        non_tensors=unpadded_non_tensors,
+                        meta_info=autorater_output_padded.meta_info
+                    )
+                else:
+                    autorater_output = autorater_output_padded
+                    autorater_scores = autorater_output.batch["autorater_scores"]  # Raw AutoRater scores
+                    format_scores = autorater_output.batch["format_scores"]       # Format penalty scores
+                
+                # Use AutoRater scores as the main reward
+                reward_tensor = autorater_scores.unsqueeze(-1)  # Shape: (batch_size, 1) to match expected format
+                scores = autorater_scores.cpu().tolist()
+                sample_scores.extend(scores)
 
-            reward_extra_infos_dict["reward"].extend(scores)
-            if "reward_extra_info" in result:
-                for key, lst in result["reward_extra_info"].items():
-                    reward_extra_infos_dict[key].extend(lst)
+                # Store AutoRater-specific metrics
+                reward_extra_infos_dict["reward"].extend(scores)
+                reward_extra_infos_dict["autorater_scores"].extend(autorater_scores.cpu().tolist())
+                reward_extra_infos_dict["format_scores"].extend(format_scores.cpu().tolist())
+                
+                # Add additional AutoRater info if available
+                if "autorater_explanations" in autorater_output.non_tensor_batch:
+                    reward_extra_infos_dict["autorater_explanations"].extend(
+                        autorater_output.non_tensor_batch["autorater_explanations"].tolist()
+                    )
+                if "autorater_decisions" in autorater_output.batch:
+                    decisions = autorater_output.batch["autorater_decisions"].cpu().tolist()
+                    reward_extra_infos_dict["autorater_decisions"].extend(decisions)
+            else:
+                print("Using val_reward_fn for validation evaluation")
+                # Fallback to regular reward function
+                result = self.val_reward_fn(test_batch, return_dict=True)
+                reward_tensor = result["reward_tensor"]
+                scores = reward_tensor.sum(-1).cpu().tolist()
+                sample_scores.extend(scores)
+
+                reward_extra_infos_dict["reward"].extend(scores)
+                if "reward_extra_info" in result:
+                    for key, lst in result["reward_extra_info"].items():
+                        reward_extra_infos_dict[key].extend(lst)
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
@@ -983,7 +1044,7 @@ class RayPPOTrainer:
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        if self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
@@ -1263,7 +1324,7 @@ class RayPPOTrainer:
                             )
 
                     # validate
-                    if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
+                    if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                         with _timer("testing", timing_raw):
                             val_metrics: dict = self._validate()
                             if is_last_step:
