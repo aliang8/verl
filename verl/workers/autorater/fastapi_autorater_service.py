@@ -15,13 +15,17 @@ import json
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
-import ray
-import numpy as np
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel
-import uvicorn
+# Libraries from standard python or installed via pip (assumed to be installed)
+import ray  # type: ignore
+import numpy as np  # type: ignore
+from fastapi import FastAPI, HTTPException, BackgroundTasks  # type: ignore
+from pydantic import BaseModel  # type: ignore
+import uvicorn  # type: ignore
 
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf  # type: ignore
+from transformers import AutoTokenizer  # type: ignore
+from vllm import LLM, SamplingParams  # type: ignore
+from verl.workers.autorater.autorater_utils import format_autorater_prompt, parse_autorater_response
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -63,10 +67,8 @@ class AutoRaterActor:
         
     def initialize(self):
         """Initialize the vLLM engine directly on this GPU"""
-        from verl.third_party.vllm import LLM
         from verl.utils.fs import copy_to_local
-        from transformers import AutoTokenizer
-        from vllm import SamplingParams
+
         
         # Download model to local path
         use_shm = self.config.model.get("use_shm", False)
@@ -111,9 +113,7 @@ class AutoRaterActor:
         """Evaluate a batch of responses using AutoRater template"""
         if self.inference_engine is None:
             raise RuntimeError("AutoRater not initialized")
-            
-        from verl.workers.autorater.autorater_utils import format_autorater_prompt, parse_autorater_response
-        
+                    
         # Format evaluation prompts
         evaluation_prompts = []
         for question, predicted_answer, ground_truth in zip(questions, predicted_answers, ground_truth_answers):
@@ -301,52 +301,38 @@ async def evaluate_responses(request: AutoRaterRequest):
     """Evaluate responses using distributed AutoRater actors"""
     if len(app.state.autorater_actors) == 0:
         raise HTTPException(status_code=400, detail="AutoRater not initialized. Call /initialize first.")
-    
-    # --- Logging request for debugging ---
-    log_dir = "autorater_requests"
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    log_filename = os.path.join(log_dir, f"request_{timestamp}.json")
-    
-    try:
-        with open(log_filename, "w", encoding="utf-8") as f:
-            # Convert Pydantic request object to dict for JSON serialization
-            json.dump(request.dict(), f, ensure_ascii=False, indent=2)
-        logger.info(f"Logged request to {log_filename}")
-    except Exception as e:
-        logger.error(f"Failed to log request to {log_filename}: {e}")
-    # --- End logging request ---
 
     start_time = time.time()
     batch_size = len(request.prompts)
     logger.info(f"Processing AutoRater request with {batch_size} samples using {len(app.state.autorater_actors)} actors")
-    
+
     # Load tokenizer to decode prompts and responses
     # Use the tokenizer from the initialized AutoRaterActor or a default one if not available
     # For simplicity, let's use a default for now if actors aren't fully initialized (though they should be)
     try:
         # Try to get tokenizer from an actor. All actors should have the same tokenizer.
         # This assumes at least one actor is initialized.
-        tokenizer = await app.state.autorater_actors[0].get_tokenizer.remote() # New method to get tokenizer
-    except Exception:
-        logger.warning("Could not retrieve tokenizer from actor, using default Qwen/Qwen2.5-7B-Instruct. This might cause issues if models differ.")
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct", trust_remote_code=False)
+        # We need to block here as the tokenizer is needed immediately
+        tokenizer = ray.get(app.state.autorater_actors[0].get_tokenizer.remote()) # type: ignore
+    except Exception as e:
+        logger.warning(f"Could not retrieve tokenizer from actor, using default Qwen/Qwen2.5-7B-Instruct. This might cause issues if models differ. Error: {e}")
+        # Fallback to load tokenizer if not already loaded for evaluation
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct", trust_remote_code=False) # type: ignore
 
     # Decode prompts and responses to text
     questions = []
     predicted_answers = []
     ground_truth_answers = []
-    
+
     for i in range(batch_size):
         # Decode question from prompt IDs
         question = tokenizer.decode(request.prompts[i], skip_special_tokens=True)
         questions.append(question)
-        
+
         # Decode predicted answer from response IDs
         predicted_answer = tokenizer.decode(request.responses[i], skip_special_tokens=True)
         predicted_answers.append(predicted_answer)
-        
+
         # Extract ground truth from reward_model_info
         reward_info = request.reward_model_info[i]
         if isinstance(reward_info, dict) and "ground_truth" in reward_info:
@@ -354,37 +340,47 @@ async def evaluate_responses(request: AutoRaterRequest):
         else:
             ground_truth = str(reward_info)
         ground_truth_answers.append(ground_truth)
-    
+
+    # Format AutoRater evaluation prompts using the template (needed for logging later)
+    evaluation_prompts = []
+    for question, predicted_answer, ground_truth in zip(questions, predicted_answers, ground_truth_answers):
+        autorater_prompt = format_autorater_prompt( # type: ignore
+            question=question,
+            predicted_answer=predicted_answer,
+            ground_truth_answer=ground_truth
+        )
+        evaluation_prompts.append(autorater_prompt)
+
     # Split work across available actors
     num_actors = len(app.state.autorater_actors)
     chunk_size = max(1, batch_size // num_actors)
-    
+
     # Create chunks for parallel processing
     evaluation_futures = []
     for i in range(0, batch_size, chunk_size):
         end_idx = min(i + chunk_size, batch_size)
-        
+
         # Select actor (round robin)
         actor_idx = (i // chunk_size) % num_actors
         actor = app.state.autorater_actors[actor_idx]
-        
+
         # Submit evaluation task to actor
-        future = actor.evaluate_batch.remote(
+        future = actor.evaluate_batch.remote( # type: ignore
             questions[i:end_idx],
             predicted_answers[i:end_idx],
             ground_truth_answers[i:end_idx]
         )
         evaluation_futures.append(future)
-    
+
     # Wait for all evaluations to complete
     results = ray.get(evaluation_futures)
-    
+
     # Combine results from all actors
     all_scores = []
     all_decisions = []
     all_explanations = []
     all_raw_responses = []
-    
+
     for result in results:
         # Convert decisions to scores and numerical decisions
         for decision in result["decisions"]:
@@ -397,16 +393,48 @@ async def evaluate_responses(request: AutoRaterRequest):
             else:
                 all_scores.append(0.5)
                 all_decisions.append(0)
-        
+
         all_explanations.extend(result["explanations"])
         all_raw_responses.extend(result["raw_responses"])
-    
+
     processing_time = time.time() - start_time
-    
+
     logger.info(f"AutoRater evaluation completed in {processing_time:.2f}s")
     logger.info(f"Total samples processed: {len(all_raw_responses)}")
     logger.info(f"Average score: {np.mean(all_scores):.3f}")
-    
+
+    # # --- Logging request and response for debugging ---
+    # log_dir = "autorater_requests"
+    # os.makedirs(log_dir, exist_ok=True)
+    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    # log_filename = os.path.join(log_dir, f"request_response_{timestamp}.json")
+
+    # try:
+    #     log_data = {
+    #         "request": request.dict(),
+    #         "decoded_request": {
+    #             "prompts": [tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in request.prompts],
+    #             "responses": [tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in request.responses],
+    #             "reward_model_info": request.reward_model_info,
+    #         },
+    #         "evaluation_prompts_to_autorater": evaluation_prompts, # Include the formatted prompts
+    #         "autorater_response": {
+    #             "autorater_scores": all_scores,
+    #             "autorater_decisions": all_decisions,
+    #             "autorater_explanations": all_explanations,
+    #             "autorater_raw_responses": all_raw_responses,
+    #             "processing_time": processing_time,
+    #             "success": True,
+    #         },
+    #         "timestamp": str(datetime.now())
+    #     }
+    #     with open(log_filename, "w", encoding="utf-8") as f:
+    #         json.dump(log_data, f, ensure_ascii=False, indent=2)
+    #     logger.info(f"Logged request and response to {log_filename}")
+    # except Exception as e:
+    #     logger.error(f"Failed to log request and response to {log_filename}: {e}")
+    # --- End logging ---
+
     return AutoRaterResponse(
         autorater_scores=all_scores,
         autorater_decisions=all_decisions,

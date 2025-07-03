@@ -28,16 +28,18 @@ from enum import Enum
 from pprint import pprint
 from typing import Optional, Type
 
-import numpy as np
+import numpy as np # type: ignore
 import ray
-import torch
+import torch # type: ignore
 from omegaconf import OmegaConf, open_dict
-from torch.utils.data import Dataset, Sampler
-from torchdata.stateful_dataloader import StatefulDataLoader
+from torch.utils.data import Dataset, Sampler # type: ignore
+from torchdata.stateful_dataloader import StatefulDataLoader # type: ignore
 from tqdm import tqdm
 import requests
+from accelerate.utils import set_seed # type: ignore
+from transformers import AutoTokenizer, PreTrainedTokenizerBase # type: ignore
 
-from verl import DataProto
+from verl import DataProto # type: ignore
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
@@ -60,6 +62,7 @@ from verl.utils.metric import (
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.workers.reward_manager.reward_manager import RewardManager
 
 WorkerType = Type[Worker]
 
@@ -347,6 +350,22 @@ class RayPPOTrainer:
 
         self._validate_config()
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+
+        # AutoRater service related
+        self.use_autorater = hasattr(self.config.trainer, 'autorater_service_url') and self.config.trainer.autorater_service_url
+        self.autorater_config = OmegaConf.create(self.config.get("autorater", {})) # Ensure it's an OmegaConf object
+
+        # Initialize RewardManager
+        # Pass self.autorater_config if available, otherwise an empty DictConfig
+        reward_manager_config = self.config.trainer.get("reward_manager_config", {})
+        # Merge autorater config into reward_manager_config if it's not already there
+        if "autorater_config" not in reward_manager_config:
+            reward_manager_config["autorater_config"] = OmegaConf.to_container(self.autorater_config, resolve=True) if self.autorater_config else {}
+        
+        self.reward_manager = RewardManager(
+            config=OmegaConf.create(reward_manager_config),
+            tokenizer=self.tokenizer
+        )
 
     def _validate_config(self):
         config = self.config
@@ -894,7 +913,7 @@ class RayPPOTrainer:
             self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
 
         # AutoRater is now a remote service, no need for a worker group here
-        self.use_autorater = False # Set to False since it's a remote service now
+        # self.use_autorater = False # Set to False since it's a remote service now
 
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
@@ -1175,50 +1194,19 @@ class RayPPOTrainer:
                             batch = batch.union(reward_tensor)
 
                         # Use remote AutoRater service if configured, otherwise use reward_fn
-                        if hasattr(self.config.trainer, 'autorater_service_url') and self.config.trainer.autorater_service_url:
-                            print("Using remote AutoRater service for training reward computation")
-                            autorater_response = self._call_remote_autorater_service(batch)
+                        if self.use_autorater:
+                            print("Using RewardManager for training reward computation")
+                            reward_tensor, reward_extra_infos_dict = self.reward_manager.compute_rewards(batch, return_dict=True)
 
-                            autorater_scores = autorater_response["autorater_scores"]
-                            autorater_decisions = autorater_response["autorater_decisions"]
-
-                            # Convert scores to token-level rewards (put reward at last token of response)
-                            response_length = batch.batch["responses"].shape[-1]
-                            reward_tensor = torch.zeros_like(batch.batch["responses"], dtype=torch.float32)
-
-                            for i in range(len(batch)):
-                                # Get valid response length for this item
-                                attention_mask = batch.batch["attention_mask"][i]
-                                prompt_length = batch.batch["prompts"].shape[-1]
-                                valid_response_length = attention_mask[prompt_length:].sum()
-
-                                if valid_response_length > 0:
-                                    # Place reward at the last valid token of the response
-                                    reward_tensor[i, valid_response_length - 1] = autorater_scores[i]
-
-                            # Create reward_extra_infos_dict in the expected format
-                            reward_extra_infos_dict = {
-                                "autorater_scores": autorater_scores,
-                                "autorater_decisions": autorater_decisions,
-                            }
-
-                            # Add format scores if available
-                            if "format_scores" in autorater_response:
-                                format_scores = autorater_response["format_scores"]
-                                reward_extra_infos_dict["format_scores"] = format_scores
-
-                            # Add explanations if available
-                            if "autorater_explanations" in autorater_response:
-                                reward_extra_infos_dict["autorater_explanations"] = autorater_response["autorater_explanations"]
-                            if "autorater_raw_responses" in autorater_response:
-                                reward_extra_infos_dict["autorater_raw_responses"] = autorater_response["autorater_raw_responses"]
-                            if "autorater_prompts" in autorater_response:
-                                reward_extra_infos_dict["autorater_prompts"] = autorater_response["autorater_prompts"]
+                            # If the reward_tensor is on CPU, move it to the correct device if needed for further processing
+                            if reward_tensor.device != get_torch_device().current_device():
+                                reward_tensor = reward_tensor.to(get_torch_device().current_device())
 
                         else:
                             # Fallback to regular reward function
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
+                    import ipdb; ipdb.set_trace()
                     # log some reward metrics
                     if "format_scores" in reward_extra_infos_dict:
                         # Add data source breakdown for format/content rewards
