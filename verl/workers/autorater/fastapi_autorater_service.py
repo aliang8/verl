@@ -11,6 +11,8 @@ import logging
 import os
 import time
 import traceback
+import json
+from datetime import datetime
 from typing import Dict, List, Any, Optional
 
 import ray
@@ -149,16 +151,17 @@ class AutoRaterActor:
             "raw_responses": raw_responses
         }
 
-
-
+    async def get_tokenizer(self):
+        """Return the tokenizer associated with this AutoRater actor"""
+        return self.tokenizer
 
 
 class AutoRaterRequest(BaseModel):
     """Request model for AutoRater evaluation"""
     prompts: List[List[int]]  # List of tokenized prompts
     responses: List[List[int]]  # List of tokenized responses
-    attention_mask: List[List[int]]  # Attention masks
-    position_ids: List[List[int]]  # Position IDs
+    attention_mask: List[List[int]]  # Attention masks (needed for decoding)
+    position_ids: List[List[int]]  # Position IDs (might not be directly used for text decoding but part of the original DataProto)
     reward_model_info: List[Dict[str, Any]]  # Ground truth and metadata
     
     class Config:
@@ -299,25 +302,48 @@ async def evaluate_responses(request: AutoRaterRequest):
     if len(app.state.autorater_actors) == 0:
         raise HTTPException(status_code=400, detail="AutoRater not initialized. Call /initialize first.")
     
+    # --- Logging request for debugging ---
+    log_dir = "autorater_requests"
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    log_filename = os.path.join(log_dir, f"request_{timestamp}.json")
+    
+    try:
+        with open(log_filename, "w", encoding="utf-8") as f:
+            # Convert Pydantic request object to dict for JSON serialization
+            json.dump(request.dict(), f, ensure_ascii=False, indent=2)
+        logger.info(f"Logged request to {log_filename}")
+    except Exception as e:
+        logger.error(f"Failed to log request to {log_filename}: {e}")
+    # --- End logging request ---
+
     start_time = time.time()
     batch_size = len(request.prompts)
     logger.info(f"Processing AutoRater request with {batch_size} samples using {len(app.state.autorater_actors)} actors")
     
     # Load tokenizer to decode prompts and responses
-    from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct", trust_remote_code=False)
-    
+    # Use the tokenizer from the initialized AutoRaterActor or a default one if not available
+    # For simplicity, let's use a default for now if actors aren't fully initialized (though they should be)
+    try:
+        # Try to get tokenizer from an actor. All actors should have the same tokenizer.
+        # This assumes at least one actor is initialized.
+        tokenizer = await app.state.autorater_actors[0].get_tokenizer.remote() # New method to get tokenizer
+    except Exception:
+        logger.warning("Could not retrieve tokenizer from actor, using default Qwen/Qwen2.5-7B-Instruct. This might cause issues if models differ.")
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct", trust_remote_code=False)
+
     # Decode prompts and responses to text
     questions = []
     predicted_answers = []
     ground_truth_answers = []
     
     for i in range(batch_size):
-        # Decode question from prompt
+        # Decode question from prompt IDs
         question = tokenizer.decode(request.prompts[i], skip_special_tokens=True)
         questions.append(question)
         
-        # Decode predicted answer from response
+        # Decode predicted answer from response IDs
         predicted_answer = tokenizer.decode(request.responses[i], skip_special_tokens=True)
         predicted_answers.append(predicted_answer)
         
@@ -345,7 +371,7 @@ async def evaluate_responses(request: AutoRaterRequest):
         # Submit evaluation task to actor
         future = actor.evaluate_batch.remote(
             questions[i:end_idx],
-            predicted_answers[i:end_idx], 
+            predicted_answers[i:end_idx],
             ground_truth_answers[i:end_idx]
         )
         evaluation_futures.append(future)

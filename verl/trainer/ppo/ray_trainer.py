@@ -35,6 +35,7 @@ from omegaconf import OmegaConf, open_dict
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
+import requests
 
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -622,6 +623,44 @@ class RayPPOTrainer:
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
+    def _call_remote_autorater_service(self, data_proto: DataProto) -> dict:
+        """Calls the remote AutoRater FastAPI service to get scores."""
+        if not hasattr(self.config.trainer, 'autorater_service_url') or not self.config.trainer.autorater_service_url:
+            raise ValueError("AutoRater service URL not configured in trainer.autorater_service_url")
+
+        url = self.config.trainer.autorater_service_url
+        print(f"Calling remote AutoRater service at {url}")
+
+        # Send tokenized prompts and responses directly, along with attention masks and position IDs
+        # Ensure reward_model_info has the same length as the batch.
+        batch_size = len(data_proto.batch["prompts"])
+        reward_model_info_from_proto = data_proto.non_tensor_batch.get("reward_model_info", [])
+        
+        # Create a padded list for reward_model_info
+        padded_reward_model_info = []
+        for i in range(batch_size):
+            if i < len(reward_model_info_from_proto):
+                padded_reward_model_info.append(reward_model_info_from_proto[i])
+            else:
+                padded_reward_model_info.append({}) # Default empty dict if no info available
+
+        payload = {
+            "prompts": data_proto.batch["prompts"].cpu().tolist(),
+            "responses": data_proto.batch["responses"].cpu().tolist(),
+            "attention_mask": data_proto.batch["attention_mask"].cpu().tolist(),
+            "position_ids": data_proto.batch["position_ids"].cpu().tolist(),
+            "reward_model_info": padded_reward_model_info
+        }
+
+        try:
+            response = requests.post(url, json=payload, timeout=600) # 10-minute timeout
+            response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
+            return response.json()
+        except requests.exceptions.Timeout as e:
+            raise RuntimeError(f"AutoRater service request timed out after 600 seconds: {e}")
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"Error calling remote AutoRater service: {e}")
+
     def _validate(self):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
@@ -689,68 +728,37 @@ class RayPPOTrainer:
 
             test_batch = test_batch.union(test_output_gen_batch)
 
-            # evaluate using AutoRater if available, otherwise use val_reward_fn
-            if hasattr(self.actor_rollout_wg, 'compute_autorater_score'):
-                print("Using AutoRater for validation evaluation")
+            # evaluate using remote AutoRater service
+            if hasattr(self.config.trainer, 'autorater_service_url') and self.config.trainer.autorater_service_url:
+                print("Using remote AutoRater service for validation evaluation")
                 print(f"Test batch size: {len(test_batch)}")
-                
-                # Pad test_batch to be divisible by worker count for AutoRater
-                test_batch_padded, autorater_pad_size = pad_dataproto_to_divisor(test_batch, self.actor_rollout_wg.world_size)
-                autorater_output_padded = self.actor_rollout_wg.compute_autorater_score(test_batch_padded)
-                
-                # Unpad the AutoRater results
-                if autorater_pad_size > 0:
-                    autorater_scores = autorater_output_padded.batch["autorater_scores"][:-autorater_pad_size]
-                    format_scores = autorater_output_padded.batch["format_scores"][:-autorater_pad_size]
-                    
-                    # Create unpadded tensors dict
-                    unpadded_tensors = {
-                        "autorater_scores": autorater_scores,
-                        "format_scores": format_scores,
-                    }
-                    if "autorater_decisions" in autorater_output_padded.batch:
-                        unpadded_tensors["autorater_decisions"] = autorater_output_padded.batch["autorater_decisions"][:-autorater_pad_size]
-                    
-                    # Create unpadded non-tensors dict
-                    unpadded_non_tensors = {}
-                    for key, val in autorater_output_padded.non_tensor_batch.items():
-                        if isinstance(val, np.ndarray):
-                            unpadded_non_tensors[key] = val[:-autorater_pad_size]
-                        else:
-                            unpadded_non_tensors[key] = val
-                    
-                    # Create new DataProto with unpadded data
-                    autorater_output = DataProto.from_dict(
-                        tensors=unpadded_tensors,
-                        non_tensors=unpadded_non_tensors,
-                        meta_info=autorater_output_padded.meta_info
-                    )
-                else:
-                    autorater_output = autorater_output_padded
-                    autorater_scores = autorater_output.batch["autorater_scores"]  # Raw AutoRater scores
-                    format_scores = autorater_output.batch["format_scores"]       # Format penalty scores
-                
-                # Use AutoRater scores as the main reward
-                reward_tensor = autorater_scores.unsqueeze(-1)  # Shape: (batch_size, 1) to match expected format
-                scores = autorater_scores.cpu().tolist()
+
+                autorater_response = self._call_remote_autorater_service(test_batch)
+
+                autorater_scores = autorater_response["autorater_scores"]
+                autorater_decisions = autorater_response["autorater_decisions"]
+                autorater_explanations = autorater_response.get("autorater_explanations", [])
+                autorater_raw_responses = autorater_response.get("autorater_raw_responses", [])
+
+                # Convert scores to tensor, assuming a simple reward structure where each sample gets one score
+                reward_tensor = torch.tensor(autorater_scores, dtype=torch.float32).unsqueeze(-1)  # Shape: (batch_size, 1)
+
+                # Extend sample_scores for logging/metrics
+                scores = autorater_scores
                 sample_scores.extend(scores)
 
                 # Store AutoRater-specific metrics
                 reward_extra_infos_dict["reward"].extend(scores)
-                reward_extra_infos_dict["autorater_scores"].extend(autorater_scores.cpu().tolist())
-                reward_extra_infos_dict["format_scores"].extend(format_scores.cpu().tolist())
-                
-                # Add additional AutoRater info if available
-                if "autorater_explanations" in autorater_output.non_tensor_batch:
-                    reward_extra_infos_dict["autorater_explanations"].extend(
-                        autorater_output.non_tensor_batch["autorater_explanations"].tolist()
-                    )
-                if "autorater_decisions" in autorater_output.batch:
-                    decisions = autorater_output.batch["autorater_decisions"].cpu().tolist()
-                    reward_extra_infos_dict["autorater_decisions"].extend(decisions)
+                reward_extra_infos_dict["autorater_scores"].extend(autorater_scores)
+                reward_extra_infos_dict["autorater_decisions"].extend(autorater_decisions)
+                if autorater_explanations: # Only add if not empty
+                    reward_extra_infos_dict["autorater_explanations"].extend(autorater_explanations)
+                if autorater_raw_responses: # Only add if not empty
+                    reward_extra_infos_dict["autorater_raw_responses"].extend(autorater_raw_responses)
+
             else:
                 print("Using val_reward_fn for validation evaluation")
-                # Fallback to regular reward function
+                # Fallback to regular reward function if remote AutoRater not configured
                 result = self.val_reward_fn(test_batch, return_dict=True)
                 reward_tensor = result["reward_tensor"]
                 scores = reward_tensor.sum(-1).cpu().tolist()
@@ -766,7 +774,7 @@ class RayPPOTrainer:
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         # dump generations
-        val_data_dir = self.config.trainer.get("validation_data_dir", None) 
+        val_data_dir = self.config.trainer.get("validation_data_dir", None)
         val_data_dir = os.path.join(val_data_dir, self.config.trainer.experiment_name)
         if val_data_dir:
             # Flatten data_source_lst for passing to _dump_generations
@@ -855,13 +863,8 @@ class RayPPOTrainer:
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
 
-        # create AutoRater if configured
-        self.use_autorater = Role.AutoRater in self.role_worker_mapping
-        if self.use_autorater:
-            print(f"\tCreating AutoRater")
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.AutoRater)
-            autorater_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.AutoRater], config=self.config.get("autorater", {}))
-            self.resource_pool_to_cls[resource_pool]["autorater"] = autorater_cls
+        # AutoRater is now a remote service, no need for a worker group here
+        self.use_autorater = False # Set to False since it's a remote service now
 
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
@@ -899,11 +902,6 @@ class RayPPOTrainer:
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
-
-        # # Initialize AutoRater worker group if configured
-        # if self.use_autorater:
-        #     self.autorater_wg = all_wg["autorater"]
-        #     self.autorater_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]
@@ -1101,18 +1099,16 @@ class RayPPOTrainer:
 
                             batch = batch.union(gen_baseline_output)
 
-                            # Use AutoRater for baseline reward computation if available
-                            if hasattr(self.actor_rollout_wg, 'compute_autorater_score') and hasattr(self.config.actor_rollout_ref, 'autorater'):
-                                baseline_autorater_output = self.actor_rollout_wg.compute_autorater_score(batch)
-                                baseline_autorater_scores = baseline_autorater_output.batch["autorater_scores"]
-                                # autorater_weight = getattr(self.config.actor_rollout_ref.autorater, 'autorater_weight', 1.0)
-                                # reward_baseline_tensor = autorater_weight * baseline_autorater_scores
-                                reward_baseline_tensor = baseline_autorater_scores
+                            # Use remote AutoRater service for baseline reward computation
+                            if hasattr(self.config.trainer, 'autorater_service_url') and self.config.trainer.autorater_service_url:
+                                print("Using remote AutoRater service for baseline reward computation")
+                                baseline_autorater_response = self._call_remote_autorater_service(batch)
+                                baseline_autorater_scores = baseline_autorater_response["autorater_scores"]
+                                reward_baseline_tensor = torch.tensor(baseline_autorater_scores, dtype=torch.float32)
                             else:
-                                import ipdb; ipdb.set_trace()
-                                # # Fallback to regular reward function
-                                # reward_baseline_tensor = self.reward_fn(batch)
-                                # reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
+                                # Fallback to regular reward function if remote AutoRater not configured
+                                reward_baseline_tensor, _ = compute_reward(batch, self.reward_fn)
+                                reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                             batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
                             batch.batch["reward_baselines"] = reward_baseline_tensor
@@ -1142,60 +1138,51 @@ class RayPPOTrainer:
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
                             batch = batch.union(reward_tensor)
 
-                        # Use AutoRater function from actor_rollout_wg if available, otherwise use reward_fn
-                        if hasattr(self.actor_rollout_wg, 'compute_autorater_score'):
-                            # Compute AutoRater scores using the rollout worker
-                            autorater_output = self.actor_rollout_wg.compute_autorater_score(batch)
-                            
-                            # Extract scores and convert to reward format
-                            autorater_scores = autorater_output.batch["autorater_scores"]  # Shape: (batch_size,)
-                            autorater_decisions = autorater_output.batch["autorater_decisions"]  # Shape: (batch_size,)
-                            
-                            # Convert to token-level rewards (put reward at last token of response)
+                        # Use remote AutoRater service if configured, otherwise use reward_fn
+                        if hasattr(self.config.trainer, 'autorater_service_url') and self.config.trainer.autorater_service_url:
+                            print("Using remote AutoRater service for training reward computation")
+                            autorater_response = self._call_remote_autorater_service(batch)
+
+                            autorater_scores = autorater_response["autorater_scores"]
+                            autorater_decisions = autorater_response["autorater_decisions"]
+
+                            # Convert scores to token-level rewards (put reward at last token of response)
                             response_length = batch.batch["responses"].shape[-1]
                             reward_tensor = torch.zeros_like(batch.batch["responses"], dtype=torch.float32)
-                            
-                            # Apply AutoRater weight from config
-                            # autorater_weight = getattr(self.config.actor_rollout_ref.autorater, 'autorater_weight', 1.0)
-                            autorater_weight = 1.0
-                            
+
                             for i in range(len(batch)):
                                 # Get valid response length for this item
                                 attention_mask = batch.batch["attention_mask"][i]
                                 prompt_length = batch.batch["prompts"].shape[-1]
                                 valid_response_length = attention_mask[prompt_length:].sum()
-                                
+
                                 if valid_response_length > 0:
                                     # Place reward at the last valid token of the response
-                                    reward_tensor[i, valid_response_length - 1] = autorater_weight * autorater_scores[i]
-                            
+                                    reward_tensor[i, valid_response_length - 1] = autorater_scores[i]
+
                             # Create reward_extra_infos_dict in the expected format
                             reward_extra_infos_dict = {
-                                "autorater_scores": autorater_scores.tolist(),
-                                "autorater_decisions": autorater_decisions.tolist(),
+                                "autorater_scores": autorater_scores,
+                                "autorater_decisions": autorater_decisions,
                             }
-                            
+
                             # Add format scores if available
-                            if "format_scores" in autorater_output.batch:
-                                format_scores = autorater_output.batch["format_scores"]
-                                reward_extra_infos_dict["format_scores"] = format_scores.tolist()
-                            
+                            if "format_scores" in autorater_response:
+                                format_scores = autorater_response["format_scores"]
+                                reward_extra_infos_dict["format_scores"] = format_scores
+
                             # Add explanations if available
-                            if "autorater_explanations" in autorater_output.non_tensor_batch:
-                                reward_extra_infos_dict["autorater_explanations"] = autorater_output.non_tensor_batch["autorater_explanations"].tolist()
-                            if "autorater_raw_responses" in autorater_output.non_tensor_batch:
-                                reward_extra_infos_dict["autorater_raw_responses"] = autorater_output.non_tensor_batch["autorater_raw_responses"].tolist()
-                            if "autorater_prompts" in autorater_output.non_tensor_batch:
-                                reward_extra_infos_dict["autorater_prompts"] = autorater_output.non_tensor_batch["autorater_prompts"].tolist()
+                            if "autorater_explanations" in autorater_response:
+                                reward_extra_infos_dict["autorater_explanations"] = autorater_response["autorater_explanations"]
+                            if "autorater_raw_responses" in autorater_response:
+                                reward_extra_infos_dict["autorater_raw_responses"] = autorater_response["autorater_raw_responses"]
+                            if "autorater_prompts" in autorater_response:
+                                reward_extra_infos_dict["autorater_prompts"] = autorater_response["autorater_prompts"]
+
                         else:
-                            import ipdb; ipdb.set_trace()
-                        #     # Fallback to regular reward function
-                        #     # TODO: add this back async stuff
-                        #     # if self.config.reward_model.launch_reward_fn_async:
-                        #     #     future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
-                        #     # else:
-                        #     reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
-                    
+                            # Fallback to regular reward function
+                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+
                     # log some reward metrics
                     if "format_scores" in reward_extra_infos_dict:
                         # Add data source breakdown for format/content rewards
