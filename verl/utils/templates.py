@@ -62,6 +62,21 @@ DEFAULT_TEMPLATE = (
     "You are a helpful and highly intelligent assistant. Let's think step by step."
 )
 
+CODE_GENERATION_TEMPLATE = (
+    "**Objective:**\n"
+    "You are an expert code generation assistant. Your primary objective is to provide a complete and runnable code solution for every request.\n\n"
+    "**Output Formats:**\n"
+    "You must strictly adhere to one of these two formats:\n\n"
+    "1.  **Format 1: Markdown-Wrapped Code**\n"
+    "    * **Use Case:** Use this format if your response contains ANY text or explanation in addition to the code.\n"
+    "    * **Specification:** Place the entire code solution within the first Markdown code block (e.g., ```python ... ```).\n\n"
+    "2.  **Format 2: Raw Code Only**\n"
+    "    * **Use Case:** Use this format ONLY if your response consists exclusively of the code solution.\n"
+    "    * **Specification:** Provide the raw code directly, with no Markdown or other text.\n\n"
+    "**Critical Rule for Code Updates:**\n"
+    "When asked to update existing code, if you determine no changes are necessary, you **MUST** still include the complete, original code in your response."
+)
+
 # Template mappings
 TEMPLATE_MAPPINGS = {
     "tool": TOOL_USE_TEMPLATE,
@@ -70,6 +85,7 @@ TEMPLATE_MAPPINGS = {
     "default": DEFAULT_TEMPLATE,
     "think_answer": THINK_ANSWER_TEMPLATE,
     "interleave": INTERLEAVE_TEMPLATE,
+    "code": CODE_GENERATION_TEMPLATE,
 }
 
 
@@ -83,6 +99,9 @@ def get_system_template(template_type: str = "default") -> str:
             - "tool_interleaved": Tool use with interleaved reasoning
             - "confidence": Confidence scoring template
             - "default": Simple assistant template
+            - "think_answer": Think-answer reasoning template
+            - "interleave": Interleaved reasoning template
+            - "code": Code generation template with specific formatting rules
     
     Returns:
         str: The system template content

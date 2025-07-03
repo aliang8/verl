@@ -9,13 +9,22 @@ data:
   response_key: answer
   prompt_dict_keys: null
   response_dict_keys: null
+  # System template settings
+  use_system_template: true  # Enable system message in chat template
+  system_template_type: "interleave"  # Template type for system message:
+    # - "interleave": Interleaved reasoning with <think></think> and <answer></answer> tags
+    # - "think_answer": Basic think/answer template  
+    # - "tool": Tool use template
+    # - "tool_interleaved": Tool use with interleaved reasoning
+    # - "confidence": Confidence scoring template
+    # - "default": Simple assistant template
   # Multi-turn settings
   multiturn:
     enable: false  # Set to true to use multi-turn dataset
     messages_key: messages  # Key for messages list in multi-turn mode
     tools_key: tools  # Key for tools list in multi-turn mode
     enable_thinking_key: enable_thinking  # Whether to enable thinking in multi-turn mode
-  max_length: 1024
+  max_length: 8000
   truncation: error
   balance_dp_token: False
   chat_template: null

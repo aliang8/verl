@@ -117,14 +117,14 @@ if __name__ == "__main__":
             }
             
             # Add other available fields from the dataset
-            if "id" in example:
-                dataset_id = example.pop("id")
-                extra_info["dataset_id"] = dataset_id
-                # Extract hop type from id
-                for hop_type in ["2hop", "3hop", "4hop"]:
-                    if dataset_id.startswith(f"{hop_type}_"):
-                        extra_info["hop_type"] = hop_type
-                        break
+            # if "id" in example:
+            #     dataset_id = example.pop("id")
+            #     extra_info["dataset_id"] = dataset_id
+            #     # Extract hop type from id
+            #     for hop_type in ["2hop", "3hop", "4hop"]:
+            #         if dataset_id.startswith(f"{hop_type}_"):
+            #             extra_info["hop_type"] = hop_type
+            #             break
 
             data = {
                 "data_source": data_source,

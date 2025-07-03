@@ -28,6 +28,7 @@ from transformers import PreTrainedTokenizer
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.templates import format_system_message
 
 
 class SFTDataset(Dataset):
@@ -46,6 +47,10 @@ class SFTDataset(Dataset):
         max_length = config.get("max_length", 1024)
         truncation = config.get("truncation", "error")
         use_shm = config.get('use_shm', False)
+        
+        # System template configuration
+        self.system_template_type = config.get("system_template_type", "interleave")  # Default to interleaved reasoning
+        self.use_system_template = config.get("use_system_template", True)  # Enable by default
 
         assert truncation in ["error", "left", "right"]
         self.truncation = truncation
@@ -88,6 +93,7 @@ class SFTDataset(Dataset):
             dataframe = pd.read_parquet(parquet_file)
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
+
         self.prompts = self.dataframe[self.prompt_key]
         for key in self.prompt_dict_keys:
             # type(x): pandas.core.series.Series
@@ -121,8 +127,14 @@ class SFTDataset(Dataset):
         prompt = self.prompts[item]
         response = self.responses[item]
 
-        # apply chat template
-        prompt_chat = [{"role": "user", "content": prompt}]
+        # apply chat template with optional system message
+        if self.use_system_template:
+            prompt_chat = [
+                format_system_message(self.system_template_type),
+                {"role": "user", "content": prompt}
+            ]
+        else:
+            prompt_chat = [{"role": "user", "content": prompt}]
 
         # string
         prompt_chat_str = tokenizer.apply_chat_template(prompt_chat, add_generation_prompt=True, tokenize=False)
