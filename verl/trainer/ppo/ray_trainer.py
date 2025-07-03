@@ -533,7 +533,7 @@ class RayPPOTrainer:
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path, data_sources=None):
+    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path, data_sources=None, ground_truths=None):
         """Dump rollout/validation samples as JSONL, optionally separated by data source."""
         os.makedirs(dump_path, exist_ok=True)
         
@@ -544,6 +544,10 @@ class RayPPOTrainer:
             "score": scores,
             "step": [self.global_steps] * n,
         }
+        
+        # Add ground truth answers if provided
+        if ground_truths is not None and len(ground_truths) == n:
+            base_data["ground_truth"] = ground_truths
 
         for k, v in reward_extra_infos_dict.items():
             if len(v) == n:
@@ -669,12 +673,32 @@ class RayPPOTrainer:
         sample_inputs = []
         sample_outputs = []
         sample_scores = []
+        
+        # List to collect ground truth answers from validation data
+        validation_ground_truths_all = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
+            
+            # Extract ground truth from this test batch before repeating
+            batch_ground_truths = []
+            if "reward_model" in test_batch.non_tensor_batch:
+                for rm_info in test_batch.non_tensor_batch["reward_model"]:
+                    if isinstance(rm_info, dict) and "ground_truth" in rm_info:
+                        batch_ground_truths.append(str(rm_info["ground_truth"]))
+                    else:
+                        batch_ground_truths.append("Unknown")
+            else:
+                batch_ground_truths = ["Unknown"] * len(test_batch)
 
             # repeat test batch
             test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True)
+            
+            # Also repeat ground truths to match the repeated test batch
+            repeated_ground_truths = []
+            for gt in batch_ground_truths:
+                repeated_ground_truths.extend([gt] * self.config.actor_rollout_ref.rollout.val_kwargs.n)
+            validation_ground_truths_all.extend(repeated_ground_truths)
 
             # we only do validation on rule-based rm
             if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
@@ -785,6 +809,11 @@ class RayPPOTrainer:
                 else:
                     flattened_data_sources.append(ds_batch)
             
+            # Use the collected ground truths from validation data
+            validation_ground_truths = validation_ground_truths_all[:len(sample_inputs)]
+            if len(validation_ground_truths) < len(sample_inputs):
+                validation_ground_truths.extend(["Unknown"] * (len(sample_inputs) - len(validation_ground_truths)))
+            
             self._dump_generations(
                 inputs=sample_inputs,
                 outputs=sample_outputs,
@@ -792,6 +821,7 @@ class RayPPOTrainer:
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=val_data_dir,
                 data_sources=flattened_data_sources,
+                ground_truths=validation_ground_truths,
             )
 
         for key_info, lst in reward_extra_infos_dict.items():
@@ -906,6 +936,12 @@ class RayPPOTrainer:
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()
+
+        # Initialize AutoRater worker group if configured (after actor_rollout_wg is created)
+        if self.use_autorater:
+            self.autorater_wg = all_wg["autorater"]
+            self.autorater_wg.init_model()
+            print("AutoRater configured with separate vLLM instance using fixed base model weights")
         print(f"Done initializing actor rollout")
         print(f"="*100)
 
@@ -1301,6 +1337,18 @@ class RayPPOTrainer:
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                            
+                            # Extract ground truth answers from reward_model metadata
+                            ground_truths = []
+                            if "reward_model" in batch.non_tensor_batch:
+                                for rm_info in batch.non_tensor_batch["reward_model"]:
+                                    if isinstance(rm_info, dict) and "ground_truth" in rm_info:
+                                        ground_truths.append(str(rm_info["ground_truth"]))
+                                    else:
+                                        ground_truths.append("Unknown")
+                            else:
+                                ground_truths = ["Unknown"] * len(inputs)
+                            
                             self._dump_generations(
                                 inputs=inputs,
                                 outputs=outputs,
@@ -1308,6 +1356,7 @@ class RayPPOTrainer:
                                 reward_extra_infos_dict=reward_extra_infos_dict,
                                 dump_path=rollout_data_dir,
                                 data_sources=batch.non_tensor_batch.get("data_source", None),
+                                ground_truths=ground_truths,
                             )
 
                     # validate

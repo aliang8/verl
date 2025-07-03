@@ -13,35 +13,36 @@ from verl.trainer.ppo.reward_fns import format_check_reward
 
 class AutoRaterReward:
     """
-    AutoRater-based reward function that reuses the ActorRolloutRefWorker's vLLM engine.
+    AutoRater-based reward function that uses a dedicated AutoRaterWorker with fixed base model weights.
     
     This reward function evaluates responses by comparing them against ground truth answers
-    using the same vLLM engine from the rollout worker, avoiding the need for a separate model.
+    using the AutoRaterWorker's own vLLM instance, which maintains the original base model weights
+    throughout training to ensure consistent evaluation.
     """
     
-    def __init__(self, actor_rollout_worker_group=None, config=None, tokenizer=None):
+    def __init__(self, autorater_worker_group=None, config=None, tokenizer=None):
         """
         Initialize the AutoRater reward function.
         
         Args:
-            actor_rollout_worker_group: The ActorRolloutRefWorker group that has rollout capability
+            autorater_worker_group: The AutoRaterWorker group that has autorater capability
             config: Configuration for the reward function
             tokenizer: Tokenizer for decoding text (optional, will try to get from worker if not provided)
         """
         super().__init__()
-        self.actor_rollout_wg = actor_rollout_worker_group
+        self.autorater_wg = autorater_worker_group
         self.config = config or {}
         self.tokenizer = tokenizer
 
-        if self.actor_rollout_wg is not None:
-            self.tokenizer = self.actor_rollout_wg.get_tokenizer()[0]
+        if self.autorater_wg is not None:
+            self.tokenizer = self.autorater_wg.get_tokenizer()[0]
         
         # Reward weights
         self.autorater_weight = self.config.get("autorater_weight", 1.0)
         
     def __call__(self, data: DataProto, return_dict: bool = False) -> Union[torch.Tensor, Dict[str, Any]]:
         """
-        Compute rewards using the ActorRolloutRefWorker's AutoRater capability.
+        Compute rewards using the AutoRaterWorker's fixed base model.
         
         Args:
             data: DataProto containing batch data
@@ -50,17 +51,19 @@ class AutoRaterReward:
         Returns:
             Reward tensor or dictionary with reward and extra info
         """
-        if self.actor_rollout_wg is None:
-            raise ValueError("ActorRolloutRefWorker group not initialized")
+        if self.autorater_wg is None:
+            raise ValueError("AutoRaterWorker group not initialized")
         
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
         
         # Create a single batch DataProto for all items
+        # Note: AutoRater doesn't need the actual responses for evaluation, just the prompts and metadata
+        # The responses will be decoded by the AutoRater worker for evaluation
         batch_data = DataProto.from_dict(
             tensors={
                 "prompts": data.batch["prompts"],
-                "responses": data.batch["responses"],
+                "responses": data.batch["responses"],  # AutoRater will decode these for evaluation
                 "attention_mask": data.batch["attention_mask"]
             },
             non_tensors={
@@ -91,8 +94,8 @@ class AutoRaterReward:
             batch_data = padded_batch_data
             print(f"Padded batch from {batch_size} to {len(batch_data)} items to make it divisible by {num_workers}")
         
-        # Evaluate using the ActorRolloutRefWorker's compute_autorater_score method
-        autorater_output = self.actor_rollout_wg.compute_autorater_score(batch_data)
+        # Evaluate using the AutoRaterWorker's compute_autorater_score method
+        autorater_output = self.autorater_wg.compute_autorater_score(batch_data)
                 
         # Extract scores and decisions
         autorater_scores = autorater_output.batch["autorater_scores"]  # Shape: (batch_size,)
@@ -168,15 +171,15 @@ class AutoRaterReward:
         return reward_tensor
 
 
-def create_autorater_reward_fn(actor_rollout_worker_group, config: Dict[str, Any] = None):
+def create_autorater_reward_fn(autorater_worker_group, config: Dict[str, Any] = None):
     """
-    Factory function to create an AutoRater reward function that reuses the ActorRolloutRefWorker.
+    Factory function to create an AutoRater reward function that uses the AutoRaterWorker.
     
     Args:
-        actor_rollout_worker_group: The ActorRolloutRefWorker group with rollout capability
+        autorater_worker_group: The AutoRaterWorker group with autorater capability
         config: Configuration dictionary for the reward function
         
     Returns:
         Configured AutoRater reward function
     """
-    return AutoRaterReward(actor_rollout_worker_group=actor_rollout_worker_group, config=config or {})
+    return AutoRaterReward(autorater_worker_group=autorater_worker_group, config=config or {})

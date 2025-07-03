@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import warnings
+from copy import deepcopy
 from dataclasses import asdict
 from typing import Union, Tuple
 import re
@@ -766,193 +767,7 @@ class ActorRolloutRefWorker(Worker):
 
         return output
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def compute_autorater_score(self, data: DataProto) -> DataProto:
-        """
-        Compute auto-rater scores by reusing the existing vLLM rollout engine.
-        This is much more memory efficient than creating a separate vLLM instance.
-        """
-        assert self._is_rollout, "AutoRater evaluation requires rollout capability"
-        
-        # Import AutoRater utilities
-        from verl.workers.autorater.autorater_utils import AUTO_RATER_TEMPLATE, format_autorater_prompt, parse_autorater_response, extract_solution
-        
-        # Support all hardwares
-        data = data.to(get_torch_device().current_device())
-        
-        # Extract information from the input data
-        responses = data.batch["responses"]
-        batch_size = responses.shape[0]
-        
-        # Decode questions and responses using the tokenizer
-        if "prompts" in data.batch:
-            questions = [self.tokenizer.decode(prompt, skip_special_tokens=True) 
-                        for prompt in data.batch["prompts"]]
-        else:
-            # Fallback: extract from input_ids if prompts not available
-            input_ids = data.batch.get("input_ids", data.batch.get("prompt_ids", None))
-            if input_ids is not None:
-                questions = [self.tokenizer.decode(ids, skip_special_tokens=True) 
-                           for ids in input_ids]
-            else:
-                questions = [""] * batch_size
 
-        predicted_answers = [self.tokenizer.decode(response, skip_special_tokens=True) 
-                           for response in responses]
-        
-        # Extract solutions from predicted answers
-        autorater_config = getattr(self.config, 'autorater', {})
-        extraction_method = autorater_config.get("extraction_method", "strict")
-        answer_formats = autorater_config.get("answer_formats", ["boxed", "hash", "conclusion"])
-        
-        extracted_predictions = []
-        for pred_answer in predicted_answers:
-            extracted = extract_solution(pred_answer, method=extraction_method, answer_formats=answer_formats)
-            extracted_predictions.append(extracted)
-
-        # Get ground truth from reward_model metadata
-        ground_truth_answers = []
-        if "reward_model" in data.non_tensor_batch:
-            for rm_info in data.non_tensor_batch["reward_model"]:
-                if isinstance(rm_info, dict) and "ground_truth" in rm_info:
-                    # Also try to extract from ground truth if it's in a formatted form
-                    gt_raw = str(rm_info["ground_truth"])
-                    gt_extracted = extract_solution(gt_raw, method=extraction_method, answer_formats=answer_formats)
-                    ground_truth_answers.append(gt_extracted if gt_extracted is not None else gt_raw)
-                else:
-                    ground_truth_answers.append("Unknown")
-        else:
-            ground_truth_answers = ["Unknown"] * batch_size
-
-        # Format AutoRater evaluation prompts
-        autorater_prompts = []
-        for i in range(batch_size):
-            prompt = format_autorater_prompt(
-                questions[i], 
-                extracted_predictions[i], 
-                ground_truth_answers[i],
-                AUTO_RATER_TEMPLATE
-            )
-            autorater_prompts.append(prompt)
-        
-        # Tokenize AutoRater prompts for the rollout engine
-        # Follow the same pattern as generate_sequences
-        tokenizer = self.tokenizer
-        tokenizer.padding_side = "left"  # vLLM expects left padding
-        
-        # Use a shorter max length for AutoRater prompts since they're simpler
-        max_prompt_length = autorater_config.get("max_prompt_length", 2048)
-        
-        encoded = tokenizer(
-            autorater_prompts,
-            padding="max_length",
-            max_length=max_prompt_length,
-            truncation=True,
-            return_tensors="pt",
-            add_special_tokens=True
-        )
-        
-        input_ids = encoded["input_ids"]
-        attention_mask = encoded["attention_mask"]
-        
-        # Create position_ids (similar to what's done in generate_sequences)
-        position_ids = torch.zeros_like(attention_mask)
-        for i in range(batch_size):
-            valid_length = attention_mask[i].sum().item()
-            start_pos = len(position_ids[i]) - valid_length
-            position_ids[i, start_pos:] = torch.arange(valid_length)
-        
-        # Create DataProto for AutoRater evaluation
-        autorater_data = DataProto.from_dict({
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids
-        })
-        
-        # Set metadata for deterministic evaluation
-        autorater_data.meta_info = {
-            "eos_token_id": self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id,
-            "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
-            "do_sample": False,  # Use deterministic evaluation
-            "validate": True,
-            "temperature": 0.0,
-        }
-
-        # Use the existing rollout infrastructure for AutoRater evaluation
-        with self.rollout_sharding_manager:
-            autorater_data = self.rollout_sharding_manager.preprocess_data(autorater_data)
-            
-            # Generate AutoRater responses using the existing vLLM engine
-            # Pass max_tokens to limit response length for AutoRater evaluation
-            autorater_output = self.rollout.generate_sequences(prompts=autorater_data, max_tokens=10)
-            
-            autorater_output = self.rollout_sharding_manager.postprocess_data(autorater_output)
-        
-        # Decode AutoRater responses
-        autorater_responses = autorater_output.batch["responses"]
-        decoded_responses = [self.tokenizer.decode(response, skip_special_tokens=True) 
-                            for response in autorater_responses]
-    
-        # Parse AutoRater decisions
-        decisions = []
-        explanations = []
-        for response in decoded_responses:
-            explanation, decision = parse_autorater_response(response)
-            explanations.append(explanation)
-            decisions.append(decision)
-        
-        # Import format checking function
-        from verl.trainer.ppo.reward_fns import format_check_reward
-        
-        # Convert decisions to scores and apply format checking
-        scores = []
-        autorater_decisions = []
-        format_scores = []
-        autorater_scores = []
-        
-        for i, decision in enumerate(decisions):
-            # Get AutoRater score
-            if decision == "TRUE":
-                autorater_score = 2.0
-                autorater_decisions.append(1)
-            elif decision == "FALSE":
-                autorater_score = -1.5
-                autorater_decisions.append(0)
-            else:  # ERROR, UNKNOWN
-                autorater_score = -2.0
-                autorater_decisions.append(-1)
-            
-            # Get format score for the original predicted answer
-            format_score = format_check_reward(predicted_answers[i])
-            format_scores.append(format_score)
-            
-            # Combine AutoRater and format scores
-            final_score = autorater_score + format_score  # Add format penalty/bonus
-            scores.append(final_score)
-            autorater_scores.append(autorater_score)
-
-        # import ipdb; ipdb.set_trace()
-
-        # Create output DataProto
-        output_data = DataProto.from_dict(
-            tensors={
-                "autorater_scores": torch.tensor(autorater_scores, dtype=torch.float32),
-                "autorater_decisions": torch.tensor(autorater_decisions, dtype=torch.long),
-                "format_scores": torch.tensor(format_scores, dtype=torch.float32)
-            },
-            non_tensors={
-                "autorater_explanations": np.array(explanations, dtype=object),
-                "autorater_raw_responses": np.array(decoded_responses, dtype=object),
-                "extracted_predictions": np.array(extracted_predictions, dtype=object),
-                "original_predictions": np.array(predicted_answers, dtype=object),
-                "autorater_prompts": np.array(autorater_prompts, dtype=object)
-            }
-        )
-        
-        # Clear GPU cache
-        get_torch_device().empty_cache()
-        
-        return output_data.to("cpu")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
@@ -1306,7 +1121,7 @@ class CriticWorker(Worker):
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
 
         if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.critic_module)
+            offload_fsdp_model_to_gpu(self.critic_module)
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.critic_optimizer)
 
@@ -1644,6 +1459,316 @@ class RewardModelWorker(Worker):
         return output
 
 
+class AutoRaterWorker(Worker):
+    """
+    AutoRater Worker for evaluating model responses using a separate fixed vLLM instance.
+    
+    This worker runs in a separate Ray process and creates its own vLLM instance 
+    with the original base model weights to ensure consistent evaluation throughout 
+    training, independent of actor updates. Running in a separate process avoids
+    vLLM sleep mode conflicts and tensor parallel group initialization issues.
+    """
+
+    def __init__(self, config: DictConfig, role: str = "autorater"):
+        super().__init__()
+        self.config = config
+        import torch.distributed
+
+        if not torch.distributed.is_initialized():
+            rank = int(os.environ.get("RANK", 0))
+            world_size = int(os.environ.get("WORLD_SIZE", 1))
+            torch.distributed.init_process_group(backend="cpu:gloo,cuda:nccl" if is_cuda_available else "cpu:gloo,npu:hccl", rank=rank, world_size=world_size)
+
+        self.role = role
+        self._is_autorater = True
+        self._autorater_rollout = None  # Will create our own vLLM instance
+        self._tokenizer = None
+        
+        # Build device mesh for AutoRater vLLM
+        world_size = torch.distributed.get_world_size()
+        from torch.distributed.device_mesh import init_device_mesh
+        
+        # AutoRater runs in separate Ray process, so it can use its own tensor parallel configuration
+        autorater_tp = self.config.get("autorater", {}).get("tensor_model_parallel_size", 1)
+        
+        dp = world_size // autorater_tp
+        assert world_size % autorater_tp == 0, f"AutoRater world_size: {world_size} is not divisible by autorater_tp: {autorater_tp}"
+        self.autorater_device_mesh = init_device_mesh(get_device_name(), mesh_shape=(dp, autorater_tp), mesh_dim_names=["dp", "autorater_tp"])
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        """Initialize AutoRater's own vLLM instance with fixed base model weights."""
+        
+        # Set environment variables to ensure vLLM doesn't use sleep mode and avoid conflicts
+        import os
+        import time
+        os.environ["VLLM_DISABLE_ASYNC_OUTPUT_PROC"] = "1"
+        os.environ["VLLM_USE_V1"] = "0"  # Force use of older vLLM engine
+        os.environ["VLLM_DISABLE_SLEEP_MODE"] = "1"  # Explicitly disable sleep mode
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"  # Use spawn for better process isolation
+        
+        # Add a small delay to ensure any other vLLM instances have finished initializing
+        if self.rank == 0:
+            print("AutoRater worker waiting 5 seconds before initializing vLLM to avoid conflicts...")
+        time.sleep(5)
+        
+        if self.rank == 0:
+            print("Starting AutoRater vLLM initialization...")
+        
+        # Import vLLM rollout (use SPMD version since we pass model_path)
+        if 'vllm' in self.config.rollout.name:
+            if self.config.rollout.name in ['vllm', 'vllm_rollout']:
+                from verl.workers.rollout.vllm_rollout.vllm_rollout_spmd import vLLMRollout
+                rollout_class = vLLMRollout
+            elif self.config.rollout.name == 'vllm_with_tool':
+                from verl.workers.rollout.vllm_rollout.vllm_rollout_spmd import vLLMRolloutWithTool
+                rollout_class = vLLMRolloutWithTool
+            elif self.config.rollout.name == 'vllm_with_mcp':
+                from verl.workers.rollout.vllm_rollout.vllm_rollout_spmd import vLLMRolloutWithMCP
+                rollout_class = vLLMRolloutWithMCP
+            else:
+                raise NotImplementedError(f'AutoRater rollout name {self.config.rollout.name} is not supported')
+        else:
+            raise NotImplementedError("AutoRater currently only supports vLLM rollouts")
+        
+        # Create AutoRater-specific config
+        autorater_config = deepcopy(self.config.rollout)
+        
+        # Override key settings for AutoRater
+        autorater_config.response_length = 32  # AutoRater needs short responses for its own evaluations
+        
+        # AutoRater runs in separate process with dedicated GPU
+        autorater_tp = self.config.get("autorater", {}).get("tensor_model_parallel_size", 1)
+        autorater_config.tensor_model_parallel_size = autorater_tp
+        # Use moderate memory settings for AutoRater since it has dedicated GPU
+        autorater_config.gpu_memory_utilization = self.config.get("autorater", {}).get("gpu_memory_utilization", 0.8)  # Can use more memory with dedicated GPU
+        autorater_config.max_model_len = self.config.get("autorater", {}).get("max_model_len", 2048)  # Short context to save memory
+        
+        if self.rank == 0:
+            print(f"AutoRater config: tensor_parallel_size={autorater_tp}, gpu_memory_utilization={autorater_config.gpu_memory_utilization}, max_model_len={autorater_config.max_model_len}")
+        autorater_config.enable_chunked_prefill = False
+        autorater_config.disable_log_stats = True
+        # Set additional vLLM parameters as main config to avoid conflicts
+        autorater_config.enable_prefix_caching = False
+        # Explicitly disable sleep mode to avoid conflicts
+        autorater_config.enable_sleep_mode = False
+        
+        local_path = copy_to_local(self.config.model.path)
+        
+        # Load tokenizer and model config
+        from verl.utils import hf_tokenizer
+        from transformers import AutoConfig
+        
+        self._tokenizer = hf_tokenizer(local_path, trust_remote_code=self.config.model.get("trust_remote_code", False))
+        model_hf_config = AutoConfig.from_pretrained(local_path, trust_remote_code=self.config.model.get("trust_remote_code", False))
+        
+        # Create AutoRater's own vLLM instance - this will have the original base model weights
+        # and will NOT be updated during training
+        # Running in separate Ray process eliminates vLLM sleep mode conflicts
+        try:
+            self._autorater_rollout = rollout_class(
+                model_path=local_path,
+                config=autorater_config,
+                tokenizer=self._tokenizer,
+                model_hf_config=model_hf_config,
+                trust_remote_code=self.config.model.get("trust_remote_code", False)
+            )
+            if self.rank == 0:
+                print("AutoRater vLLM instance created successfully")
+        except Exception as e:
+            if self.rank == 0:
+                print(f"ERROR: Failed to create AutoRater vLLM instance: {e}")
+                print(f"AutoRater config: {autorater_config}")
+            raise
+        
+        if self.rank == 0:
+            print("AutoRater worker initialized in separate Ray process with its own vLLM instance using fixed base model weights")
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_autorater_score(self, data: DataProto) -> DataProto:
+        """
+        Compute auto-rater scores using AutoRater's own fixed vLLM instance.
+        This ensures evaluation is done with consistent base model weights.
+        """
+        if self._autorater_rollout is None:
+            raise ValueError("AutoRater rollout engine not initialized. Call init_model() first.")
+        
+        # Import AutoRater utilities
+        from verl.workers.autorater.autorater_utils import AUTO_RATER_TEMPLATE, format_autorater_prompt, parse_autorater_response, extract_solution
+        
+        # Support all hardwares
+        data = data.to(get_torch_device().current_device())
+        
+        # Extract information from the input data
+        responses = data.batch["responses"]
+        batch_size = responses.shape[0]
+        
+        # Decode questions and responses using the tokenizer
+        if "prompts" in data.batch:
+            questions = [self._tokenizer.decode(prompt, skip_special_tokens=True) 
+                        for prompt in data.batch["prompts"]]
+        else:
+            # Fallback: extract from input_ids if prompts not available
+            input_ids = data.batch.get("input_ids", data.batch.get("prompt_ids", None))
+            if input_ids is not None:
+                questions = [self._tokenizer.decode(ids, skip_special_tokens=True) 
+                           for ids in input_ids]
+            else:
+                questions = [""] * batch_size
+
+        predicted_answers = [self._tokenizer.decode(response, skip_special_tokens=True) 
+                           for response in responses]
+        
+        # Extract solutions from predicted answers
+        autorater_config = getattr(self.config, 'autorater', {})
+        extraction_method = autorater_config.get("extraction_method", "strict")
+        answer_formats = autorater_config.get("answer_formats", ["boxed", "hash", "conclusion"])
+        
+        extracted_predictions = []
+        for pred_answer in predicted_answers:
+            extracted = extract_solution(pred_answer, method=extraction_method, answer_formats=answer_formats)
+            extracted_predictions.append(extracted)
+
+        # Get ground truth from reward_model metadata
+        ground_truth_answers = []
+        if "reward_model" in data.non_tensor_batch:
+            for rm_info in data.non_tensor_batch["reward_model"]:
+                if isinstance(rm_info, dict) and "ground_truth" in rm_info:
+                    # Also try to extract from ground truth if it's in a formatted form
+                    gt_raw = str(rm_info["ground_truth"])
+                    gt_extracted = extract_solution(gt_raw, method=extraction_method, answer_formats=answer_formats)
+                    ground_truth_answers.append(gt_extracted if gt_extracted is not None else gt_raw)
+                else:
+                    ground_truth_answers.append("Unknown")
+        else:
+            ground_truth_answers = ["Unknown"] * batch_size
+
+        # Format AutoRater evaluation prompts
+        autorater_prompts = []
+        for i in range(batch_size):
+            prompt = format_autorater_prompt(
+                questions[i], 
+                extracted_predictions[i], 
+                ground_truth_answers[i],
+                AUTO_RATER_TEMPLATE
+            )
+            autorater_prompts.append(prompt)
+        
+        # Tokenize AutoRater prompts
+        tokenizer = self._tokenizer
+        tokenizer.padding_side = "left"  # vLLM expects left padding
+        
+        # Use a shorter max length for AutoRater prompts since they're simpler
+        max_prompt_length = autorater_config.get("max_prompt_length", 2048)
+        
+        encoded = tokenizer(
+            autorater_prompts,
+            padding="max_length",
+            max_length=max_prompt_length,
+            truncation=True,
+            return_tensors="pt",
+            add_special_tokens=True
+        )
+        
+        input_ids = encoded["input_ids"]
+        attention_mask = encoded["attention_mask"]
+        
+        # Create position_ids (similar to what's done in generate_sequences)
+        position_ids = torch.zeros_like(attention_mask)
+        for i in range(batch_size):
+            valid_length = attention_mask[i].sum().item()
+            start_pos = len(position_ids[i]) - valid_length
+            position_ids[i, start_pos:] = torch.arange(valid_length)
+        
+        # Create DataProto for AutoRater evaluation
+        autorater_data = DataProto.from_dict({
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids
+        })
+        
+        # Set metadata for deterministic evaluation
+        autorater_data.meta_info = {
+            "eos_token_id": tokenizer.eos_token_id,
+            "pad_token_id": tokenizer.pad_token_id,
+            "do_sample": False,  # Use deterministic evaluation
+            "validate": True,
+            "temperature": 0.0,
+        }
+
+        # Use AutoRater's own vLLM engine for evaluation (with fixed base model weights)
+        with self._autorater_rollout.update_sampling_params(max_tokens=10, temperature=0.0):
+            autorater_output = self._autorater_rollout.generate_sequences(prompts=autorater_data)
+        
+        # Decode AutoRater responses
+        autorater_responses = autorater_output.batch["responses"]
+        decoded_responses = [self._tokenizer.decode(response, skip_special_tokens=True) 
+                            for response in autorater_responses]
+    
+        # Parse AutoRater decisions
+        decisions = []
+        explanations = []
+        for response in decoded_responses:
+            explanation, decision = parse_autorater_response(response)
+            explanations.append(explanation)
+            decisions.append(decision)
+        
+        # Import format checking function
+        from verl.trainer.ppo.reward_fns import format_check_reward
+        
+        # Convert decisions to scores and apply format checking
+        scores = []
+        autorater_decisions = []
+        format_scores = []
+        autorater_scores = []
+        
+        for i, decision in enumerate(decisions):
+            # Get AutoRater score
+            if decision == "TRUE":
+                autorater_score = 2.0
+                autorater_decisions.append(1)
+            elif decision == "FALSE":
+                autorater_score = -1.5
+                autorater_decisions.append(0)
+            else:  # ERROR, UNKNOWN
+                autorater_score = -2.0
+                autorater_decisions.append(-1)
+            
+            # Get format score for the original predicted answer
+            format_score = format_check_reward(predicted_answers[i])
+            format_scores.append(format_score)
+            
+            # Combine AutoRater and format scores
+            final_score = autorater_score + format_score  # Add format penalty/bonus
+            scores.append(final_score)
+            autorater_scores.append(autorater_score)
+
+        # Create output DataProto
+        output_data = DataProto.from_dict(
+            tensors={
+                "autorater_scores": torch.tensor(autorater_scores, dtype=torch.float32),
+                "autorater_decisions": torch.tensor(autorater_decisions, dtype=torch.long),
+                "format_scores": torch.tensor(format_scores, dtype=torch.float32)
+            },
+            non_tensors={
+                "autorater_explanations": np.array(explanations, dtype=object),
+                "autorater_raw_responses": np.array(decoded_responses, dtype=object),
+                "extracted_predictions": np.array(extracted_predictions, dtype=object),
+                "original_predictions": np.array(predicted_answers, dtype=object),
+                "autorater_prompts": np.array(autorater_prompts, dtype=object)
+            }
+        )
+        
+        # Clear GPU cache
+        get_torch_device().empty_cache()
+        
+        return output_data.to("cpu")
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_tokenizer(self):
+        return self._tokenizer
+
+
 # ================================= Async related workers =================================
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
     def _build_rollout(self, trust_remote_code=False):
@@ -1663,7 +1788,7 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto, **kwargs):
-        raise NotImplementedError("AsyncActorRolloutRefWorker does not support generate_sequences")
+        raise NotImplementedError("AsyncActorRolloutRefWorker should not call generate_sequences directly")
 
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
@@ -1688,6 +1813,3 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         await self.rollout.sleep()
         # return something to block the caller
         return True
-
-
-# ================================= Async related workers =================================

@@ -34,23 +34,26 @@ def extract_thinking_and_answer(text):
     return thinking, final_answer
 
 def extract_intermediate_answers(thinking_text):
-    step_patterns = [
-        r'Step \d+:?(.*?)(?=Step \d+|$)',
-        r'\d+\.(.*?)(?=\d+\.|$)',
-        r'First,?(.*?)(?=Second|Next|Then|Finally|$)',
-        r'Second,?(.*?)(?=Third|Next|Then|Finally|$)',
-        r'Then,?(.*?)(?=Next|Finally|$)',
-        r'Finally,?(.*?)$'
-    ]
+    """
+    Extract all intermediate answers wrapped in <answer></answer> tags for interleaved reasoning.
     
-    answers = []
-    for pattern in step_patterns:
-        matches = re.findall(pattern, thinking_text, re.DOTALL | re.IGNORECASE)
-        if matches:
-            answers.extend([answer.strip() for answer in matches if answer.strip()])
-            break
+    Args:
+        thinking_text (str): The thinking text that may contain multiple <answer></answer> tags
+        
+    Returns:
+        list: List of intermediate answers found in <answer></answer> tags
+    """
+    # Pattern to match content inside <answer></answer> tags
+    answer_pattern = r'<answer>(.*?)</answer>'
     
-    return answers if answers else [thinking_text.strip()]
+    # Find all matches
+    matches = re.findall(answer_pattern, thinking_text, re.DOTALL | re.IGNORECASE)
+    
+    # Clean up the matches and filter out empty ones
+    intermediate_answers = [answer.strip() for answer in matches if answer.strip()]
+    
+    # If no <answer> tags found, fall back to the original text as a single answer
+    return intermediate_answers if intermediate_answers else [thinking_text.strip()]
 
 def format_check_reward(generated_text):
     has_think = '<think>' in generated_text and '</think>' in generated_text

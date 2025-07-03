@@ -166,6 +166,12 @@ class vLLMRollout(BaseRollout):
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        
+        # Remove parameters from engine_kwargs that are passed directly to avoid conflicts
+        direct_params = ["max_num_batched_tokens", "enable_chunked_prefill", "enable_prefix_caching", "disable_log_stats"]
+        for param in direct_params:
+            if param in engine_kwargs:
+                del engine_kwargs[param]
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
 
@@ -176,7 +182,7 @@ class vLLMRollout(BaseRollout):
 
         self.inference_engine = LLM(
             model=model_path,
-            enable_sleep_mode=True,
+            enable_sleep_mode=config.get('enable_sleep_mode', True),
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="external_launcher",
             dtype=config.dtype,
@@ -190,7 +196,7 @@ class vLLMRollout(BaseRollout):
             disable_log_stats=config.disable_log_stats,
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=config.enable_chunked_prefill,
-            enable_prefix_caching=True,
+            enable_prefix_caching=config.get('enable_prefix_caching', True),
             trust_remote_code=trust_remote_code,
             seed=config.get("seed", 0),
             **lora_kwargs,
@@ -199,8 +205,9 @@ class vLLMRollout(BaseRollout):
         print(f"Done initializing vLLM engine")
         print(f"="*100)
 
-        # Offload vllm model to reduce peak memory usage
-        self.inference_engine.sleep(level=1)
+        # Offload vllm model to reduce peak memory usage (only if sleep mode is enabled)
+        if config.get('enable_sleep_mode', True):
+            self.inference_engine.sleep(level=1)
 
         kwargs = dict(
             n=1,

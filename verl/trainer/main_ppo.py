@@ -150,13 +150,33 @@ class TaskRunner:
         # Define the resource pool specification.
         # Map roles to the resource pool.
         global_pool_id = "global_pool"
+        autorater_pool_id = "autorater_pool"
+        
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
+        
         mapping = {
             Role.ActorRollout: global_pool_id,
             Role.Critic: global_pool_id,
         }
+        
+        # Add separate resource pool for AutoRater if enabled to avoid vLLM conflicts
+        if hasattr(config, 'autorater') and config.autorater.get('enable', False):
+            autorater_gpus_per_node = config.autorater.get('autorater_gpus_per_node', 0.5)  # Default to 0.5 GPU per node for AutoRater
+            
+            if autorater_gpus_per_node > 0:
+                # Create separate resource pool for AutoRater to avoid vLLM sleep mode conflicts
+                # This ensures AutoRater runs in completely separate Ray processes
+                resource_pool_spec[autorater_pool_id] = [autorater_gpus_per_node] * config.trainer.nnodes
+                mapping[Role.AutoRater] = autorater_pool_id
+                print(f"AutoRater will use separate resource pool with {autorater_gpus_per_node} GPU(s) per node")
+                print("AutoRater runs in separate Ray processes to avoid vLLM sleep mode conflicts")
+            else:
+                # Share the global resource pool but still run in separate worker group
+                mapping[Role.AutoRater] = global_pool_id
+                print(f"AutoRater will share global resource pool (no additional GPU allocation)")
+                print("AutoRater will still run in separate worker group to avoid vLLM conflicts")
 
         # We should adopt a multi-source reward function here:
         # - for rule-based rm, we directly call a reward score
@@ -174,20 +194,20 @@ class TaskRunner:
             role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
             mapping[Role.RewardModel] = global_pool_id
 
-        # # Add AutoRater worker if enabled
-        # if config.autorater.enable:
-        #     worker_type = config.autorater.get("worker_type", "standard")
-        #     if worker_type == "vllm":
-        #         # Use vLLM-based AutoRater for memory-efficient inference
-        #         from verl.workers.autorater.vllm_autorater_worker import vLLMAutoRaterWorker
-        #         role_worker_mapping[Role.AutoRater] = ray.remote(vLLMAutoRaterWorker)
-        #         print(f"vLLM AutoRater enabled with model: {config.autorater.model.path}")
-        #     else:
-        #         # Use standard AutoRater implementation
-        #         from verl.workers.autorater import AutoRaterWorker
-        #         role_worker_mapping[Role.AutoRater] = ray.remote(AutoRaterWorker)
-        #         print(f"Standard AutoRater enabled with model: {config.autorater.model.path}")
-        #     mapping[Role.AutoRater] = global_pool_id
+        # Add AutoRater worker if enabled (it's already in separate resource pool above)
+        if hasattr(config, 'autorater') and config.autorater.get('enable', False):
+            # Use the new AutoRaterWorker from fsdp_workers
+            if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+                from verl.workers.fsdp_workers import AutoRaterWorker
+                role_worker_mapping[Role.AutoRater] = ray.remote(AutoRaterWorker)
+                print(f"AutoRater enabled with strategy: {config.actor_rollout_ref.actor.strategy}")
+                print(f"AutoRater will run in separate Ray processes to avoid vLLM conflicts")
+            else:
+                print("Warning: AutoRater currently only supports FSDP strategy")
+        elif hasattr(config, 'autorater'):
+            print("AutoRater is configured but disabled")
+        else:
+            print("No AutoRater configuration found")
 
         # Add a reference policy worker if KL loss or KL reward is used.
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
@@ -229,18 +249,52 @@ class TaskRunner:
         # Initialize the workers of the trainer.
         trainer.init_workers()
         
-        # # Setup AutoRater hybrid reward if enabled
-        # if config.autorater.enable:
-        #     from verl.utils.reward_score.autorater_reward import create_autorater_reward_fn
-                                    
-        #     # Use AutoRater-only reward
-        #     autorater_reward_fn = create_autorater_reward_fn(trainer.autorater_wg, config)
-        #     print("Using AutoRater-only reward")
+        # Setup AutoRater hybrid reward if enabled
+        if hasattr(config, 'autorater') and config.autorater.get('enable', False):
+            # Check if using HTTP AutoRater (remote service) or local AutoRater
+            if config.autorater.get('use_http_service', False):
+                from verl.utils.reward_score.http_autorater_reward import create_http_autorater_reward_fn
+                
+                # Get AutoRater service URL from config
+                autorater_service_url = config.autorater.get('service_url', 'http://localhost:8000')
+                
+                # Get tokenizer from actor worker group
+                tokenizer = trainer.actor_rollout_wg.get_tokenizer()[0] if trainer.actor_rollout_wg else None
+                
+                autorater_reward_fn = create_http_autorater_reward_fn(
+                    autorater_service_url=autorater_service_url,
+                    config=config.get('autorater', {}),
+                    tokenizer=tokenizer
+                )
+                print(f"Using HTTP AutoRater service at: {autorater_service_url}")
+                
+                # Initialize the remote AutoRater service if config provided
+                if hasattr(config.autorater, "autorater_config"):
+                    from omegaconf import OmegaConf
+                    autorater_config = OmegaConf.to_container(config.autorater.autorater_config, resolve=True)
+                    
+                    # Get GPU configuration for AutoRater service
+                    num_gpus = config.autorater.get('num_gpus', 1)
+                    gpu_ids = config.autorater.get('gpu_ids', list(range(num_gpus)))
+                    
+                    if not autorater_reward_fn.initialize_remote_autorater(
+                        autorater_config, 
+                        num_gpus=num_gpus, 
+                        gpu_ids=gpu_ids
+                    ):
+                        raise RuntimeError("Failed to initialize remote AutoRater service")
+                    print(f"Remote AutoRater service initialized successfully with {num_gpus} GPUs: {gpu_ids}")
+            else:
+                from verl.utils.reward_score.autorater_reward import create_autorater_reward_fn
+                                        
+                # Use local AutoRater worker
+                autorater_reward_fn = create_autorater_reward_fn(trainer.autorater_wg, config.get('autorater', {}))
+                print("Using local AutoRater worker")
             
-        #     # Replace the reward functions with AutoRater versions
-        #     trainer.reward_fn = autorater_reward_fn
-        #     trainer.val_reward_fn = autorater_reward_fn
-        #     print("AutoRater reward functions initialized successfully")
+            # Replace the reward functions with AutoRater versions
+            trainer.reward_fn = autorater_reward_fn
+            trainer.val_reward_fn = autorater_reward_fn
+            print("AutoRater reward functions initialized successfully")
         
         # Start the training process.
         trainer.fit()

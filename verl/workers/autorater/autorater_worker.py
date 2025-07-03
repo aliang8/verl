@@ -246,7 +246,7 @@ class AutoRaterWorker(Worker):
             extracted = self.extract_solution(pred_answer, method=self.extraction_method)
             extracted_predictions.append(extracted if extracted is not None else pred_answer)
             # extracted_predictions.append(extracted)
-
+        
         # Get ground truth from reward_model metadata
         ground_truth_answers = []
         if "reward_model" in data.non_tensor_batch:
@@ -277,7 +277,7 @@ class AutoRaterWorker(Worker):
                 scores.append(-1.5)
             else:  # ERROR, UNKNOWN
                 scores.append(-2.0)
-
+        
         # Convert decisions to numerical values (TRUE=1, FALSE=0, ERROR/UNKNOWN=-1)
         autorater_decisions = []
         for decision in evaluation_results["decisions"]:

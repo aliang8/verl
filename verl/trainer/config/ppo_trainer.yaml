@@ -4,6 +4,40 @@
 # 3. Inline comments (after a field on the same line) are not allowed.
 # 4. Indentation level is respected for nested fields.
 
+# AutoRater configuration with separate vLLM instance for fixed base model evaluation
+autorater:
+  enable: true
+  
+  # Number of GPUs per node for AutoRater
+  # - Use 1.0 or higher for dedicated GPU(s) (separate resource pool)  
+  # - Use 0.0 to share existing GPU resources without additional allocation
+  # - Sharing reduces memory conflicts and works well since AutoRater is less resource-intensive
+  autorater_gpus_per_node: 0.0
+  
+  # Tensor parallel size for AutoRater's vLLM instance (can be smaller since it runs in separate process)
+  tensor_model_parallel_size: 1
+  
+  # GPU memory utilization for AutoRater's vLLM instance (very conservative for sharing)
+  gpu_memory_utilization: 0.2
+  
+  # Maximum model length for AutoRater (short context to save memory)
+  max_model_len: 2048
+  
+  # Method for extracting solutions from text: "flexible", "strict", "regex"
+  extraction_method: flexible
+  
+  # Answer formats to look for when extracting solutions
+  answer_formats: ["boxed", "hash", "conclusion"]
+  
+  # Maximum prompt length for AutoRater evaluation prompts
+  max_prompt_length: 2048
+  
+  # Weight of AutoRater score in final reward computation
+  autorater_weight: 1.0
+  
+  # Additional vLLM settings (set as main config parameters to avoid conflicts)
+  enable_prefix_caching: false
+
 # dataset config
 data:
 
@@ -408,6 +442,12 @@ actor_rollout_ref:
 
     # may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
     enable_chunked_prefill: True
+
+    # enable prefix caching for vLLM (can improve performance for repeated prefixes)
+    enable_prefix_caching: false
+
+    # enable sleep mode for vLLM (set to false to avoid conflicts when multiple instances are used)
+    enable_sleep_mode: true
 
     # for hf rollout
     # Whether to sample during training rollout. False uses greedy sampling.
