@@ -95,8 +95,8 @@ if __name__ == "__main__":
                 "extra_info": {
                     "split": split,
                     "index": idx,
-                    "question": quiz_raw,
                     "answer": solution_text_raw,
+                    "question": quiz_raw,
                     # "quiz": quiz_raw,
                     # "names": example.get("names", []),
                     # "solution_details": example.get("solution", []),
