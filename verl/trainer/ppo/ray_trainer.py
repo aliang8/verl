@@ -560,8 +560,8 @@ class RayPPOTrainer:
         
         n = len(inputs)
         base_data = {
-            "input": inputs,
-            "output": outputs,
+            "question": inputs,
+            "answer": outputs,
             "score": scores,
             "step": [self.global_steps] * n,
         }
@@ -721,9 +721,10 @@ class RayPPOTrainer:
 
             test_batch = test_batch.union(test_output_gen_batch)
 
-            # Evaluate using RewardManager, which will internally call the remote AutoRater service if configured
-            # and combine with other reward components.
-            reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(test_batch, return_dict=True)
+            # Evaluate rewards using RewardManager (which handles ground-truth extraction internally)
+            reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(
+                test_batch, return_dict=True
+            )
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
@@ -1128,16 +1129,16 @@ class RayPPOTrainer:
                         # The RewardManager is now responsible for calling the remote AutoRater service
                         # if self.use_autorater is True and a URL is provided.
                         # This simplifies the logic here, as reward_manager.compute_rewards will handle the HTTP call.
-                        reward_tensor, reward_extra_infos_dict = self.reward_manager.compute_rewards(batch, return_dict=True)
+                        reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(batch, return_dict=True)
 
                     # log some reward metrics
-                    if "format_scores" in reward_extra_infos_dict:
+                    if "format_scores" in batch_extra_infos:
                         # Add data source breakdown for format/content rewards
                         if hasattr(batch, 'non_tensor_batch') and 'data_source' in batch.non_tensor_batch:
                             data_sources = batch.non_tensor_batch['data_source']
                             if isinstance(data_sources, np.ndarray):
                                 data_sources = data_sources.tolist()
-                            training_reward_metrics = process_training_reward_metrics(data_sources, reward_extra_infos_dict)
+                            training_reward_metrics = process_training_reward_metrics(data_sources, batch_extra_infos)
                             metrics.update(training_reward_metrics)
                     
                     # recompute old_log_probs
@@ -1193,13 +1194,11 @@ class RayPPOTrainer:
 
                     with _timer("adv", timing_raw):
                         # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list]
-                        # if self.config.reward_model.launch_reward_fn_async:
-                            # reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                        # Attach reward extra info into the non-tensor batch for later logging
                         batch.batch["token_level_scores"] = reward_tensor
 
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                        if batch_extra_infos:
+                            batch.non_tensor_batch.update({k: np.array(v) for k, v in batch_extra_infos.items()})
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
@@ -1248,26 +1247,15 @@ class RayPPOTrainer:
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
-                            
-                            # Extract ground truth answers from reward_model metadata
-                            ground_truths = []
-                            if "reward_model" in batch.non_tensor_batch:
-                                for rm_info in batch.non_tensor_batch["reward_model"]:
-                                    if isinstance(rm_info, dict) and "ground_truth" in rm_info:
-                                        ground_truths.append(str(rm_info["ground_truth"]))
-                                    else:
-                                        ground_truths.append("Unknown")
-                            else:
-                                ground_truths = ["Unknown"] * len(inputs)
-                            
+
                             self._dump_generations(
                                 inputs=inputs,
                                 outputs=outputs,
                                 scores=scores,
-                                reward_extra_infos_dict=reward_extra_infos_dict,
+                                reward_extra_infos_dict=batch_extra_infos,
                                 dump_path=rollout_data_dir,
                                 data_sources=batch.non_tensor_batch.get("data_source", None),
-                                ground_truths=ground_truths,
+                                ground_truths=batch_extra_infos.get("ground_truth", None),
                             )
 
                     # validate

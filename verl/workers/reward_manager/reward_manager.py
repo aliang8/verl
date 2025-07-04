@@ -47,7 +47,11 @@ class RewardManager:
         self.enable_format_reward = self.config.get("enable_format_reward", True)
         self.format_reward_weight = self.config.get("format_reward_weight", 0.5) # Default to 0.5 for now, can be adjusted
 
-    def compute_rewards(self, data: DataProto, return_dict: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
+    def compute_rewards(
+        self,
+        data: DataProto,
+        return_dict: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
         """
         Computes AutoRater and format rewards for a batch of data.
 
@@ -71,9 +75,6 @@ class RewardManager:
         if self.use_autorater and self.autorater_service_url:
             print(f"Calling remote AutoRater service at {self.autorater_service_url} from RewardManager")
 
-            # Prepare payload for remote service with extracted solutions
-            decoded_questions = [self.tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in data.batch["prompts"]]
-            decoded_pred_answers = [self.tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in data.batch["responses"]]
             # Extract ground truth information from data.non_tensor_batch["reward_model"]
             ground_truth_infos = data.non_tensor_batch.get("reward_model", [{} for _ in range(batch_size)])
             decoded_ground_truth_answers = []
@@ -83,25 +84,38 @@ class RewardManager:
                 else:
                     decoded_ground_truth_answers.append(str(gt))
 
+            # Prepare payload for remote service with extracted solutions
+            decoded_questions = [self.tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in data.batch["prompts"]]
+            decoded_pred_answers = [self.tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in data.batch["responses"]]
+
             # Extract solutions
             extraction_method = self.config.autorater_config.get("extraction_method", "flexible") if "autorater_config" in self.config else "flexible"
             answer_formats = self.config.autorater_config.get("answer_formats", ["boxed", "hash"]) if "autorater_config" in self.config else ["boxed", "hash"]
             processed_pred_answers = []
             processed_gt_answers = []
             parse_fail_flags = []
+            extracted_pred_answers = []
+            extracted_gt_answers = []
+
             for pred_ans, gt_ans in zip(decoded_pred_answers, decoded_ground_truth_answers):
+                # Only parse the predicted answer; keep ground truth as-is
                 extr_pred_raw = extract_solution(pred_ans, method=extraction_method, answer_formats=answer_formats)
-                extr_gt_raw = extract_solution(gt_ans, method=extraction_method, answer_formats=answer_formats)
-                if extr_pred_raw is None or extr_gt_raw is None:
-                    # Mark parse failure
+                extracted_pred_answers.append(extr_pred_raw)
+                # Ground truth answer is used directly without parsing
+                extr_gt_raw = gt_ans
+                extracted_gt_answers.append(extr_gt_raw)
+
+                if extr_pred_raw is None:
+                    # Mark parse failure for predicted answer only
                     parse_fail_flags.append(True)
-                    # Use original strings when sending to remote (will override later)
-                    extr_pred = pred_ans
-                    extr_gt = gt_ans
+                    extr_pred = pred_ans  # fallback to original prediction string
                 else:
                     parse_fail_flags.append(False)
                     extr_pred = extr_pred_raw
-                    extr_gt = extr_gt_raw
+
+                # Use ground truth answer as provided
+                extr_gt = extr_gt_raw
+
                 processed_pred_answers.append(extr_pred)
                 processed_gt_answers.append(extr_gt)
 
@@ -129,7 +143,7 @@ class RewardManager:
             autorater_explanations = autorater_response_data.get("autorater_explanations", ["N/A"] * batch_size)
             autorater_raw_responses = autorater_response_data.get("autorater_raw_responses", ["N/A"] * batch_size)
 
-            # Override results for parse failures
+            # Override results for parse failures (predicted answer)
             for idx, fail in enumerate(parse_fail_flags):
                 if fail:
                     autorater_scores[idx] = -2.0
@@ -148,6 +162,10 @@ class RewardManager:
                     shaped_autorater_scores.append(raw_score)  # keep existing (-2 or 0.5 etc.)
 
             autorater_scores = shaped_autorater_scores  # replace with shaped values
+
+            # Append extracted answers to extra info so that they can be dumped later
+            reward_extra_info["extracted_pred"].extend(extracted_pred_answers)
+            reward_extra_info["extracted_gt"].extend(extracted_gt_answers)
         else:
             logger.info("Remote AutoRater service not enabled or URL not provided in RewardManager.")
 

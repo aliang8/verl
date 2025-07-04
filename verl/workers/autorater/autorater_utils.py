@@ -29,94 +29,20 @@ Please proceed with the evaluation.
 Decision: """
 
 
-def extract_solution(solution_str: str, method: str = "flexible", answer_formats: Union[List[str], None] = None) -> Union[str, None]:
+def extract_solution(solution_str: str, method: str = "any", answer_formats: Union[List[str], None] = None) -> Union[str, None]:
+    """Extract content inside <answer>...</answer> tags.
+
+    If the tags are missing or empty, returns None. Additional parameters are
+    kept for backward compatibility but currently ignored.
     """
-    Extract the answer from a solution string.
-    Supports #### format, \boxed{} format, and Knights & Knaves CONCLUSION format.
-    
-    Args:
-        solution_str: The solution text
-        method: "strict", "flexible", or "both"
-        answer_formats: List of supported formats (["boxed", "hash"] by default)
-        
-    Returns:
-        Extracted answer as string, or None if not found
-    """
-    if answer_formats is None:
-        answer_formats = ["boxed", "hash"]
-    
-    if method == "strict":
-        # Try Knights and Knaves CONCLUSION format first
-        conclusion_match = re.search(r"CONCLUSION\s*\n((?:\(\d+\).*\n?)+)", solution_str, re.MULTILINE)
-        if conclusion_match is not None:
-            conclusion_text = conclusion_match.group(1)
-            # Extract the numbered points and combine them
-            points = re.findall(r"\(\d+\)\s*([^\n]+)", conclusion_text)
-            if points:
-                return ", ".join(points).strip()
-        
-        # Try #### format (GSM8K style)
-        if "hash" in answer_formats:
-            solution = re.search(r"#### (\\-?[0-9\\.\\,]+)", solution_str)
-            if solution is not None:
-                final_answer = solution.group(0)
-                final_answer = final_answer.split("#### ")[1].replace(",", "").replace("$", "")
-                return final_answer
-        
-        # Try \boxed{} format
-        if "boxed" in answer_formats:
-            boxed_match = re.search(r"\\boxed\{([^}]+)\}", solution_str)
-            if boxed_match is not None:
-                final_answer = boxed_match.group(1).replace(",", "").replace("$", "")
-                return final_answer
-        
+
+    # Regex to capture text between <answer> and </answer>, non-greedy, case-insensitive, spanning lines.
+    match = re.search(r"<answer>(.*?)</answer>", solution_str, re.IGNORECASE | re.DOTALL)
+    if not match:
         return None
-        
-    elif method == "flexible":
-        # Try Knights and Knaves CONCLUSION format first
-        conclusion_match = re.search(r"CONCLUSION\s*\n((?:\(\d+\).*\n?)+)", solution_str, re.MULTILINE)
-        if conclusion_match is not None:
-            conclusion_text = conclusion_match.group(1)
-            # Extract the numbered points and combine them
-            points = re.findall(r"\(\d+\)\s*([^\n]+)", conclusion_text)
-            if points:
-                return ", ".join(points).strip()
-        
-        # Try structured formats
-        if "hash" in answer_formats:
-            solution = re.search(r"#### (\\-?[0-9\\.\\,]+)", solution_str)
-            if solution is not None:
-                final_answer = solution.group(0)
-                final_answer = final_answer.split("#### ")[1].replace(",", "").replace("$", "")
-                return final_answer
-        
-        if "boxed" in answer_formats:
-            boxed_match = re.search(r"\\boxed\{([^}]+)\}", solution_str)
-            if boxed_match is not None:
-                final_answer = boxed_match.group(1).replace(",", "").replace("$", "")
-                return final_answer
-        
-        # Fallback: find any numbers in the text
-        answer = re.findall(r"(\\-?[0-9\\.\\,]+)", solution_str)
-        final_answer = None
-        if len(answer) == 0:
-            return None
-        else:
-            invalid_str = ["", "."]
-            # Find the last number that is not '.'
-            for final_answer in reversed(answer):
-                if final_answer not in invalid_str:
-                    break
-            return final_answer.replace(",", "").replace("$", "") if final_answer else None
-            
-    elif method == "both":
-        # Try strict first, then flexible
-        strict_result = extract_solution(solution_str, "strict", answer_formats)
-        if strict_result is not None:
-            return strict_result
-        return extract_solution(solution_str, "flexible", answer_formats)
-    
-    return None
+
+    extracted = match.group(1).strip()
+    return extracted if extracted else None
 
 
 def format_autorater_prompt(question: str, predicted_answer: str, ground_truth_answer: str, template: Union[str, None] = None) -> str:
