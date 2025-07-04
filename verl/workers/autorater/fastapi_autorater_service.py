@@ -268,8 +268,8 @@ async def initialize_autorater(request: InitializeRequest):
     
     for gpu_id in request.gpu_ids:
         # Create actor for this GPU
-        actor = AutoRaterActor.remote(
-            config=OmegaConf.to_container(app.state.autorater_config),
+        actor = AutoRaterActor.remote( # type: ignore
+            config=OmegaConf.to_container(app.state.autorater_config), # type: ignore
             gpu_id=gpu_id
         )
         app.state.autorater_actors.append(actor)
