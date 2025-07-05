@@ -41,6 +41,9 @@ app.state.autorater_actors = []
 app.state.autorater_config = None
 app.state.num_gpus = 0
 
+# Global SandboxSession reused across requests to minimise startup overhead
+app.state.sandbox_session = None  # Initialized lazily on first use
+
 
 @ray.remote(num_gpus=1)
 class AutoRaterActor:
@@ -291,6 +294,20 @@ async def initialize_autorater(request: InitializeRequest):
     # Wait for all actors to initialize
     initialization_results = ray.get(initialization_futures)
     
+    # Initialize global SandboxSession once during setup
+    if getattr(app.state, "sandbox_session", None) is None:
+        try:
+            _sess = SandboxSession(lang="python")
+            try:
+                _sess.open()
+            except Exception:
+                # If open() is not available, rely on implicit open in __enter__ via our run calls
+                pass
+            app.state.sandbox_session = _sess
+            logger.info("Global SandboxSession created during /initialize")
+        except Exception as se:
+            logger.warning(f"Failed to create SandboxSession during initialization: {se}. Will fallback to lazy creation.")
+
     logger.info("All AutoRater actors initialized successfully:")
     for result in initialization_results:
         logger.info(f"  {result}")
@@ -314,189 +331,40 @@ async def evaluate_responses(request: AutoRaterRequest):
 
     start_time = time.time()
     batch_size = len(request.prompts)
-    logger.info(f"Processing AutoRater request with {batch_size} samples using {len(app.state.autorater_actors)} actors")
+    logger.info(
+        f"Processing AutoRater request with {batch_size} samples using {len(app.state.autorater_actors)} actors"
+    )
 
-    # Load tokenizer to decode prompts and responses
-    # Use the tokenizer from the initialized AutoRaterActor or a default one if not available
-    # For simplicity, let's use a default for now if actors aren't fully initialized (though they should be)
-    try:
-        # Try to get tokenizer from an actor. All actors should have the same tokenizer.
-        # This assumes at least one actor is initialized.
-        # We need to block here as the tokenizer is needed immediately
-        tokenizer = ray.get(app.state.autorater_actors[0].get_tokenizer.remote()) # type: ignore
-    except Exception as e:
-        logger.warning(f"Could not retrieve tokenizer from actor, using default Qwen/Qwen2.5-7B-Instruct. This might cause issues if models differ. Error: {e}")
-        # Fallback to load tokenizer if not already loaded for evaluation
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct", trust_remote_code=False) # type: ignore
+    tokenizer = _get_tokenizer()
 
-    # Decode prompts and responses to text
-    questions = []
-    predicted_answers = []
-    ground_truth_answers = []
+    # --- Decode ---
+    questions, predicted_answers, ground_truth_answers = _decode_request(request, tokenizer)
 
-    for i in range(batch_size):
-        # Decode question from prompt IDs
-        question = tokenizer.decode(request.prompts[i], skip_special_tokens=True)
-        questions.append(question)
+    # --- LLM AutoRater ---
+    autorater_scores, autorater_decisions, autorater_explanations, autorater_raw = _run_llm_autorater(
+        questions, predicted_answers, ground_truth_answers
+    )
 
-        # Decode predicted answer from response IDs
-        predicted_answer = tokenizer.decode(request.responses[i], skip_special_tokens=True)
-        predicted_answers.append(predicted_answer)
+    # --- Unit Tests ---
+    (
+        code_scores,
+        code_tests_passed,
+        code_total_tests,
+        code_stdout,
+        code_stderr,
+        code_error,
+    ) = _run_unit_tests(predicted_answers, request.reward_model_info)
 
-        # Extract ground truth from reward_model_info
-        reward_info = request.reward_model_info[i]
-        if isinstance(reward_info, dict) and "ground_truth" in reward_info:
-            ground_truth = str(reward_info["ground_truth"])
-        else:
-            ground_truth = str(reward_info)
-        ground_truth_answers.append(ground_truth)
-
-    # Format AutoRater evaluation prompts using the template (needed for logging later)
-    evaluation_prompts = []
-    for question, predicted_answer, ground_truth in zip(questions, predicted_answers, ground_truth_answers):
-        autorater_prompt = format_autorater_prompt( # type: ignore
-            question=question,
-            predicted_answer=predicted_answer,
-            ground_truth_answer=ground_truth
-        )
-        evaluation_prompts.append(autorater_prompt)
-
-    # Split work across available actors
-    num_actors = len(app.state.autorater_actors)
-    chunk_size = max(1, batch_size // num_actors)
-
-    # Create chunks for parallel processing
-    evaluation_futures = []
-    for i in range(0, batch_size, chunk_size):
-        end_idx = min(i + chunk_size, batch_size)
-
-        # Select actor (round robin)
-        actor_idx = (i // chunk_size) % num_actors
-        actor = app.state.autorater_actors[actor_idx]
-
-        # Submit evaluation task to actor
-        future = actor.evaluate_batch.remote( # type: ignore
-            questions[i:end_idx],
-            predicted_answers[i:end_idx],
-            ground_truth_answers[i:end_idx]
-        )
-        evaluation_futures.append(future)
-
-    # Wait for all evaluations to complete
-    results = ray.get(evaluation_futures)
-
-    # Combine results from all actors
-    all_scores: List[float] = []
-    all_decisions: List[int] = []
-    all_explanations: List[str] = []
-    all_raw_responses: List[str] = []
-
-    # Placeholders for code execution info
-    code_scores: List[float] = [0.0] * batch_size
-    code_tests_passed: List[int] = [0] * batch_size
-    code_total_tests: List[int] = [0] * batch_size
-    code_stdout: List[str] = [""] * batch_size
-    code_stderr: List[str] = [""] * batch_size
-    code_error: List[str] = [""] * batch_size
-
-    for result in results:
-        # Convert decisions to scores and numerical decisions
-        for decision in result["decisions"]:
-            if decision == "TRUE":
-                all_scores.append(1.0)
-                all_decisions.append(1)
-            elif decision == "FALSE":
-                all_scores.append(0.0)
-                all_decisions.append(0)
-            else:
-                all_scores.append(0.5)
-                all_decisions.append(0)
-
-        all_explanations.extend(result["explanations"])
-        all_raw_responses.extend(result["raw_responses"])
-
-        # --- Code execution evaluation ---
-        for idx, rm_info in enumerate(request.reward_model_info):
-            tests = []
-            if isinstance(rm_info, dict):
-                if isinstance(rm_info.get("unit_tests"), list):
-                    tests = rm_info["unit_tests"]
-                elif isinstance(rm_info.get("tests"), list):
-                    tests = rm_info["tests"]
-                else:
-                    tc = rm_info.get("unit_tests") or rm_info.get("tests")
-                    if tc:
-                        tests = [tc]
-
-            if tests:
-                import re as _re
-                code_match = _re.search(r"```[\w]*\n(.*?)```", predicted_answers[idx], _re.DOTALL)
-                pred_code_block = code_match.group(1) if code_match else predicted_answers[idx]
-
-                passes = 0
-                for test_snippet in tests:
-                    exec_code = f"{pred_code_block}\n\n{test_snippet}"
-                    try:
-                        with SandboxSession(lang="python") as sess:
-                            res = sess.run(exec_code, libraries=None)
-                        if res.exit_code == 0:
-                            passes += 1
-                        code_stdout[idx] += res.stdout + "\n"
-                        code_stderr[idx] += res.stderr + "\n"
-                    except Exception as exec_e:
-                        code_error[idx] += str(exec_e) + "\n"
-
-                total_tests = len(tests)
-                code_total_tests[idx] = total_tests
-                code_tests_passed[idx] = passes
-                code_scores[idx] = float(passes)  # 1 point per passed test
-
-                # Override primary score if no autorater; else combine
-                all_scores[idx] += code_scores[idx]
+    # Combine scores
+    all_scores = [a + c for a, c in zip(autorater_scores, code_scores)]
 
     processing_time = time.time() - start_time
 
-    logger.info(f"AutoRater evaluation completed in {processing_time:.2f}s")
-    logger.info(f"Total samples processed: {len(all_raw_responses)}")
-    logger.info(f"Average score: {np.mean(all_scores):.3f}")
-
-    # # --- Logging request and response for debugging ---
-    # log_dir = "autorater_requests"
-    # os.makedirs(log_dir, exist_ok=True)
-    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    # log_filename = os.path.join(log_dir, f"request_response_{timestamp}.json")
-
-    # try:
-    #     log_data = {
-    #         "request": request.dict(),
-    #         "decoded_request": {
-    #             "prompts": [tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in request.prompts],
-    #             "responses": [tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in request.responses],
-    #             "reward_model_info": request.reward_model_info,
-    #         },
-    #         "evaluation_prompts_to_autorater": evaluation_prompts, # Include the formatted prompts
-    #         "autorater_response": {
-    #             "autorater_scores": all_scores,
-    #             "autorater_decisions": all_decisions,
-    #             "autorater_explanations": all_explanations,
-    #             "autorater_raw_responses": all_raw_responses,
-    #             "processing_time": processing_time,
-    #             "success": True,
-    #         },
-    #         "timestamp": str(datetime.now())
-    #     }
-    #     with open(log_filename, "w", encoding="utf-8") as f:
-    #         json.dump(log_data, f, ensure_ascii=False, indent=2)
-    #     logger.info(f"Logged request and response to {log_filename}")
-    # except Exception as e:
-    #     logger.error(f"Failed to log request and response to {log_filename}: {e}")
-    # --- End logging ---
-
     return AutoRaterResponse(
         autorater_scores=all_scores,
-        autorater_decisions=all_decisions,
-        autorater_explanations=all_explanations,
-        autorater_raw_responses=all_raw_responses,
+        autorater_decisions=autorater_decisions,
+        autorater_explanations=autorater_explanations,
+        autorater_raw_responses=autorater_raw,
         code_scores=code_scores,
         code_tests_passed=code_tests_passed,
         code_total_tests=code_total_tests,
@@ -504,7 +372,7 @@ async def evaluate_responses(request: AutoRaterRequest):
         code_stderr=code_stderr,
         code_error=code_error,
         processing_time=processing_time,
-        success=True
+        success=True,
     )
 
 
@@ -516,6 +384,19 @@ async def shutdown_service(background_tasks: BackgroundTasks):
         for actor in app.state.autorater_actors:
             ray.kill(actor)
         app.state.autorater_actors.clear()
+
+        # Close global SandboxSession if exists
+        ss = getattr(app.state, "sandbox_session", None)
+        if ss is not None:
+            try:
+                if hasattr(ss, "close"):
+                    ss.close()
+                else:
+                    ss.__exit__(None, None, None)
+                logger.info("SandboxSession closed")
+            except Exception as e:
+                logger.warning(f"Error closing SandboxSession: {e}")
+            app.state.sandbox_session = None
         
         # Shutdown Ray if we initialized it
         if ray.is_initialized():
@@ -571,6 +452,238 @@ async def startup_event():
             # Don't raise the exception - let the service start anyway
     else:
         logger.info("No config provided, skipping auto-initialization")
+
+
+# ================= Helper Functions =================
+
+
+def _get_tokenizer():
+    """Retrieve the tokenizer from the first AutoRater actor or fall back to a default."""
+    try:
+        tokenizer = ray.get(app.state.autorater_actors[0].get_tokenizer.remote())  # type: ignore
+    except Exception as e:
+        logger.warning(
+            f"Could not retrieve tokenizer from actor, using default Qwen/Qwen2.5-7B-Instruct. Error: {e}"
+        )
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct", trust_remote_code=False)  # type: ignore
+    return tokenizer
+
+
+def _decode_request(request: "AutoRaterRequest", tokenizer):
+    """Decode token IDs back to human-readable text lists."""
+    questions: List[str] = []
+    predicted_answers: List[str] = []
+    ground_truth_answers: List[str] = []
+
+    for p_ids, r_ids, rm_info in zip(request.prompts, request.responses, request.reward_model_info):
+        questions.append(tokenizer.decode(p_ids, skip_special_tokens=True))
+        predicted_answers.append(tokenizer.decode(r_ids, skip_special_tokens=True))
+
+        if isinstance(rm_info, dict) and "ground_truth" in rm_info:
+            gt = str(rm_info["ground_truth"])
+        else:
+            gt = str(rm_info)
+        ground_truth_answers.append(gt)
+
+    return questions, predicted_answers, ground_truth_answers
+
+
+def _run_llm_autorater(
+    questions: List[str],
+    predicted_answers: List[str],
+    ground_truth_answers: List[str],
+) -> Tuple[List[float], List[int], List[str], List[str]]:
+    """Run LLM-based AutoRater on the full batch and return results."""
+    batch_size = len(questions)
+
+    # Build prompts
+    prompts = [
+        format_autorater_prompt(q, pa, gt)  # type: ignore
+        for q, pa, gt in zip(questions, predicted_answers, ground_truth_answers)
+    ]
+
+    # Dispatch to Ray actors
+    num_actors = len(app.state.autorater_actors)
+    chunk_size = max(1, batch_size // num_actors)
+
+    futures = []
+    for i in range(0, batch_size, chunk_size):
+        actor_idx = (i // chunk_size) % num_actors
+        actor = app.state.autorater_actors[actor_idx]
+        fut = actor.evaluate_batch.remote(
+            questions[i : i + chunk_size],
+            predicted_answers[i : i + chunk_size],
+            ground_truth_answers[i : i + chunk_size],
+        )  # type: ignore
+        futures.append(fut)
+
+    results = ray.get(futures)
+
+    # Flatten keeping order – we appended sequentially so order is preserved
+    autorater_scores: List[float] = []
+    autorater_decisions: List[int] = []
+    autorater_explanations: List[str] = []
+    autorater_raw: List[str] = []
+
+    for res in results:
+        for decision in res["decisions"]:
+            if decision == "TRUE":
+                autorater_scores.append(1.0)
+                autorater_decisions.append(1)
+            elif decision == "FALSE":
+                autorater_scores.append(0.0)
+                autorater_decisions.append(0)
+            else:
+                autorater_scores.append(0.5)
+                autorater_decisions.append(0)
+
+        autorater_explanations.extend(res["explanations"])
+        autorater_raw.extend(res["raw_responses"])
+
+    return autorater_scores, autorater_decisions, autorater_explanations, autorater_raw
+
+
+def _run_unit_tests(
+    predicted_answers: List[str],
+    reward_model_info: List[Dict[str, Any]],
+) -> Tuple[List[float], List[int], List[int], List[str], List[str], List[str]]:
+    """Execute unit tests in SandboxSession and aggregate scores and outputs."""
+    batch_size = len(predicted_answers)
+
+    # Ensure sandbox session exists
+    if getattr(app.state, "sandbox_session", None) is None:
+        _sess = SandboxSession(lang="python")
+        try:
+            _sess.open()
+        except Exception:
+            pass
+        app.state.sandbox_session = _sess
+
+    sess = app.state.sandbox_session
+    import re as _re
+
+    code_scores: List[float] = [0.0] * batch_size
+    tests_passed: List[int] = [0] * batch_size
+    total_tests: List[int] = [0] * batch_size
+    stdout_list: List[str] = [""] * batch_size
+    stderr_list: List[str] = [""] * batch_size
+    error_list: List[str] = [""] * batch_size
+
+    for idx, rm_info in enumerate(reward_model_info):
+        tests: List[str] = []
+        if isinstance(rm_info, dict):
+            if isinstance(rm_info.get("unit_tests"), list):
+                tests = rm_info["unit_tests"]
+            elif isinstance(rm_info.get("tests"), list):
+                tests = rm_info["tests"]
+            else:
+                tc = rm_info.get("unit_tests") or rm_info.get("tests")
+                if tc:
+                    tests = [tc]
+
+        if not tests:
+            continue
+
+        code_match = _re.search(r"```[\w]*\n(.*?)```", predicted_answers[idx], _re.DOTALL)
+        pred_code_block = code_match.group(1) if code_match else predicted_answers[idx]
+
+        passes = 0
+        for test_snippet in tests:
+            exec_code = f"{pred_code_block}\n\n{test_snippet}"
+            try:
+                res = sess.run(exec_code, libraries=None)
+                if res.exit_code == 0:
+                    passes += 1
+                stdout_list[idx] += res.stdout + "\n"
+                stderr_list[idx] += res.stderr + "\n"
+            except Exception as exec_e:
+                error_list[idx] += str(exec_e) + "\n"
+
+        total_tests[idx] = len(tests)
+        tests_passed[idx] = passes
+        code_scores[idx] = float(passes)  # 1 point per passed test
+
+    return code_scores, tests_passed, total_tests, stdout_list, stderr_list, error_list
+
+
+# -------------------- New Lightweight Endpoints --------------------
+
+
+@app.post("/evaluate_autorater", response_model=AutoRaterResponse)
+async def evaluate_autorater_only(request: AutoRaterRequest):
+    """Evaluate only using LLM AutoRater (no unit-test execution)."""
+    if len(app.state.autorater_actors) == 0:
+        raise HTTPException(status_code=400, detail="AutoRater not initialized. Call /initialize first.")
+
+    start_time = time.time()
+    tokenizer = _get_tokenizer()
+
+    questions, predicted_answers, ground_truth_answers = _decode_request(request, tokenizer)
+
+    autorater_scores, autorater_decisions, autorater_explanations, autorater_raw = _run_llm_autorater(
+        questions, predicted_answers, ground_truth_answers
+    )
+
+    processing_time = time.time() - start_time
+
+    zero_array_float = [0.0] * len(autorater_scores)
+    zero_array_int = [0] * len(autorater_scores)
+    empty_str_arr = [""] * len(autorater_scores)
+
+    return AutoRaterResponse(
+        autorater_scores=autorater_scores,
+        autorater_decisions=autorater_decisions,
+        autorater_explanations=autorater_explanations,
+        autorater_raw_responses=autorater_raw,
+        code_scores=zero_array_float,
+        code_tests_passed=zero_array_int,
+        code_total_tests=zero_array_int,
+        code_stdout=empty_str_arr,
+        code_stderr=empty_str_arr,
+        code_error=empty_str_arr,
+        processing_time=processing_time,
+        success=True,
+    )
+
+
+@app.post("/evaluate_tests", response_model=AutoRaterResponse)
+async def evaluate_unit_tests_only(request: AutoRaterRequest):
+    """Evaluate only unit tests and skip LLM AutoRater."""
+    start_time = time.time()
+
+    # We still need predicted_answers decoded for extracting code blocks
+    tokenizer = _get_tokenizer()
+    _, predicted_answers, _ = _decode_request(request, tokenizer)
+
+    (
+        code_scores,
+        code_tests_passed,
+        code_total_tests,
+        code_stdout,
+        code_stderr,
+        code_error,
+    ) = _run_unit_tests(predicted_answers, request.reward_model_info)
+
+    processing_time = time.time() - start_time
+
+    zero_array_float = [0.0] * len(code_scores)
+    zero_array_int = [0] * len(code_scores)
+    empty_str_arr = [""] * len(code_scores)
+
+    return AutoRaterResponse(
+        autorater_scores=code_scores,  # Overall score equals code score when only tests run
+        autorater_decisions=zero_array_int,
+        autorater_explanations=[],
+        autorater_raw_responses=[],
+        code_scores=code_scores,
+        code_tests_passed=code_tests_passed,
+        code_total_tests=code_total_tests,
+        code_stdout=code_stdout,
+        code_stderr=code_stderr,
+        code_error=code_error,
+        processing_time=processing_time,
+        success=True,
+    )
 
 
 if __name__ == "__main__":
