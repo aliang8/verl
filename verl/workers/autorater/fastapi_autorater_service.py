@@ -13,7 +13,7 @@ import time
 import traceback
 import json
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 # Libraries from standard python or installed via pip (assumed to be installed)
 import ray  # type: ignore
@@ -26,6 +26,9 @@ from omegaconf import DictConfig, OmegaConf  # type: ignore
 from transformers import AutoTokenizer  # type: ignore
 from vllm import LLM, SamplingParams  # type: ignore
 from verl.workers.autorater.autorater_utils import format_autorater_prompt, parse_autorater_response
+
+# Sandbox for secure code execution
+from llm_sandbox import SandboxSession  # type: ignore
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -174,6 +177,13 @@ class AutoRaterResponse(BaseModel):
     autorater_decisions: List[int]
     autorater_explanations: Optional[List[str]] = None
     autorater_raw_responses: Optional[List[str]] = None
+    # Code execution details (optional)
+    code_scores: Optional[List[float]] = None  # aggregate score (points per passed test)
+    code_tests_passed: Optional[List[int]] = None
+    code_total_tests: Optional[List[int]] = None
+    code_stdout: Optional[List[str]] = None
+    code_stderr: Optional[List[str]] = None
+    code_error: Optional[List[str]] = None
     processing_time: float
     success: bool
     error_message: Optional[str] = None
@@ -376,10 +386,18 @@ async def evaluate_responses(request: AutoRaterRequest):
     results = ray.get(evaluation_futures)
 
     # Combine results from all actors
-    all_scores = []
-    all_decisions = []
-    all_explanations = []
-    all_raw_responses = []
+    all_scores: List[float] = []
+    all_decisions: List[int] = []
+    all_explanations: List[str] = []
+    all_raw_responses: List[str] = []
+
+    # Placeholders for code execution info
+    code_scores: List[float] = [0.0] * batch_size
+    code_tests_passed: List[int] = [0] * batch_size
+    code_total_tests: List[int] = [0] * batch_size
+    code_stdout: List[str] = [""] * batch_size
+    code_stderr: List[str] = [""] * batch_size
+    code_error: List[str] = [""] * batch_size
 
     for result in results:
         # Convert decisions to scores and numerical decisions
@@ -396,6 +414,45 @@ async def evaluate_responses(request: AutoRaterRequest):
 
         all_explanations.extend(result["explanations"])
         all_raw_responses.extend(result["raw_responses"])
+
+        # --- Code execution evaluation ---
+        for idx, rm_info in enumerate(request.reward_model_info):
+            tests = []
+            if isinstance(rm_info, dict):
+                if isinstance(rm_info.get("unit_tests"), list):
+                    tests = rm_info["unit_tests"]
+                elif isinstance(rm_info.get("tests"), list):
+                    tests = rm_info["tests"]
+                else:
+                    tc = rm_info.get("unit_tests") or rm_info.get("tests")
+                    if tc:
+                        tests = [tc]
+
+            if tests:
+                import re as _re
+                code_match = _re.search(r"```[\w]*\n(.*?)```", predicted_answers[idx], _re.DOTALL)
+                pred_code_block = code_match.group(1) if code_match else predicted_answers[idx]
+
+                passes = 0
+                for test_snippet in tests:
+                    exec_code = f"{pred_code_block}\n\n{test_snippet}"
+                    try:
+                        with SandboxSession(lang="python") as sess:
+                            res = sess.run(exec_code, libraries=None)
+                        if res.exit_code == 0:
+                            passes += 1
+                        code_stdout[idx] += res.stdout + "\n"
+                        code_stderr[idx] += res.stderr + "\n"
+                    except Exception as exec_e:
+                        code_error[idx] += str(exec_e) + "\n"
+
+                total_tests = len(tests)
+                code_total_tests[idx] = total_tests
+                code_tests_passed[idx] = passes
+                code_scores[idx] = float(passes)  # 1 point per passed test
+
+                # Override primary score if no autorater; else combine
+                all_scores[idx] += code_scores[idx]
 
     processing_time = time.time() - start_time
 
@@ -440,6 +497,12 @@ async def evaluate_responses(request: AutoRaterRequest):
         autorater_decisions=all_decisions,
         autorater_explanations=all_explanations,
         autorater_raw_responses=all_raw_responses,
+        code_scores=code_scores,
+        code_tests_passed=code_tests_passed,
+        code_total_tests=code_total_tests,
+        code_stdout=code_stdout,
+        code_stderr=code_stderr,
+        code_error=code_error,
         processing_time=processing_time,
         success=True
     )

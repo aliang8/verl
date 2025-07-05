@@ -41,11 +41,8 @@ class RewardManager:
         self.autorater_service_url = autorater_service_url
         self.use_autorater = use_autorater
 
-        # No longer initializing local AutoRaterReward fn here, it will be called via HTTP if self.use_autorater is True
-        self.autorater_reward_fn = None
-
         self.enable_format_reward = self.config.get("enable_format_reward", True)
-        self.format_reward_weight = self.config.get("format_reward_weight", 0.5) # Default to 0.5 for now, can be adjusted
+        self.format_reward_weight = self.config.get("format_reward_weight", 1.0) # Default to 1.0 for now, can be adjusted
 
     def compute_rewards(
         self,

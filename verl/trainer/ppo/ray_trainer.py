@@ -781,7 +781,13 @@ class RayPPOTrainer:
             # Fallback to an empty array when no data sources were collected
             data_sources = np.array([])
 
-        data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
+        # Filter out non-numeric reward info to avoid errors in metric aggregation
+        numeric_reward_infos = {
+            k: v for k, v in reward_extra_infos_dict.items()
+            if all(isinstance(x, (int, float, np.number)) for x in v)
+        }
+
+        data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, numeric_reward_infos)
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
