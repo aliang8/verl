@@ -15,6 +15,7 @@ from verl.workers.reward_manager.registry import register
 from verl.utils.reward_score.autorater_reward import AutoRaterReward
 from verl.trainer.ppo.reward_fns import format_check_reward
 from verl.workers.autorater.autorater_utils import extract_solution, format_autorater_prompt # Added extract_solution and format_autorater_prompt
+from verl.workers.code_evaluator import CodeEvaluator # Import the new CodeEvaluator
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -26,7 +27,14 @@ class RewardManager:
     Manages the computation of various reward scores, including AutoRater and format-based rewards.
     """
 
-    def __init__(self, config: DictConfig, tokenizer: AutoTokenizer, autorater_service_url: Optional[str] = None, use_autorater: bool = False):
+    def __init__(
+        self,
+        config: DictConfig,
+        tokenizer: AutoTokenizer,
+        autorater_service_url: Optional[str] = None,
+        use_autorater: bool = False,
+        template_type: Optional[str] = None,
+    ):
         """
         Initializes the RewardManager.
 
@@ -35,14 +43,26 @@ class RewardManager:
             tokenizer: The tokenizer instance to use for decoding.
             autorater_service_url: URL of the remote AutoRater FastAPI service.
             use_autorater: Whether to use the remote AutoRater service.
+            template_type: The template type used for generation (e.g., "interleave").
         """
         self.config = config
         self.tokenizer = tokenizer
-        self.autorater_service_url = autorater_service_url
+        # Accept base URL (host:port) without endpoint path; we will append proper path dynamically.
+        # Examples: "http://127.0.0.1:8000" or "https://autorater.mycorp.com"
+        self.autorater_base_url = autorater_service_url.rstrip("/") if autorater_service_url else None
         self.use_autorater = use_autorater
+        self.template_type = template_type
 
         self.enable_format_reward = self.config.get("enable_format_reward", True)
         self.format_reward_weight = self.config.get("format_reward_weight", 1.0) # Default to 1.0 for now, can be adjusted
+        
+        # Initialize CodeEvaluator for code-related evaluation
+        code_evaluator_config = self.config.get("code_evaluator", {})
+        self.code_evaluator = CodeEvaluator(
+            config=OmegaConf.create(code_evaluator_config),
+            tokenizer=self.tokenizer,
+            template_type=template_type,
+        )
 
     def compute_rewards(
         self,
@@ -68,12 +88,23 @@ class RewardManager:
         autorater_explanations = ["N/A"] * batch_size
         autorater_raw_responses = ["N/A"] * batch_size
 
-        # --- Call remote AutoRater service if enabled ---
-        if self.use_autorater and self.autorater_service_url:
-            print(f"Calling remote AutoRater service at {self.autorater_service_url} from RewardManager")
+        # --- Call remote AutoRater service or CodeEvaluator if enabled ---
+        if self.use_autorater and self.autorater_base_url:
+            # Determine if any unit tests are present → choose evaluation type
+            ground_truth_infos = data.non_tensor_batch.get("reward_model", [{} for _ in range(batch_size)])
+
+            def _has_tests(info: Dict[str, Any]):
+                return bool(
+                    isinstance(info, dict)
+                    and (
+                        ("unit_tests" in info and info["unit_tests"])
+                        or ("tests" in info and info["tests"])
+                    )
+                )
+
+            use_code_evaluator = any(_has_tests(info) for info in ground_truth_infos)
 
             # Extract ground truth information from data.non_tensor_batch["reward_model"]
-            ground_truth_infos = data.non_tensor_batch.get("reward_model", [{} for _ in range(batch_size)])
             decoded_ground_truth_answers = []
             for gt in ground_truth_infos:
                 if isinstance(gt, dict) and "ground_truth" in gt:
@@ -81,90 +112,96 @@ class RewardManager:
                 else:
                     decoded_ground_truth_answers.append(str(gt))
 
-            # Prepare payload for remote service with extracted solutions
+            # Prepare decoded questions and responses
             decoded_questions = [self.tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in data.batch["prompts"]]
             decoded_pred_answers = [self.tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in data.batch["responses"]]
 
-            # Extract solutions
-            extraction_method = self.config.autorater_config.get("extraction_method", "flexible") if "autorater_config" in self.config else "flexible"
-            answer_formats = self.config.autorater_config.get("answer_formats", ["boxed", "hash"]) if "autorater_config" in self.config else ["boxed", "hash"]
-            processed_pred_answers = []
-            processed_gt_answers = []
-            parse_fail_flags = []
-            extracted_pred_answers = []
-            extracted_gt_answers = []
-
-            for pred_ans, gt_ans in zip(decoded_pred_answers, decoded_ground_truth_answers):
-                # Only parse the predicted answer; keep ground truth as-is
-                extr_pred_raw = extract_solution(pred_ans, method=extraction_method, answer_formats=answer_formats)
-                extracted_pred_answers.append(extr_pred_raw)
-                # Ground truth answer is used directly without parsing
-                extr_gt_raw = gt_ans
-                extracted_gt_answers.append(extr_gt_raw)
-
-                if extr_pred_raw is None:
-                    # Mark parse failure for predicted answer only
-                    parse_fail_flags.append(True)
-                    extr_pred = pred_ans  # fallback to original prediction string
-                else:
-                    parse_fail_flags.append(False)
-                    extr_pred = extr_pred_raw
-
-                # Use ground truth answer as provided
-                extr_gt = extr_gt_raw
-
-                processed_pred_answers.append(extr_pred)
-                processed_gt_answers.append(extr_gt)
-
-            # Re-tokenize processed answers
-            pred_answers_token_ids = [self.tokenizer.encode(ans, add_special_tokens=False) for ans in processed_pred_answers]
-            gt_answers_token_ids = [self.tokenizer.encode(ans, add_special_tokens=False) for ans in processed_gt_answers]
-
-            # Rebuild reward_model_info with ground_truth string
-            new_reward_model_info = [{"ground_truth": gt} for gt in processed_gt_answers]
+            # Check if we're doing interleaved reasoning or code evaluation
+            is_interleaved = (
+                self.code_evaluator.enable_interleaved_reasoning or 
+                (self.template_type and "interleave" in self.template_type.lower())
+            )
             
-            payload = {
-                "prompts": data.batch["prompts"].cpu().tolist(),
-                "responses": pred_answers_token_ids,
-                "attention_mask": data.batch["attention_mask"].cpu().tolist(),
-                "position_ids": data.batch["position_ids"].cpu().tolist(),
-                "reward_model_info": new_reward_model_info
-            }
+            if is_interleaved or use_code_evaluator:
+                # Use CodeEvaluator for code-related evaluation (including interleaved reasoning)
+                logger.info("Using CodeEvaluator for evaluation")
+                autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses = self.code_evaluator.evaluate_code(
+                    decoded_pred_answers, ground_truth_infos, batch_size
+                )
+                
+                # For interleaved reasoning, we extract all answers for logging
+                extracted_pred_answers = []
+                extracted_gt_answers = []
+                for pred_ans, gt_ans in zip(decoded_pred_answers, decoded_ground_truth_answers):
+                    if is_interleaved:
+                        all_answers = extract_solution(pred_ans, extract_all=True)
+                        extracted_pred_answers.append(all_answers if all_answers else "No answers extracted")
+                    else:
+                        single_answer = extract_solution(pred_ans)
+                        extracted_pred_answers.append(single_answer if single_answer else "No answer extracted")
+                    extracted_gt_answers.append(gt_ans)
+                    
+            else:
+                # Standard text evaluation logic
+                # Extract solutions (predicted answers only)
+                processed_pred_answers = []
+                processed_gt_answers = []
+                parse_fail_flags = []
+                extracted_pred_answers = []
+                extracted_gt_answers = []
 
-            response = requests.post(self.autorater_service_url, json=payload, timeout=600)
-            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
-            autorater_response_data = response.json()
+                for pred_ans, gt_ans in zip(decoded_pred_answers, decoded_ground_truth_answers):
+                    # Attempt to parse predicted answer inside <answer> tags
+                    extr_pred_raw = extract_solution(pred_ans)
+                    extracted_pred_answers.append(extr_pred_raw)
 
-            autorater_scores = autorater_response_data["autorater_scores"]
-            autorater_decisions = autorater_response_data["autorater_decisions"]
-            autorater_explanations = autorater_response_data.get("autorater_explanations", ["N/A"] * batch_size)
-            autorater_raw_responses = autorater_response_data.get("autorater_raw_responses", ["N/A"] * batch_size)
+                    # Ground-truth answer stays as-is
+                    extr_gt_raw = gt_ans
+                    extracted_gt_answers.append(extr_gt_raw)
 
-            # Override results for parse failures (predicted answer)
-            for idx, fail in enumerate(parse_fail_flags):
-                if fail:
-                    autorater_scores[idx] = -2.0
-                    autorater_decisions[idx] = -1
-                    autorater_explanations[idx] = "Failed to parse response"
-                    autorater_raw_responses[idx] = processed_pred_answers[idx]
+                    if extr_pred_raw is None:
+                        parse_fail_flags.append(True)
+                        processed_pred_answers.append(pred_ans)  # fallback to full string
+                    else:
+                        parse_fail_flags.append(False)
+                        processed_pred_answers.append(extr_pred_raw)
 
-            # Shape AutoRater scores based on decisions
-            shaped_autorater_scores = []
-            for dec, raw_score in zip(autorater_decisions, autorater_scores):
-                if dec == 1:
-                    shaped_autorater_scores.append(2.0)
-                elif dec == 0:
-                    shaped_autorater_scores.append(-1.5)
-                else:
-                    shaped_autorater_scores.append(raw_score)  # keep existing (-2 or 0.5 etc.)
+                    processed_gt_answers.append(extr_gt_raw)
 
-            autorater_scores = shaped_autorater_scores  # replace with shaped values
+                # Re-tokenize processed answers
+                pred_answers_token_ids = [self.tokenizer.encode(ans, add_special_tokens=False) for ans in processed_pred_answers]
+                gt_answers_token_ids = [self.tokenizer.encode(ans, add_special_tokens=False) for ans in processed_gt_answers]
+
+                # Rebuild reward_model_info with ground_truth and pass through unit_tests/libs when available
+                new_reward_model_info = []
+                for orig_info, gt in zip(ground_truth_infos, processed_gt_answers):
+                    info_dict: Dict[str, Any] = {"ground_truth": gt}
+                    if isinstance(orig_info, dict):
+                        # pass unit tests if present so code evaluator can run them
+                        if orig_info.get("unit_tests"):
+                            info_dict["unit_tests"] = orig_info["unit_tests"]
+                        elif orig_info.get("tests"):
+                            info_dict["unit_tests"] = orig_info["tests"]
+                        # include optional libs
+                        if orig_info.get("libs"):
+                            info_dict["libs"] = orig_info["libs"]
+                    new_reward_model_info.append(info_dict)
+                
+                payload_common = {
+                    "prompts": data.batch["prompts"].cpu().tolist(),
+                    "responses": pred_answers_token_ids,
+                    "attention_mask": data.batch["attention_mask"].cpu().tolist(),
+                    "position_ids": data.batch["position_ids"].cpu().tolist(),
+                    "reward_model_info": new_reward_model_info,
+                }
+
+                autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses = self._evaluate_text(payload_common, batch_size)
 
             # Append extracted answers to extra info so that they can be dumped later
             reward_extra_info["extracted_pred"].extend(extracted_pred_answers)
             reward_extra_info["extracted_gt"].extend(extracted_gt_answers)
         else:
-            logger.info("Remote AutoRater service not enabled or URL not provided in RewardManager.")
+            logger.info("Remote AutoRater service not enabled or base URL not provided in RewardManager.")
 
         # --- Compute Format Rewards ---
         format_scores = []
@@ -212,3 +249,32 @@ class RewardManager:
 
     def _get_tokenizer(self):
         return self.tokenizer 
+
+    # ------------------------------------------------------------------
+    # Helper methods for remote evaluation
+    # ------------------------------------------------------------------
+
+    def _evaluate_text(self, payload: Dict[str, Any], batch_size: int):
+        """Call /evaluate_autorater endpoint and return extracted fields."""
+        full_url = f"{self.autorater_base_url}/evaluate_autorater"
+        response = requests.post(full_url, json=payload, timeout=600)
+        response.raise_for_status()
+        data = response.json()
+
+        scores = data.get("autorater_scores", [0.0] * batch_size)
+        decisions = data.get("autorater_decisions", [-1] * batch_size)
+        explanations = data.get("autorater_explanations", ["N/A"] * batch_size)
+        raw = data.get("autorater_raw_responses", ["N/A"] * batch_size)
+
+        # Shape scores using decision labels
+        shaped_scores = []
+        
+        for dec, raw_score in zip(decisions, scores):
+            if dec == 1:
+                shaped_scores.append(2.0)
+            elif dec == 0:
+                shaped_scores.append(-1.5)
+            else:
+                shaped_scores.append(raw_score)
+
+        return shaped_scores, decisions, explanations, raw

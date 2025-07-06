@@ -29,20 +29,37 @@ Please proceed with the evaluation.
 Decision: """
 
 
-def extract_solution(solution_str: str, method: str = "any", answer_formats: Union[List[str], None] = None) -> Union[str, None]:
+def extract_solution(solution_str: str, method: str = "any", answer_formats: Union[List[str], None] = None, extract_all: bool = False) -> Union[str, None]:
     """Extract content inside <answer>...</answer> tags.
 
-    If the tags are missing or empty, returns None. Additional parameters are
-    kept for backward compatibility but currently ignored.
+    Args:
+        solution_str: The input string containing answer tags
+        method: Extraction method (kept for backward compatibility, currently ignored)
+        answer_formats: Answer formats (kept for backward compatibility, currently ignored)
+        extract_all: If True, extracts all <answer> tags and returns as comma-separated list
+    
+    Returns:
+        If extract_all=False: Content of first <answer> tag or None if missing/empty
+        If extract_all=True: All <answer> tag contents joined by commas, or None if no tags found
     """
 
-    # Regex to capture text between <answer> and </answer>, non-greedy, case-insensitive, spanning lines.
-    match = re.search(r"<answer>(.*?)</answer>", solution_str, re.IGNORECASE | re.DOTALL)
-    if not match:
-        return None
+    if extract_all:
+        # Find all matches between <answer> and </answer> tags
+        matches = re.findall(r"<answer>(.*?)</answer>", solution_str, re.IGNORECASE | re.DOTALL)
+        if not matches:
+            return None
+        
+        # Strip whitespace from each match and filter out empty ones
+        extracted_items = [match.strip() for match in matches if match.strip()]
+        return extracted_items
+    else:
+        # Original behavior: extract first match only
+        match = re.search(r"<answer>(.*?)</answer>", solution_str, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
 
-    extracted = match.group(1).strip()
-    return extracted if extracted else None
+        extracted = match.group(1).strip()
+        return extracted if extracted else None
 
 
 def format_autorater_prompt(question: str, predicted_answer: str, ground_truth_answer: str, template: Union[str, None] = None) -> str:

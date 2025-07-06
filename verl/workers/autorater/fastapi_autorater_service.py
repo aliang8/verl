@@ -27,9 +27,6 @@ from transformers import AutoTokenizer  # type: ignore
 from vllm import LLM, SamplingParams  # type: ignore
 from verl.workers.autorater.autorater_utils import format_autorater_prompt, parse_autorater_response
 
-# Sandbox for secure code execution
-from llm_sandbox import SandboxSession  # type: ignore
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,9 +37,6 @@ app = FastAPI(title="AutoRater Service", version="1.0.0")
 app.state.autorater_actors = []
 app.state.autorater_config = None
 app.state.num_gpus = 0
-
-# Global SandboxSession reused across requests to minimise startup overhead
-app.state.sandbox_session = None  # Initialized lazily on first use
 
 
 @ray.remote(num_gpus=1)
@@ -180,13 +174,6 @@ class AutoRaterResponse(BaseModel):
     autorater_decisions: List[int]
     autorater_explanations: Optional[List[str]] = None
     autorater_raw_responses: Optional[List[str]] = None
-    # Code execution details (optional)
-    code_scores: Optional[List[float]] = None  # aggregate score (points per passed test)
-    code_tests_passed: Optional[List[int]] = None
-    code_total_tests: Optional[List[int]] = None
-    code_stdout: Optional[List[str]] = None
-    code_stderr: Optional[List[str]] = None
-    code_error: Optional[List[str]] = None
     processing_time: float
     success: bool
     error_message: Optional[str] = None
@@ -294,19 +281,7 @@ async def initialize_autorater(request: InitializeRequest):
     # Wait for all actors to initialize
     initialization_results = ray.get(initialization_futures)
     
-    # Initialize global SandboxSession once during setup
-    if getattr(app.state, "sandbox_session", None) is None:
-        try:
-            _sess = SandboxSession(lang="python")
-            try:
-                _sess.open()
-            except Exception:
-                # If open() is not available, rely on implicit open in __enter__ via our run calls
-                pass
-            app.state.sandbox_session = _sess
-            logger.info("Global SandboxSession created during /initialize")
-        except Exception as se:
-            logger.warning(f"Failed to create SandboxSession during initialization: {se}. Will fallback to lazy creation.")
+    # No SandboxSession needed for AutoRater-only service
 
     logger.info("All AutoRater actors initialized successfully:")
     for result in initialization_results:
@@ -345,32 +320,13 @@ async def evaluate_responses(request: AutoRaterRequest):
         questions, predicted_answers, ground_truth_answers
     )
 
-    # --- Unit Tests ---
-    (
-        code_scores,
-        code_tests_passed,
-        code_total_tests,
-        code_stdout,
-        code_stderr,
-        code_error,
-    ) = _run_unit_tests(predicted_answers, request.reward_model_info)
-
-    # Combine scores
-    all_scores = [a + c for a, c in zip(autorater_scores, code_scores)]
-
     processing_time = time.time() - start_time
 
     return AutoRaterResponse(
-        autorater_scores=all_scores,
+        autorater_scores=autorater_scores,
         autorater_decisions=autorater_decisions,
         autorater_explanations=autorater_explanations,
         autorater_raw_responses=autorater_raw,
-        code_scores=code_scores,
-        code_tests_passed=code_tests_passed,
-        code_total_tests=code_total_tests,
-        code_stdout=code_stdout,
-        code_stderr=code_stderr,
-        code_error=code_error,
         processing_time=processing_time,
         success=True,
     )
@@ -385,18 +341,7 @@ async def shutdown_service(background_tasks: BackgroundTasks):
             ray.kill(actor)
         app.state.autorater_actors.clear()
 
-        # Close global SandboxSession if exists
-        ss = getattr(app.state, "sandbox_session", None)
-        if ss is not None:
-            try:
-                if hasattr(ss, "close"):
-                    ss.close()
-                else:
-                    ss.__exit__(None, None, None)
-                logger.info("SandboxSession closed")
-            except Exception as e:
-                logger.warning(f"Error closing SandboxSession: {e}")
-            app.state.sandbox_session = None
+        # No additional cleanup needed for AutoRater-only service
         
         # Shutdown Ray if we initialized it
         if ray.is_initialized():
@@ -543,69 +488,6 @@ def _run_llm_autorater(
     return autorater_scores, autorater_decisions, autorater_explanations, autorater_raw
 
 
-def _run_unit_tests(
-    predicted_answers: List[str],
-    reward_model_info: List[Dict[str, Any]],
-) -> Tuple[List[float], List[int], List[int], List[str], List[str], List[str]]:
-    """Execute unit tests in SandboxSession and aggregate scores and outputs."""
-    batch_size = len(predicted_answers)
-
-    # Ensure sandbox session exists
-    if getattr(app.state, "sandbox_session", None) is None:
-        _sess = SandboxSession(lang="python")
-        try:
-            _sess.open()
-        except Exception:
-            pass
-        app.state.sandbox_session = _sess
-
-    sess = app.state.sandbox_session
-    import re as _re
-
-    code_scores: List[float] = [0.0] * batch_size
-    tests_passed: List[int] = [0] * batch_size
-    total_tests: List[int] = [0] * batch_size
-    stdout_list: List[str] = [""] * batch_size
-    stderr_list: List[str] = [""] * batch_size
-    error_list: List[str] = [""] * batch_size
-
-    for idx, rm_info in enumerate(reward_model_info):
-        tests: List[str] = []
-        if isinstance(rm_info, dict):
-            if isinstance(rm_info.get("unit_tests"), list):
-                tests = rm_info["unit_tests"]
-            elif isinstance(rm_info.get("tests"), list):
-                tests = rm_info["tests"]
-            else:
-                tc = rm_info.get("unit_tests") or rm_info.get("tests")
-                if tc:
-                    tests = [tc]
-
-        if not tests:
-            continue
-
-        code_match = _re.search(r"```[\w]*\n(.*?)```", predicted_answers[idx], _re.DOTALL)
-        pred_code_block = code_match.group(1) if code_match else predicted_answers[idx]
-
-        passes = 0
-        for test_snippet in tests:
-            exec_code = f"{pred_code_block}\n\n{test_snippet}"
-            try:
-                res = sess.run(exec_code, libraries=None)
-                if res.exit_code == 0:
-                    passes += 1
-                stdout_list[idx] += res.stdout + "\n"
-                stderr_list[idx] += res.stderr + "\n"
-            except Exception as exec_e:
-                error_list[idx] += str(exec_e) + "\n"
-
-        total_tests[idx] = len(tests)
-        tests_passed[idx] = passes
-        code_scores[idx] = float(passes)  # 1 point per passed test
-
-    return code_scores, tests_passed, total_tests, stdout_list, stderr_list, error_list
-
-
 # -------------------- New Lightweight Endpoints --------------------
 
 
@@ -626,61 +508,11 @@ async def evaluate_autorater_only(request: AutoRaterRequest):
 
     processing_time = time.time() - start_time
 
-    zero_array_float = [0.0] * len(autorater_scores)
-    zero_array_int = [0] * len(autorater_scores)
-    empty_str_arr = [""] * len(autorater_scores)
-
     return AutoRaterResponse(
         autorater_scores=autorater_scores,
         autorater_decisions=autorater_decisions,
         autorater_explanations=autorater_explanations,
         autorater_raw_responses=autorater_raw,
-        code_scores=zero_array_float,
-        code_tests_passed=zero_array_int,
-        code_total_tests=zero_array_int,
-        code_stdout=empty_str_arr,
-        code_stderr=empty_str_arr,
-        code_error=empty_str_arr,
-        processing_time=processing_time,
-        success=True,
-    )
-
-
-@app.post("/evaluate_tests", response_model=AutoRaterResponse)
-async def evaluate_unit_tests_only(request: AutoRaterRequest):
-    """Evaluate only unit tests and skip LLM AutoRater."""
-    start_time = time.time()
-
-    # We still need predicted_answers decoded for extracting code blocks
-    tokenizer = _get_tokenizer()
-    _, predicted_answers, _ = _decode_request(request, tokenizer)
-
-    (
-        code_scores,
-        code_tests_passed,
-        code_total_tests,
-        code_stdout,
-        code_stderr,
-        code_error,
-    ) = _run_unit_tests(predicted_answers, request.reward_model_info)
-
-    processing_time = time.time() - start_time
-
-    zero_array_float = [0.0] * len(code_scores)
-    zero_array_int = [0] * len(code_scores)
-    empty_str_arr = [""] * len(code_scores)
-
-    return AutoRaterResponse(
-        autorater_scores=code_scores,  # Overall score equals code score when only tests run
-        autorater_decisions=zero_array_int,
-        autorater_explanations=[],
-        autorater_raw_responses=[],
-        code_scores=code_scores,
-        code_tests_passed=code_tests_passed,
-        code_total_tests=code_total_tests,
-        code_stdout=code_stdout,
-        code_stderr=code_stderr,
-        code_error=code_error,
         processing_time=processing_time,
         success=True,
     )
