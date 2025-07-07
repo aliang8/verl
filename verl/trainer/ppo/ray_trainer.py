@@ -1153,15 +1153,13 @@ class RayPPOTrainer:
                         # This simplifies the logic here, as reward_manager.compute_rewards will handle the HTTP call.
                         reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(batch, return_dict=True)
 
-                    # log some reward metrics
-                    if "format_scores" in batch_extra_infos:
-                        # Add data source breakdown for format/content rewards
-                        if hasattr(batch, 'non_tensor_batch') and 'data_source' in batch.non_tensor_batch:
-                            data_sources = batch.non_tensor_batch['data_source']
-                            if isinstance(data_sources, np.ndarray):
-                                data_sources = data_sources.tolist()
-                            training_reward_metrics = process_training_reward_metrics(data_sources, batch_extra_infos)
-                            metrics.update(training_reward_metrics)
+                    # Add data source breakdown for format/content rewards
+                    if hasattr(batch, 'non_tensor_batch') and 'data_source' in batch.non_tensor_batch:
+                        data_sources = batch.non_tensor_batch['data_source']
+                        if isinstance(data_sources, np.ndarray):
+                            data_sources = data_sources.tolist()
+                        training_reward_metrics = process_training_reward_metrics(data_sources, batch_extra_infos)
+                        metrics.update(training_reward_metrics)
                     
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
@@ -1219,8 +1217,8 @@ class RayPPOTrainer:
                         # Attach reward extra info into the non-tensor batch for later logging
                         batch.batch["token_level_scores"] = reward_tensor
 
-                        if batch_extra_infos:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in batch_extra_infos.items()})
+                        # if batch_extra_infos:
+                        #     batch.non_tensor_batch.update({k: np.array(v) for k, v in batch_extra_infos.items()})
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:

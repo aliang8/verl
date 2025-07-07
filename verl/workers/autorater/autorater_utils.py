@@ -4,7 +4,7 @@ Shared utilities for AutoRater workers in VERL framework.
 """
 
 import re
-from typing import Union, List
+from typing import Union, List, Optional
 
 
 # AutoRater template for evaluation
@@ -29,7 +29,40 @@ Please proceed with the evaluation.
 Decision: """
 
 
-def extract_solution(solution_str: str, method: str = "any", answer_formats: Union[List[str], None] = None, extract_all: bool = False) -> Union[str, None]:
+# AutoRater template for evaluating a concise code-solution outline
+CODE_OUTLINE_RATER_TEMPLATE = """===Task===
+You are given a short outline that supposedly explains how to solve a programming problem.
+Your job is to judge whether the outline covers ALL critical steps concisely and correctly.
+
+===Problem Description===
+{problem_description}
+
+===Proposed Outline===
+{outline_answer}
+
+===Evaluation Instructions===
+1. Verify the outline includes the high-level algorithm, key data-structures, complexity analysis, and edge-case handling (if relevant).  
+2. Ignore trivial phrasing issues; focus on technical completeness and accuracy.  
+3. The outline should remain concise (≈1-2 short paragraphs or a numbered list ≤8 items).  
+4. Decide if the outline is a GOOD solution description.  Good == "yes, a competent programmer could implement the solution from this outline with minimal extra research".
+
+===Output Format===
+Respond with exactly one line in this format:
+"Decision: TRUE"  (if the outline is good)
+or
+"Decision: FALSE" (if the outline misses important aspects or is wrong).
+
+Please proceed with the evaluation.
+Decision: 
+"""
+
+
+def extract_solution(
+    solution_str: str,
+    method: str = "any",
+    answer_formats: Optional[List[str]] = None,
+    extract_all: bool = False,
+) -> Union[str, List[str], None]:
     """Extract content inside <answer>...</answer> tags.
 
     Args:
@@ -114,4 +147,28 @@ def parse_autorater_response(response: str) -> tuple[str, str]:
             decision = match.group(1).upper()
             break
     
-    return explanation, decision 
+    return explanation, decision
+
+
+def format_code_outline_prompt(
+    problem_description: str,
+    outline_answer: str,
+    template: Optional[str] = None,
+) -> str:
+    """Create a prompt for the AutoRater to evaluate a solution outline.
+
+    Args:
+        problem_description: The programming problem statement.
+        outline_answer: The outline produced by the LLM to be evaluated.
+        template: Optional custom template; defaults to CODE_OUTLINE_RATER_TEMPLATE.
+
+    Returns:
+        A formatted string to feed into the LLM AutoRater.
+    """
+    if template is None:
+        template = CODE_OUTLINE_RATER_TEMPLATE
+
+    return template.format(
+        problem_description=problem_description.strip(),
+        outline_answer=outline_answer.strip(),
+    ) 

@@ -25,7 +25,11 @@ import uvicorn  # type: ignore
 from omegaconf import DictConfig, OmegaConf  # type: ignore
 from transformers import AutoTokenizer  # type: ignore
 from vllm import LLM, SamplingParams  # type: ignore
-from verl.workers.autorater.autorater_utils import format_autorater_prompt, parse_autorater_response
+from verl.workers.autorater.autorater_utils import (
+    format_autorater_prompt,
+    parse_autorater_response,
+    format_code_outline_prompt,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -109,19 +113,35 @@ class AutoRaterActor:
         
         return f"AutoRater initialized on GPU {self.gpu_id}"
     
-    def evaluate_batch(self, questions: List[str], predicted_answers: List[str], ground_truth_answers: List[str]):
+    def evaluate_batch(
+        self,
+        questions: List[str],
+        predicted_answers: List[str],
+        ground_truth_answers: List[str],
+        template_types: Optional[List[str]] = None,
+    ):
         """Evaluate a batch of responses using AutoRater template"""
         if self.inference_engine is None:
             raise RuntimeError("AutoRater not initialized")
                     
         # Format evaluation prompts
         evaluation_prompts = []
-        for question, predicted_answer, ground_truth in zip(questions, predicted_answers, ground_truth_answers):
-            prompt = format_autorater_prompt(
-                question=question,
-                predicted_answer=predicted_answer,
-                ground_truth_answer=ground_truth
-            )
+        if not template_types:
+            template_types = ["standard"] * len(questions)
+
+        for question, predicted_answer, ground_truth, tmpl in zip(
+            questions, predicted_answers, ground_truth_answers, template_types
+        ):
+            if tmpl == "outline":
+                prompt = format_code_outline_prompt(
+                    problem_description=question, outline_answer=predicted_answer
+                )
+            else:
+                prompt = format_autorater_prompt(
+                    question=question,
+                    predicted_answer=predicted_answer,
+                    ground_truth_answer=ground_truth,
+                )
             evaluation_prompts.append(prompt)
         
         # Generate responses using vLLM
@@ -317,7 +337,7 @@ async def evaluate_responses(request: AutoRaterRequest):
 
     # --- LLM AutoRater ---
     autorater_scores, autorater_decisions, autorater_explanations, autorater_raw = _run_llm_autorater(
-        questions, predicted_answers, ground_truth_answers
+        questions, predicted_answers, ground_truth_answers, request.reward_model_info
     )
 
     processing_time = time.time() - start_time
@@ -437,15 +457,17 @@ def _run_llm_autorater(
     questions: List[str],
     predicted_answers: List[str],
     ground_truth_answers: List[str],
+    reward_model_info: List[Dict[str, Any]],
 ) -> Tuple[List[float], List[int], List[str], List[str]]:
     """Run LLM-based AutoRater on the full batch and return results."""
     batch_size = len(questions)
 
-    # Build prompts
-    prompts = [
-        format_autorater_prompt(q, pa, gt)  # type: ignore
-        for q, pa, gt in zip(questions, predicted_answers, ground_truth_answers)
+    template_types = [
+        "outline" if isinstance(rm, dict) and rm.get("template") == "outline" else "standard"
+        for rm in reward_model_info
     ]
+
+    # Prompts are now built inside the actor, so we just pass the data along
 
     # Dispatch to Ray actors
     num_actors = len(app.state.autorater_actors)
@@ -459,7 +481,8 @@ def _run_llm_autorater(
             questions[i : i + chunk_size],
             predicted_answers[i : i + chunk_size],
             ground_truth_answers[i : i + chunk_size],
-        )  # type: ignore
+            template_types=template_types[i : i + chunk_size],
+        )
         futures.append(fut)
 
     results = ray.get(futures)
@@ -503,7 +526,7 @@ async def evaluate_autorater_only(request: AutoRaterRequest):
     questions, predicted_answers, ground_truth_answers = _decode_request(request, tokenizer)
 
     autorater_scores, autorater_decisions, autorater_explanations, autorater_raw = _run_llm_autorater(
-        questions, predicted_answers, ground_truth_answers
+        questions, predicted_answers, ground_truth_answers, request.reward_model_info
     )
 
     processing_time = time.time() - start_time

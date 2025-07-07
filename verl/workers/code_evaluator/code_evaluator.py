@@ -20,7 +20,8 @@ from typing import Any, Dict, List, Tuple, Optional
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
-from verl.workers.autorater.autorater_utils import extract_solution
+from verl.workers.autorater.autorater_utils import extract_solution, format_code_outline_prompt
+from verl.utils.autorater_client import call_autorater_service
 
 # Import SandboxSession for code execution
 try:
@@ -44,6 +45,7 @@ class CodeEvaluator:
         self,
         config: DictConfig,
         tokenizer: AutoTokenizer,
+        autorater_service_url: Optional[str] = None,
         template_type: Optional[str] = None,
     ):
         """
@@ -52,18 +54,20 @@ class CodeEvaluator:
         Args:
             config: Configuration object for the code evaluator.
             tokenizer: The tokenizer instance to use for decoding.
+            autorater_service_url: The base URL of the AutoRater service.
             template_type: The template type used for generation (e.g., "interleave").
         """
         self.config = config
         self.tokenizer = tokenizer
+        self.autorater_base_url = autorater_service_url.rstrip("/") if autorater_service_url else None
         self.template_type = template_type
 
         # Interleaved reasoning configuration
         self.enable_interleaved_reasoning = self.config.get("enable_interleaved_reasoning", False)
         self.interleaved_reward_weights = self.config.get("interleaved_reward_weights", {
             "description": 1.0,
-            "code": 2.0,
-            "unit_tests": 1.5
+            "code": 1.0,
+            "unit_tests": 1.0
         })
 
         # Initialize SandboxSession for code execution
@@ -85,13 +89,25 @@ class CodeEvaluator:
                     self.sandbox_session.open()
                     logger.info("SandboxSession initialized and opened successfully")
                 except Exception as e:
-                    logger.warning(f"SandboxSession created but failed to open explicitly: {e}")
-                    logger.info("Will rely on automatic session management")
+                    # Handle Docker connection errors specifically
+                    if "Connection aborted" in str(e) or "No such file or directory" in str(e):
+                        logger.error(f"Docker/sandbox service not available: {e}")
+                        logger.info("Code execution will fall back to heuristic evaluation")
+                    else:
+                        logger.warning(f"SandboxSession created but failed to open explicitly: {e}")
+                        logger.info("Will try to rely on automatic session management")
+                    self.sandbox_session = None
+                    return
             else:
                 logger.info("SandboxSession initialized (no explicit open() method)")
                 
         except Exception as e:
-            logger.error(f"Failed to initialize SandboxSession: {e}")
+            # Handle Docker connection errors specifically
+            if "Connection aborted" in str(e) or "No such file or directory" in str(e):
+                logger.error(f"Docker/sandbox service not available: {e}")
+                logger.info("Code execution will fall back to heuristic evaluation")
+            else:
+                logger.error(f"Failed to initialize SandboxSession: {e}")
             self.sandbox_session = None
 
     def run_unit_tests(
@@ -223,6 +239,7 @@ if __name__ == '__main__':
     def evaluate_code(
         self,
         decoded_pred_answers: List[str],
+        original_prompts: List[str],
         ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
     ) -> Tuple[List[float], List[int], List[str], List[str]]:
@@ -231,6 +248,7 @@ if __name__ == '__main__':
 
         Args:
             decoded_pred_answers: List of decoded response strings
+            original_prompts: List of original prompts
             ground_truth_infos: List of ground truth information dictionaries
             batch_size: Number of samples in the batch
 
@@ -246,15 +264,13 @@ if __name__ == '__main__':
         if is_interleaved:
             logger.info("Using interleaved reasoning evaluation")
             return self._evaluate_interleaved_reasoning(
-                decoded_pred_answers, ground_truth_infos, batch_size
+                decoded_pred_answers, original_prompts, ground_truth_infos, batch_size
             )
         else:
             logger.info("Using standard code evaluation")
             return self._evaluate_standard_code(
                 decoded_pred_answers, ground_truth_infos, batch_size
             )
-
-
 
     def _evaluate_standard_code(
         self,
@@ -315,16 +331,21 @@ if __name__ == '__main__':
                 extracted = extract_solution(pred_ans)
                 code_text = extracted if extracted else pred_ans
                 
-                # Simple heuristic: check if code contains function definition
-                if "def " in code_text or "function" in code_text.lower():
-                    score = 1.0
-                    decision = 1
-                    explanation = "Function definition found"
+                if isinstance(code_text, str):
+                    # Simple heuristic: check if code contains function definition
+                    if "def " in code_text or "function" in code_text.lower():
+                        score = 1.0
+                        decision = 1
+                        explanation = "Function definition found"
+                    else:
+                        score = 0.0
+                        decision = 0
+                        explanation = "No function definition found"
                 else:
                     score = 0.0
                     decision = 0
-                    explanation = "No function definition found"
-                    
+                    explanation = "Could not parse code content as string"
+                
                 scores.append(score)
                 decisions.append(decision)
                 explanations.append(explanation)
@@ -335,6 +356,7 @@ if __name__ == '__main__':
     def _evaluate_interleaved_reasoning(
         self,
         decoded_pred_answers: List[str],
+        original_prompts: List[str],
         ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
     ) -> Tuple[List[float], List[int], List[str], List[str]]:
@@ -344,10 +366,11 @@ if __name__ == '__main__':
         Expected structure:
         1. First <answer>: Description/explanation of the solution approach
         2. Second <answer>: Code implementation 
-        3. Third <answer>: Self-generated unit tests (optional)
+        3. Third <answer>: Self-generated unit tests 
         
         Args:
             decoded_pred_answers: List of decoded response strings
+            original_prompts: List of original prompts
             ground_truth_infos: List of ground truth information dictionaries
             batch_size: Number of samples in the batch
             
@@ -359,77 +382,61 @@ if __name__ == '__main__':
         explanations = []
         raw_responses = []
         
+        # --- Batch-evaluate all descriptions first ---
+        description_scores_map = self._evaluate_all_descriptions(
+            decoded_pred_answers, original_prompts
+        )
+
         for i, (pred_answer, gt_info) in enumerate(zip(decoded_pred_answers, ground_truth_infos)):
             # Extract all answers from the interleaved response using extract_all=True
             all_answers = extract_solution(pred_answer, extract_all=True)
             
-            if all_answers is None:
-                # No <answer> tags found
-                total_scores.append(-2.0)
-                decisions.append(0)
-                explanations.append("No <answer> tags found in interleaved response")
-                raw_responses.append("Parse failure")
-                continue
-                
-            # Split the comma-separated answers
-            answer_parts = [part.strip() for part in all_answers.split(",")]
-            
+            # The format is guaranteed by the caller (RewardManager), which filters
+            # for responses with >= 3 answers. We can assert this.
+            assert all_answers is not None, "all_answers should not be None"
+            if isinstance(all_answers, list):
+                answer_parts = [part.strip() for part in all_answers]
+            else:
+                # This path should ideally not be taken if extract_solution is consistent
+                answer_parts = [part.strip() for part in str(all_answers).split(",")]
+
+            assert len(answer_parts) >= 3, f"Expected >=3 answer parts, but got {len(answer_parts)}"
+
             # Initialize component scores
-            description_score = 0.0
+            description_score = description_scores_map.get(i, 0.0)
             code_score = 0.0
             unit_test_score = 0.0
             component_explanations = []
             
             # Evaluate first answer (description/explanation)
-            if len(answer_parts) >= 1:
-                description_text = answer_parts[0]
-                # Simple heuristic: check if description is substantial and explains approach
-                if len(description_text.split()) >= 10:  # At least 10 words
-                    description_score = 1.0
-                    component_explanations.append("Description: Good explanation provided")
-                else:
-                    description_score = 0.5
-                    component_explanations.append("Description: Brief explanation provided")
-            else:
-                component_explanations.append("Description: Missing")
-                
+            description_score = description_scores_map.get(i, 0.0)
+            component_explanations.append(f"Description Score: {description_score:.2f}")
+
             # Evaluate second answer (code implementation)
-            if len(answer_parts) >= 2:
-                code_text = answer_parts[1]
-                
-                # Check if we have unit tests available for code evaluation
-                if isinstance(gt_info, dict) and (gt_info.get("unit_tests") or gt_info.get("tests")):
-                    # Use local unit test execution
-                    try:
-                        (
-                            code_scores,
-                            code_tests_passed,
-                            code_total_tests,
-                            code_stdout,
-                            code_stderr,
-                            code_error,
-                        ) = self.run_unit_tests([code_text], [{
-                            "ground_truth": "code",
-                            "unit_tests": gt_info.get("unit_tests") or gt_info.get("tests"),
-                            "libs": gt_info.get("libs", [])
-                        }])
-                        
-                        code_score = code_scores[0] if code_scores else 0.0
-                        passed = code_tests_passed[0] if code_tests_passed else 0
-                        total = code_total_tests[0] if code_total_tests else 0
-                        component_explanations.append(f"Code: passed {passed}/{total} tests")
-                        
-                    except Exception as e:
-                        logger.warning(f"Code evaluation failed: {e}")
-                        # Fallback: simple heuristic evaluation
-                        if "def " in code_text or "function" in code_text.lower():
-                            code_score = 1.0
-                            component_explanations.append("Code: Function definition found")
-                        else:
-                            code_score = 0.0
-                            component_explanations.append("Code: No function definition found")
-                else:
-                    # Simple heuristic evaluation when no unit tests available
+            code_text = answer_parts[1]
+            # Check if we have unit tests available for code evaluation
+            if isinstance(gt_info, dict) and (gt_info.get("unit_tests") or gt_info.get("tests")):
+                # Use local unit test execution
+                try:
+                    (
+                        code_scores_list,
+                        code_tests_passed,
+                        code_total_tests,
+                        _, _, _,
+                    ) = self.run_unit_tests([code_text], [{
+                        "ground_truth": "code",
+                        "unit_tests": gt_info.get("unit_tests") or gt_info.get("tests"),
+                        "libs": gt_info.get("libs", [])
+                    }])
+                    
+                    code_score = code_scores_list[0] if code_scores_list else 0.0
+                    passed = code_tests_passed[0] if code_tests_passed else 0
+                    total = code_total_tests[0] if code_total_tests else 0
+                    component_explanations.append(f"Code: passed {passed}/{total} tests")
+                    
+                except Exception as e:
+                    logger.warning(f"Code evaluation failed: {e}")
+                    # Fallback: simple heuristic evaluation
                     if "def " in code_text or "function" in code_text.lower():
                         code_score = 1.0
                         component_explanations.append("Code: Function definition found")
@@ -437,29 +444,31 @@ if __name__ == '__main__':
                         code_score = 0.0
                         component_explanations.append("Code: No function definition found")
             else:
-                component_explanations.append("Code: Missing")
-                
-            # Evaluate third answer (self-generated unit tests) - optional
-            if len(answer_parts) >= 3:
-                unit_test_text = answer_parts[2]
-                
-                # Check if unit tests look reasonable
-                if ("assert" in unit_test_text or "test" in unit_test_text.lower() or 
-                    "unittest" in unit_test_text.lower() or "def test_" in unit_test_text):
-                    unit_test_score = 1.0
-                    component_explanations.append("Unit Tests: Self-generated tests provided")
+                # Simple heuristic evaluation when no unit tests available
+                if "def " in code_text or "function" in code_text.lower():
+                    code_score = 1.0
+                    component_explanations.append("Code: Function definition found")
                 else:
-                    unit_test_score = 0.5
-                    component_explanations.append("Unit Tests: Attempted but incomplete")
+                    code_score = 0.0
+                    component_explanations.append("Code: No function definition found")
+
+            # Evaluate third answer (self-generated unit tests) - optional
+            unit_test_text = answer_parts[2]
+            # Check if unit tests look reasonable
+            if ("assert" in unit_test_text or "test" in unit_test_text.lower() or 
+                "unittest" in unit_test_text.lower() or "def test_" in unit_test_text):
+                unit_test_score = 1.0
+                component_explanations.append("Unit Tests: Self-generated tests provided")
             else:
-                component_explanations.append("Unit Tests: Not provided")
+                unit_test_score = 0.5
+                component_explanations.append("Unit Tests: Attempted but incomplete")
                 
             # Combine scores with weights
             weights = self.interleaved_reward_weights
             total_score = (
-                description_score * weights.get("description", 1.0) +
-                code_score * weights.get("code", 2.0) +
-                unit_test_score * weights.get("unit_tests", 1.5)
+                description_score * weights.get("description", 1.0)
+                + code_score * weights.get("code", 2.0)
+                + unit_test_score * weights.get("unit_tests", 1.5)
             )
             
             total_scores.append(total_score)
@@ -468,6 +477,61 @@ if __name__ == '__main__':
             raw_responses.append(f"Interleaved evaluation: {len(answer_parts)} answers found")
             
         return total_scores, decisions, explanations, raw_responses
+
+    def _evaluate_all_descriptions(
+        self, decoded_pred_answers: List[str], original_prompts: List[str]
+    ) -> Dict[int, float]:
+        """
+        Evaluate all description parts of interleaved answers in a single batch.
+        """
+        if not self.autorater_base_url:
+            logger.warning("AutoRater service URL not configured in CodeEvaluator; skipping description evaluation.")
+            return {}
+
+        descriptions_to_eval: List[Tuple[int, str, str]] = []
+        for i, pred_answer in enumerate(decoded_pred_answers):
+            first_answer = extract_solution(pred_answer, extract_all=False)
+            if first_answer and isinstance(first_answer, str):
+                descriptions_to_eval.append((i, original_prompts[i], first_answer))
+
+        if not descriptions_to_eval:
+            return {}
+
+        # Prepare payload for the AutoRater service
+        batch_indices, batch_prompts, batch_responses = zip(*descriptions_to_eval)
+        
+        tokenized_prompts = self.tokenizer(list(batch_prompts), add_special_tokens=True, padding=True, truncation=True, return_tensors="pt").input_ids.tolist()
+        tokenized_responses = self.tokenizer(list(batch_responses), add_special_tokens=False, padding=True, truncation=True, return_tensors="pt").input_ids.tolist()
+
+        # We need to construct a valid-looking payload even if some parts are dummy
+        batch_size = len(batch_indices)
+        payload = {
+            "prompts": tokenized_prompts,
+            "responses": tokenized_responses,
+            # Dummy values for fields that are not used by outline evaluation but required by schema
+            "attention_mask": [[1] * len(r) for r in tokenized_responses],
+            "position_ids": [list(range(len(r))) for r in tokenized_responses],
+            "reward_model_info": [
+                {"template": "outline", "ground_truth": ""} for _ in range(batch_size)
+            ],
+        }
+
+        try:
+            logger.info(f"Calling AutoRater to evaluate {batch_size} description outlines.")
+            scores, decisions, _, _ = call_autorater_service(
+                self.autorater_base_url,
+                payload,
+                batch_size=batch_size,
+                endpoint="/evaluate_autorater", # Use the main endpoint
+            )
+            
+            # The decision is what matters: 1 for TRUE, 0 for FALSE. Score is shaped, so use decision.
+            final_scores = [1.0 if d == 1 else 0.0 for d in decisions]
+            return dict(zip(batch_indices, final_scores))
+
+        except Exception as e:
+            logger.error(f"Failed to evaluate descriptions via AutoRater: {e}")
+            return {}
 
     def close(self):
         """Clean up resources."""

@@ -1,6 +1,18 @@
 import re
-from math_verify import LatexExtractionConfig, parse, verify, ExprExtractionConfig, StringExtractionConfig
-from math_verify.metric import math_metric
+# Attempt to import optional math verification library
+try:
+    from math_verify import (  # type: ignore
+        LatexExtractionConfig,  # type: ignore
+        parse,  # type: ignore
+        verify,  # type: ignore
+        ExprExtractionConfig,  # type: ignore
+        StringExtractionConfig,  # type: ignore
+    )
+    from math_verify.metric import math_metric  # type: ignore
+except ImportError:  # pragma: no cover – library is optional
+    LatexExtractionConfig = ExprExtractionConfig = StringExtractionConfig = None  # type: ignore
+    parse = verify = None  # type: ignore
+    math_metric = None  # type: ignore
 
 class ConditionalRewardTracker:
     def __init__(self, epsilon=0.05):
@@ -55,6 +67,55 @@ def extract_intermediate_answers(thinking_text):
     # If no <answer> tags found, fall back to the original text as a single answer
     return intermediate_answers if intermediate_answers else [thinking_text.strip()]
 
+def count_interleaved_answers(text):
+    """
+    Count the number of <answer></answer> segments that are *properly paired* with a preceding
+    <think></think> block.  The expected interleaved structure is:
+
+        <think> ... </think><answer> ... </answer>
+        <think> ... </think><answer> ... </answer>
+        ...
+
+    This function only counts an <answer> tag when it directly follows a closing </think>
+    (ignoring whitespace/new-line characters in between).  Any stray <answer> tags that are not
+    preceded by a <think> block are **ignored** – ensuring we reward only well-formed
+    interleaved reasoning outputs.
+
+    Args:
+        text (str): The full model response to analyse.
+
+    Returns:
+        int: The number of valid <answer></answer> blocks that are correctly preceded by a
+             <think></think> block.
+    """
+    # Regex pattern that captures *pairs* of <think>...</think><answer>...</answer>.
+    # Using non-greedy matching (.*?) inside each tag so that we correctly handle multiple
+    # interleaved segments in one string.
+    pair_pattern = r'<think>.*?</think>\s*<answer>.*?</answer>'
+
+    matches = re.findall(pair_pattern, text, re.DOTALL | re.IGNORECASE)
+
+    # Each match corresponds to exactly one <answer> that follows a <think>.
+    return len(matches)
+
+def interleaved_format_reward(text, min_answer_count=3):
+    """
+    Format reward function for interleaved reasoning that checks answer count.
+    
+    Note: Interleaved evaluation is only performed when answer count > 3.
+    This function provides format scoring, but actual interleaved evaluation
+    requires answer count > 3.
+    
+    Args:
+        text (str): The text to analyze
+        min_answer_count (int): Minimum number of <answer></answer> tags required (default: 3)
+        
+    Returns:
+        float: +1.0 if answer count >= min_answer_count, 0.0 otherwise
+    """
+    answer_count = count_interleaved_answers(text)
+    return 1.0 if answer_count >= min_answer_count else 0.0
+    
 def format_check_reward(generated_text):
     has_think = '<think>' in generated_text and '</think>' in generated_text
     has_answer = '<answer>' in generated_text and '</answer>' in generated_text
@@ -210,12 +271,20 @@ def accuracy_reward(completions, **kwargs):
     completion_contents = [completion[0]["content"] for completion in completions]
     rewards = []
     
-    # Create the verification function using math_metric (more robust than direct parse/verify)
-    verify_func = math_metric(
-        gold_extraction_target=(LatexExtractionConfig(), ExprExtractionConfig()),
-        pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
+    # If the optional math_verify library is unavailable, fall back to simple string equality.
+    if math_metric is None or LatexExtractionConfig is None:  # type: ignore
+        for content, solution in zip(completion_contents, solutions):
+            answer_match = re.search(r'<answer>(.*?)</answer>', content, re.DOTALL)
+            extracted_answer = answer_match.group(1).strip() if answer_match else content.strip()
+            rewards.append(1.0 if extracted_answer.strip() == solution.strip() else 0.0)
+        return rewards
+
+    # Otherwise use the richer math_metric verification
+    verify_func = math_metric(  # type: ignore
+        gold_extraction_target=(LatexExtractionConfig(), ExprExtractionConfig()),  # type: ignore
+        pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),  # type: ignore
         aggregation_function=max,
-        precision=6
+        precision=6,
     )
     
     for content, solution in zip(completion_contents, solutions):
