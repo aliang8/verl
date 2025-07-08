@@ -75,39 +75,7 @@ class TaskRunner:
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
-
-        if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template:
-            original_template = tokenizer.chat_template
-        else:
-            print("  No chat template found")
-            original_template = None
-        
-        # Get template type from config (default to "tool" if not specified)
-        template_type = config.actor_rollout_ref.rollout.get("template_type", "tool")
-        print(f"\nUsing template type: {template_type}")
-        
-        # Get the system template content
-        system_template = get_system_template(template_type)
-        
-        if template_type is not None:
-            # Fallback template for tokenizers without chat templates
-            new_chat_template = (
-                "{% if messages[0]['role'] != 'system' %}"
-                "{% set loop_messages = [{'role': 'system', 'content': '" + system_template.replace("'", "\\'") + "'}] + messages %}"
-                "{% else %}"
-                "{% set loop_messages = messages %}"
-                "{% endif %}"
-                "{% for message in loop_messages %}"
-                "{{ message['role'] }}: {{ message['content'] }}\\n"
-                "{% endfor %}"
-                "{% if add_generation_prompt %}"
-                "assistant: "
-                "{% endif %}"
-            )
-        
-            # Apply the new template
-            tokenizer.chat_template = new_chat_template
-
+    
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
@@ -221,11 +189,19 @@ class TaskRunner:
 
         from verl.utils.dataset.rl_dataset import collate_fn
 
+
+        # Get template type from config (default to "tool" if not specified)
+        template_type = config.actor_rollout_ref.rollout.get("template_type", "tool")
+        print(f"\nUsing template type: {template_type}")
+        
+        # Get the system template content
+        system_template = get_system_template(template_type)
+
         # Create training and validation datasets.
         print(f"="*100)
         print("Creating training and validation datasets")
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, system_template)
+        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, system_template)
         train_sampler = create_rl_sampler(config.data, train_dataset)
         print(f"Done creating training and validation datasets")
         print(f"="*100)
@@ -253,7 +229,7 @@ class TaskRunner:
         trainer.fit()
 
 
-def create_rl_dataset(data_paths, data_config, tokenizer, processor):
+def create_rl_dataset(data_paths, data_config, tokenizer, processor, system_template):
     """Create a dataset.
 
     Arguments:
@@ -290,6 +266,7 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
         tokenizer=tokenizer,
         processor=processor,
         config=data_config,
+        system_template=system_template,
     )
 
     return dataset

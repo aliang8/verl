@@ -80,35 +80,26 @@ class CodeEvaluator:
             logger.warning("llm_sandbox not available, code execution will be disabled")
             return
         
-        try:
-            self.sandbox_session = SandboxSession(lang="python")
-            
-            # Try to open the session - some versions require explicit open()
-            if hasattr(self.sandbox_session, 'open'):
-                try:
-                    self.sandbox_session.open()
-                    logger.info("SandboxSession initialized and opened successfully")
-                except Exception as e:
-                    # Handle Docker connection errors specifically
-                    if "Connection aborted" in str(e) or "No such file or directory" in str(e):
-                        logger.error(f"Docker/sandbox service not available: {e}")
-                        logger.info("Code execution will fall back to heuristic evaluation")
-                    else:
-                        logger.warning(f"SandboxSession created but failed to open explicitly: {e}")
-                        logger.info("Will try to rely on automatic session management")
-                    self.sandbox_session = None
-                    return
-            else:
-                logger.info("SandboxSession initialized (no explicit open() method)")
-                
-        except Exception as e:
-            # Handle Docker connection errors specifically
-            if "Connection aborted" in str(e) or "No such file or directory" in str(e):
-                logger.error(f"Docker/sandbox service not available: {e}")
-                logger.info("Code execution will fall back to heuristic evaluation")
-            else:
-                logger.error(f"Failed to initialize SandboxSession: {e}")
-            self.sandbox_session = None
+        self.sandbox_session = SandboxSession(lang="python")
+        
+        # Try to open the session - some versions require explicit open()
+        if hasattr(self.sandbox_session, 'open'):
+            try:
+                self.sandbox_session.open()
+                logger.info("SandboxSession initialized and opened successfully")
+            except Exception as e:
+                # Handle Docker connection errors specifically
+                if "Connection aborted" in str(e) or "No such file or directory" in str(e):
+                    logger.error(f"Docker/sandbox service not available: {e}")
+                    logger.info("Code execution will fall back to heuristic evaluation")
+                else:
+                    logger.warning(f"SandboxSession created but failed to open explicitly: {e}")
+                    logger.info("Will try to rely on automatic session management")
+                self.sandbox_session = None
+                return
+        else:
+            raise Exception("SandboxSession not available")
+    
 
     def run_unit_tests(
         self,
@@ -232,7 +223,143 @@ if __name__ == '__main__':
 
             total_tests[idx] = len(split_tests)
             tests_passed[idx] = passes
-            code_scores[idx] = float(passes) * 0.3
+            code_scores[idx] = float(passes) * 0.2
+
+        return code_scores, tests_passed, total_tests, stdout_list, stderr_list, error_list
+
+    def run_unit_tests_combined(
+        self,
+        predicted_answers: List[str],
+        reward_model_info: List[Dict[str, Any]],
+    ) -> Tuple[List[float], List[int], List[int], List[str], List[str], List[str]]:
+        """
+        Execute unit tests by combining user code with unit test blocks and parsing unittest output.
+        This is a cleaner approach that uses unit test blocks directly without extraction.
+        
+        Args:
+            predicted_answers: List of predicted code answers
+            reward_model_info: List of reward model info containing unit tests
+            
+        Returns:
+            Tuple of (code_scores, tests_passed, total_tests, stdout_list, stderr_list, error_list)
+        """
+        batch_size = len(predicted_answers)
+
+        # Ensure sandbox session exists
+        if self.sandbox_session is None:
+            logger.info("SandboxSession not available, attempting to initialize on demand")
+            self._init_sandbox()
+
+        if self.sandbox_session is None:
+            logger.warning("No SandboxSession available, returning zero scores")
+            raise Exception("No SandboxSession available")
+
+        sess = self.sandbox_session
+
+        code_scores: List[float] = [0.0] * batch_size
+        tests_passed: List[int] = [0] * batch_size
+        total_tests: List[int] = [0] * batch_size
+        stdout_list: List[str] = [""] * batch_size
+        stderr_list: List[str] = [""] * batch_size
+        error_list: List[str] = [""] * batch_size
+
+        for idx, rm_info in enumerate(reward_model_info):
+            tests_raw: List[str] = []
+            libs: Optional[List[str]] = None
+
+            if isinstance(rm_info, dict):
+                # collect libs for this sample
+                raw_libs = rm_info.get("libs")
+                if isinstance(raw_libs, list):
+                    libs = raw_libs
+                elif raw_libs is not None:
+                    libs = [str(raw_libs)]
+
+                # gather tests definitions
+                if isinstance(rm_info.get("unit_tests"), list):
+                    tests_raw = rm_info["unit_tests"]
+                elif isinstance(rm_info.get("tests"), list):
+                    tests_raw = rm_info["tests"]
+                else:
+                    tc = rm_info.get("unit_tests") or rm_info.get("tests")
+                    if tc:
+                        tests_raw = [tc]
+
+            if not tests_raw:
+                continue
+
+            code_match = re.search(r"```[\w]*\n(.*?)```", predicted_answers[idx], re.DOTALL)
+            pred_code_block = code_match.group(1) if code_match else predicted_answers[idx]
+
+            # Combine user code with all unit test blocks directly
+            all_test_blocks = []
+            for snippet in tests_raw:
+                normalized_snippet = snippet.replace('\\n', '\n')
+                all_test_blocks.append(normalized_snippet)
+            
+            # Create combined test file with user code + all test blocks
+            combined_test = f"""import unittest
+import pandas as pd
+import numpy as np
+
+{pred_code_block}
+
+{chr(10).join(all_test_blocks)}
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
+"""
+
+            try:
+                res = sess.run(combined_test, libraries=libs)
+                stdout_list[idx] = res.stdout
+                stderr_list[idx] = res.stderr
+                
+                # Parse unittest output to count tests
+                output = res.stdout + res.stderr
+                
+                # Look for patterns like "Ran X tests in Y.YYYs"
+                ran_match = re.search(r'Ran (\d+) tests? in', output)
+                if ran_match:
+                    total_tests[idx] = int(ran_match.group(1))
+                else:
+                    # Fallback: count test methods in the test blocks
+                    test_count = 0
+                    for block in all_test_blocks:
+                        test_count += len(re.findall(r'def\s+test_\w+', block))
+                    total_tests[idx] = test_count
+                
+                # Count failures and errors
+                failures = 0
+                errors = 0
+                
+                # Look for "FAILED (failures=X, errors=Y)" or "FAILED (failures=X)" or "FAILED (errors=Y)"
+                failed_match = re.search(r'FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)', output)
+                if failed_match:
+                    if failed_match.group(1):
+                        failures = int(failed_match.group(1))
+                    if failed_match.group(2):
+                        errors = int(failed_match.group(2))
+                
+                # Calculate passed tests
+                tests_passed[idx] = total_tests[idx] - failures - errors
+                
+                # If exit code is 0, all tests passed
+                if res.exit_code == 0:
+                    tests_passed[idx] = total_tests[idx]
+                
+                # Calculate score (0.2 points per passing test, matching original function)
+                code_scores[idx] = float(tests_passed[idx]) * 0.2
+                
+            except Exception as exec_e:
+                error_list[idx] = str(exec_e)
+                # Fallback: count test methods in the test blocks
+                test_count = 0
+                for block in all_test_blocks:
+                    test_count += len(re.findall(r'def\s+test_\w+', block))
+                total_tests[idx] = test_count
+                tests_passed[idx] = 0
+                code_scores[idx] = 0.0
 
         return code_scores, tests_passed, total_tests, stdout_list, stderr_list, error_list
 
@@ -416,41 +543,24 @@ if __name__ == '__main__':
             code_text = answer_parts[1]
             # Check if we have unit tests available for code evaluation
             if isinstance(gt_info, dict) and (gt_info.get("unit_tests") or gt_info.get("tests")):
-                # Use local unit test execution
-                try:
-                    (
-                        code_scores_list,
-                        code_tests_passed,
-                        code_total_tests,
-                        _, _, _,
-                    ) = self.run_unit_tests([code_text], [{
-                        "ground_truth": "code",
-                        "unit_tests": gt_info.get("unit_tests") or gt_info.get("tests"),
-                        "libs": gt_info.get("libs", [])
-                    }])
-                    
-                    code_score = code_scores_list[0] if code_scores_list else 0.0
-                    passed = code_tests_passed[0] if code_tests_passed else 0
-                    total = code_total_tests[0] if code_total_tests else 0
-                    component_explanations.append(f"Code: passed {passed}/{total} tests")
-                    
-                except Exception as e:
-                    logger.warning(f"Code evaluation failed: {e}")
-                    # Fallback: simple heuristic evaluation
-                    if "def " in code_text or "function" in code_text.lower():
-                        code_score = 1.0
-                        component_explanations.append("Code: Function definition found")
-                    else:
-                        code_score = 0.0
-                        component_explanations.append("Code: No function definition found")
+                (
+                    code_scores_list,
+                    code_tests_passed,
+                    code_total_tests,
+                    _, _, _,
+                ) = self.run_unit_tests_combined([code_text], [{
+                    "ground_truth": "code",
+                    "unit_tests": gt_info.get("unit_tests") or gt_info.get("tests"),
+                    "libs": gt_info.get("libs", [])
+                }])
+                
+                code_score = code_scores_list[0] if code_scores_list else 0.0
+                passed = code_tests_passed[0] if code_tests_passed else 0
+                total = code_total_tests[0] if code_total_tests else 0
+                component_explanations.append(f"Code: passed {passed}/{total} tests")
             else:
-                # Simple heuristic evaluation when no unit tests available
-                if "def " in code_text or "function" in code_text.lower():
-                    code_score = 1.0
-                    component_explanations.append("Code: Function definition found")
-                else:
-                    code_score = 0.0
-                    component_explanations.append("Code: No function definition found")
+                code_score = 0.0
+                component_explanations.append("Code: No gt unit tests provided")
 
             # Evaluate third answer (self-generated unit tests) - optional
             unit_test_text = answer_parts[2]
@@ -460,19 +570,19 @@ if __name__ == '__main__':
                 unit_test_score = 1.0
                 component_explanations.append("Unit Tests: Self-generated tests provided")
             else:
-                unit_test_score = 0.5
-                component_explanations.append("Unit Tests: Attempted but incomplete")
+                unit_test_score = 0.0
+                component_explanations.append("Unit Tests: No unit tests found")
                 
             # Combine scores with weights
             weights = self.interleaved_reward_weights
             total_score = (
                 description_score * weights.get("description", 1.0)
-                + code_score * weights.get("code", 2.0)
-                + unit_test_score * weights.get("unit_tests", 1.5)
+                + code_score * weights.get("code", 1.0)
+                + unit_test_score * weights.get("unit_tests", 1.0)
             )
             
             total_scores.append(total_score)
-            decisions.append(1 if total_score > 2.0 else 0)  # Threshold for success
+            decisions.append(1 if total_score > 1.0 else 0)  # Threshold for success
             explanations.append(" | ".join(component_explanations))
             raw_responses.append(f"Interleaved evaluation: {len(answer_parts)} answers found")
             

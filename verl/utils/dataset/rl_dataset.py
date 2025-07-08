@@ -88,6 +88,7 @@ class RLHFDataset(Dataset):
         tokenizer: PreTrainedTokenizer,
         config: DictConfig,
         processor: Optional[ProcessorMixin] = None,
+        system_template: Optional[str] = None,
     ):
         if not isinstance(data_files, (List, ListConfig)):
             data_files = [data_files]
@@ -97,7 +98,7 @@ class RLHFDataset(Dataset):
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
-
+        self.system_template = system_template
         self.cache_dir = os.path.expanduser(config.get("cache_dir", "~/.cache/verl/rlhf"))
         self.prompt_key = config.get("prompt_key", "prompt")
         self.image_key = config.get("image_key", "images")
@@ -160,7 +161,8 @@ class RLHFDataset(Dataset):
         return len(self.dataframe)
 
     def _build_messages(self, example: dict):
-        messages: list = example.pop(self.prompt_key)
+        messages = [{"role": "system", "content": self.system_template}]
+        messages.extend(example.pop(self.prompt_key))
 
         if self.image_key in example or self.video_key in example:
             for message in messages:
