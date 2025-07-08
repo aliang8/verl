@@ -353,8 +353,6 @@ class RewardManager:
             ground_truth_infos,
             batch_size,
         )
-
-        import ipdb; ipdb.set_trace()
         
         # Check if we're doing interleaved reasoning for logging
         is_interleaved = (

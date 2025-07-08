@@ -399,6 +399,43 @@ if __name__ == '__main__':
                 decoded_pred_answers, ground_truth_infos, batch_size
             )
 
+    def extract_code_snippet(self, predicted_answer: str) -> str:
+        """Extract code snippet from predicted answer."""
+        if not predicted_answer.strip():
+            return ""
+        
+        # Method 1: Try to extract code between triple backticks
+        code_block_pattern = r'```(?:python)?\s*(.*?)```'
+        code_matches = re.findall(code_block_pattern, predicted_answer, re.DOTALL)
+        
+        if code_matches:
+            # Return the first code block found
+            code_snippet = code_matches[0].strip()
+            logger.debug(f"Extracted code from ``` block: {len(code_snippet)} characters")
+            return code_snippet
+        
+        # Method 2: Try to extract from "def task_func" onwards
+        task_func_pattern = r'(def task_func.*?)(?=\n\n|\n(?:def |class |import |from |#|$)|\Z)'
+        task_func_match = re.search(task_func_pattern, predicted_answer, re.DOTALL)
+        
+        if task_func_match:
+            code_snippet = task_func_match.group(1).strip()
+            logger.debug(f"Extracted code from def task_func: {len(code_snippet)} characters")
+            return code_snippet
+        
+        # Method 3: Look for any function definition as fallback
+        function_pattern = r'(def \w+.*?)(?=\n\n|\n(?:def |class |import |from |#|$)|\Z)'
+        function_matches = re.findall(function_pattern, predicted_answer, re.DOTALL)
+        
+        if function_matches:
+            # Return the first function found
+            code_snippet = function_matches[0].strip()
+            logger.debug(f"Extracted code from function def: {len(code_snippet)} characters")
+            return code_snippet
+        
+        logger.debug(f"No code snippet found in predicted answer")
+        return None 
+
     def _evaluate_code(
         self,
         decoded_pred_answers: List[str],
@@ -429,6 +466,22 @@ if __name__ == '__main__':
         use_code_evaluator = any(_has_tests(info) for info in ground_truth_infos)
 
         if use_code_evaluator:
+            # Extract code snippets from predicted answers first
+            logger.info("Extracting code snippets from predicted answers")
+            extracted_code_answers = []
+            failed_extraction_indices = []
+            
+            for i, pred_answer in enumerate(decoded_pred_answers):
+                extracted_code = self.extract_code_snippet(pred_answer)
+                if extracted_code is None:
+                    failed_extraction_indices.append(i)
+                    extracted_code_answers.append("")  # Use empty string for failed extractions
+                else:
+                    extracted_code_answers.append(extracted_code)
+            
+            if failed_extraction_indices:
+                logger.warning(f"Failed to extract code from {len(failed_extraction_indices)} samples: {failed_extraction_indices}")
+            
             # Use local unit test execution
             logger.info("Using local unit test execution for code evaluation")
             (
@@ -438,14 +491,33 @@ if __name__ == '__main__':
                 code_stdout,
                 code_stderr,
                 code_error,
-            ) = self.run_unit_tests(decoded_pred_answers, ground_truth_infos)
+            ) = self.run_unit_tests_combined(extracted_code_answers, ground_truth_infos)
 
-            # Create decisions based on code scores
-            decisions = [1 if score > 0 else 0 for score in code_scores]
-            explanations = [f"passed {p}/{t} tests" for p, t in zip(code_tests_passed, code_total_tests)]
+            # Create decisions and normalized scores based on test results
+            decisions = []
+            explanations = []
+            normalized_scores = []
+            
+            for i in range(batch_size):
+                if i in failed_extraction_indices:
+                    # Default values for failed code extraction
+                    normalized_scores.append(0.0)
+                    decisions.append(0)
+                    explanations.append("failed code extraction")
+                else:
+                    # Normalize score as passed_tests / total_tests
+                    if code_total_tests[i] > 0:
+                        normalized_score = code_tests_passed[i] / code_total_tests[i]
+                    else:
+                        normalized_score = 0.0
+                    
+                    normalized_scores.append(normalized_score)
+                    decisions.append(1 if normalized_score > 0 else 0)
+                    explanations.append(f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests")
+            
             raw_responses = [""] * batch_size
             
-            return code_scores, decisions, explanations, raw_responses
+            return normalized_scores, decisions, explanations, raw_responses
         else:
             raise ValueError("No unit tests available, using simple heuristic evaluation")
 
@@ -510,22 +582,35 @@ if __name__ == '__main__':
 
             # Evaluate second answer (code implementation)
             code_text = answer_parts[1]
+            # Extract clean code snippet from the code answer
+            extracted_code = self.extract_code_snippet(code_text)
+            
+            # Check if code extraction failed
+            if extracted_code is None:
+                code_score = 0.0
+                component_explanations.append("Code: failed code extraction")
             # Check if we have unit tests available for code evaluation
-            if isinstance(gt_info, dict) and (gt_info.get("unit_tests") or gt_info.get("tests")):
+            elif isinstance(gt_info, dict) and (gt_info.get("unit_tests") or gt_info.get("tests")):
                 (
                     code_scores_list,
                     code_tests_passed,
                     code_total_tests,
                     _, _, _,
-                ) = self.run_unit_tests_combined([code_text], [{
+                ) = self.run_unit_tests_combined([extracted_code], [{
                     "ground_truth": "code",
                     "unit_tests": gt_info.get("unit_tests") or gt_info.get("tests"),
                     "libs": gt_info.get("libs", [])
                 }])
                 
-                code_score = code_scores_list[0] if code_scores_list else 0.0
                 passed = code_tests_passed[0] if code_tests_passed else 0
                 total = code_total_tests[0] if code_total_tests else 0
+                
+                # Normalize score as passed_tests / total_tests
+                if total > 0:
+                    code_score = passed / total
+                else:
+                    code_score = 0.0
+                    
                 component_explanations.append(f"Code: passed {passed}/{total} tests")
             else:
                 code_score = 0.0
