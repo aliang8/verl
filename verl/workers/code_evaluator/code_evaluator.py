@@ -395,11 +395,11 @@ if __name__ == '__main__':
             )
         else:
             logger.info("Using standard code evaluation")
-            return self._evaluate_standard_code(
+            return self._evaluate_code(
                 decoded_pred_answers, ground_truth_infos, batch_size
             )
 
-    def _evaluate_standard_code(
+    def _evaluate_code(
         self,
         decoded_pred_answers: List[str],
         ground_truth_infos: List[Dict[str, Any]],
@@ -447,38 +447,7 @@ if __name__ == '__main__':
             
             return code_scores, decisions, explanations, raw_responses
         else:
-            # Simple heuristic evaluation when no unit tests available
-            logger.info("No unit tests available, using simple heuristic evaluation")
-            scores = []
-            decisions = []
-            explanations = []
-            
-            for pred_ans in decoded_pred_answers:
-                # Extract solution from <answer> tags if present
-                extracted = extract_solution(pred_ans)
-                code_text = extracted if extracted else pred_ans
-                
-                if isinstance(code_text, str):
-                    # Simple heuristic: check if code contains function definition
-                    if "def " in code_text or "function" in code_text.lower():
-                        score = 1.0
-                        decision = 1
-                        explanation = "Function definition found"
-                    else:
-                        score = 0.0
-                        decision = 0
-                        explanation = "No function definition found"
-                else:
-                    score = 0.0
-                    decision = 0
-                    explanation = "Could not parse code content as string"
-                
-                scores.append(score)
-                decisions.append(decision)
-                explanations.append(explanation)
-            
-            raw_responses = ["Heuristic evaluation"] * batch_size
-            return scores, decisions, explanations, raw_responses
+            raise ValueError("No unit tests available, using simple heuristic evaluation")
 
     def _evaluate_interleaved_reasoning(
         self,

@@ -92,9 +92,9 @@ class RewardManager:
         if is_interleaved:
             return self.compute_interleaved_rewards(data, return_dict)
         else:
-            return self.compute_standard_rewards(data, return_dict)
+            return self.compute_rewards_flat(data, return_dict)
 
-    def compute_standard_rewards(
+    def compute_rewards_flat(
         self,
         data: DataProto,
         return_dict: bool = False,
@@ -353,6 +353,8 @@ class RewardManager:
             ground_truth_infos,
             batch_size,
         )
+
+        import ipdb; ipdb.set_trace()
         
         # Check if we're doing interleaved reasoning for logging
         is_interleaved = (
