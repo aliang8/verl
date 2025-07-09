@@ -80,7 +80,7 @@ class CodeEvaluator:
             logger.warning("llm_sandbox not available, code execution will be disabled")
             return
         
-        self.sandbox_session = SandboxSession(lang="python")
+        self.sandbox_session = SandboxSession(lang="python", execution_timeout=10, verbose=True)
         
         # Try to open the session - some versions require explicit open()
         if hasattr(self.sandbox_session, 'open'):

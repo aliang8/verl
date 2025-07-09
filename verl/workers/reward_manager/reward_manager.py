@@ -68,6 +68,7 @@ class RewardManager:
             config=OmegaConf.create(code_evaluator_config),
             tokenizer=self.tokenizer,
             template_type=template_type,
+            autorater_service_url=self.autorater_base_url,
         )
 
     def compute_rewards(
@@ -189,6 +190,7 @@ class RewardManager:
         Returns:
             A tensor of combined rewards or a tuple containing a tensor and a dictionary with detailed reward information.
         """
+        print("Computing interleaved reasoning rewards")
         batch_size = len(data)
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
@@ -220,6 +222,8 @@ class RewardManager:
         if interleaved_indices:
             logger.info(f"Evaluating {len(interleaved_indices)} samples with interleaved reasoning (answer count > 3)")
             logger.info(f"Skipping {batch_size - len(interleaved_indices)} samples with insufficient answer count (≤3)")
+            # print(f"Evaluating {len(interleaved_indices)} samples with interleaved reasoning (answer count > 3)")
+            # print(f"Skipping {batch_size - len(interleaved_indices)} samples with insufficient answer count (≤3)")
             
             # Prepare data for interleaved samples
             interleaved_responses = [decoded_pred_answers[i] for i in interleaved_indices]
@@ -227,12 +231,14 @@ class RewardManager:
             interleaved_ground_truths = [ground_truth_infos[i] for i in interleaved_indices]
             
             # Use CodeEvaluator for interleaved evaluation
+            print("Using CodeEvaluator for interleaved evaluation")
             interleaved_scores, interleaved_decisions, interleaved_explanations, interleaved_raw = self.code_evaluator.evaluate_code(
                 decoded_pred_answers=interleaved_responses,
                 original_prompts=interleaved_prompts,
                 ground_truth_infos=interleaved_ground_truths,
                 batch_size=len(interleaved_indices),
             )
+            print(f"Done evaluating {len(interleaved_indices)} samples with interleaved reasoning (answer count > 3)")
             
             # Assign back to main arrays (only for qualified samples)
             for idx, i in enumerate(interleaved_indices):

@@ -362,18 +362,6 @@ class RayPPOTrainer:
         if "autorater_config" not in reward_manager_config:
             reward_manager_config["autorater_config"] = OmegaConf.to_container(self.autorater_config, resolve=True) if self.autorater_config else {}
         
-        # Configure CodeEvaluator settings within reward_manager_config
-        if "code_evaluator" not in reward_manager_config:
-            code_evaluator_config = {
-                "enable_interleaved_reasoning": getattr(self.config, "enable_interleaved_reasoning", False),
-                "interleaved_reward_weights": getattr(self.config, "interleaved_reward_weights", {
-                    "description": 1.0,
-                    "code": 2.0,
-                    "unit_tests": 1.5
-                })
-            }
-            reward_manager_config["code_evaluator"] = code_evaluator_config
-        
         # Get template_type from rollout config
         template_type = self.config.actor_rollout_ref.rollout.get("template_type", None)
         
