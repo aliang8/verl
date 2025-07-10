@@ -17,10 +17,16 @@ import os
 import re
 from typing import Any, Dict, List, Tuple, Optional
 import collections
+import threading
+import queue
+from contextlib import contextmanager
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
-from verl.workers.autorater.autorater_utils import extract_solution, format_code_outline_prompt
+from verl.workers.autorater.autorater_utils import (
+    extract_solution,
+    format_code_outline_prompt,
+)
 from verl.utils.autorater_client import call_autorater_service
 
 # Import SandboxSession for code execution
@@ -32,6 +38,106 @@ except ImportError:
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+class SafeResourceManagedExecutor:
+    """Combined robust code executor with resource management that reuses sessions"""
+
+    def __init__(self, max_concurrent=3):
+        self.semaphore = threading.Semaphore(max_concurrent)
+        self.execution_queue = queue.Queue()
+
+    @contextmanager
+    def acquire_resources(self):
+        """Acquire execution resources"""
+        self.semaphore.acquire()
+        try:
+            yield
+        finally:
+            self.semaphore.release()
+
+    def execute_safely(self, code: str, session=None, libraries=None, **kwargs):
+        """Execute code safely with comprehensive error handling and resource management"""
+        try:
+            # Pre-execution validation
+            if not code or not code.strip():
+                return {
+                    "error": "Empty code provided",
+                    "exit_code": 1,
+                    "stdout": "",
+                    "stderr": "Empty code provided"
+                }
+
+            with self.acquire_resources():
+                # Use provided session or fallback behavior
+                if session is None:
+                    logger.warning("No session provided, this may cause issues")
+                    return {
+                        "error": "No sandbox session available",
+                        "exit_code": 1,
+                        "stdout": "",
+                        "stderr": "No sandbox session available"
+                    }
+
+                # Security check if available
+                if hasattr(session, 'is_safe'):
+                    try:
+                        is_safe, violations = session.is_safe(code)
+                        if not is_safe:
+                            return {
+                                "error": "Security violation",
+                                "violations": [
+                                    v.description if hasattr(v, 'description') else str(v) 
+                                    for v in violations
+                                ],
+                                "exit_code": 1,
+                                "stdout": "",
+                                "stderr": "Security violation detected"
+                            }
+                    except Exception as e:
+                        logger.warning(f"Security check failed: {e}, proceeding with execution")
+
+                # Execute using the reused session
+                result = session.run(code, libraries=libraries)
+
+                # Post-execution validation
+                if result.exit_code != 0:
+                    return {
+                        "error": "Execution failed",
+                        "stderr": result.stderr,
+                        "stdout": result.stdout,
+                        "exit_code": result.exit_code
+                    }
+
+                return {
+                    "success": True,
+                    "output": result.stdout,
+                    "stderr": result.stderr,
+                    "stdout": result.stdout,
+                    "exit_code": result.exit_code
+                }
+
+        except TimeoutError:
+            return {
+                "error": "Execution timeout", 
+                "exit_code": 124,
+                "stdout": "",
+                "stderr": "Execution timeout"
+            }
+        except MemoryError:
+            return {
+                "error": "Memory limit exceeded",
+                "exit_code": 125,
+                "stdout": "",
+                "stderr": "Memory limit exceeded"
+            }
+        except Exception as e:
+            return {
+                "error": f"Unexpected error: {str(e)}",
+                "exit_code": 126,
+                "stdout": "",
+                "stderr": str(e)
+            }
 
 
 class CodeEvaluator:
@@ -59,19 +165,23 @@ class CodeEvaluator:
         """
         self.config = config
         self.tokenizer = tokenizer
-        self.autorater_base_url = autorater_service_url.rstrip("/") if autorater_service_url else None
+        self.autorater_base_url = (
+            autorater_service_url.rstrip("/") if autorater_service_url else None
+        )
         self.template_type = template_type
 
         # Interleaved reasoning configuration
-        self.enable_interleaved_reasoning = self.config.get("enable_interleaved_reasoning", False)
-        self.interleaved_reward_weights = self.config.get("interleaved_reward_weights", {
-            "description": 0.5,
-            "code": 1.0,
-            "unit_tests": 0.5
-        })
+        self.enable_interleaved_reasoning = self.config.get(
+            "enable_interleaved_reasoning", False
+        )
+        self.interleaved_reward_weights = self.config.get(
+            "interleaved_reward_weights",
+            {"description": 0.5, "code": 1.0, "unit_tests": 0.5},
+        )
 
-        # Initialize SandboxSession for code execution
+        # Initialize robust execution components
         self.sandbox_session = None
+        self.safe_executor = SafeResourceManagedExecutor(max_concurrent=3)
         self._init_sandbox()
 
     def _init_sandbox(self):
@@ -79,27 +189,22 @@ class CodeEvaluator:
         if SandboxSession is None:
             logger.warning("llm_sandbox not available, code execution will be disabled")
             return
-        
-        self.sandbox_session = SandboxSession(lang="python", execution_timeout=10, verbose=False)
-        
-        # Try to open the session - some versions require explicit open()
-        if hasattr(self.sandbox_session, 'open'):
-            try:
-                self.sandbox_session.open()
-                logger.info("SandboxSession initialized and opened successfully")
-            except Exception as e:
-                # Handle Docker connection errors specifically
-                if "Connection aborted" in str(e) or "No such file or directory" in str(e):
-                    logger.error(f"Docker/sandbox service not available: {e}")
-                    logger.info("Code execution will fall back to heuristic evaluation")
-                else:
-                    logger.warning(f"SandboxSession created but failed to open explicitly: {e}")
-                    logger.info("Will try to rely on automatic session management")
-                self.sandbox_session = None
-                return
-        else:
-            raise Exception("SandboxSession not available")
-    
+
+        self.sandbox_session = SandboxSession(
+            lang="python",
+            execution_timeout=10,
+            verbose=False,
+            runtime_configs={"cpu_count": 10, "mem_limit": "256m"},
+        )
+
+        try:
+            self.sandbox_session.open()
+            logger.info("SandboxSession initialized and opened successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize SandboxSession: {e}")
+            print(f"Failed to initialize SandboxSession: {e}")
+            self.sandbox_session = None
+            raise e
 
     def run_unit_tests(
         self,
@@ -108,11 +213,11 @@ class CodeEvaluator:
     ) -> Tuple[List[float], List[int], List[int], List[str], List[str], List[str]]:
         """
         Execute unit tests in SandboxSession and aggregate scores and outputs.
-        
+
         Args:
             predicted_answers: List of predicted code answers
             reward_model_info: List of reward model info containing unit tests
-            
+
         Returns:
             Tuple of (code_scores, tests_passed, total_tests, stdout_list, stderr_list, error_list)
         """
@@ -120,7 +225,9 @@ class CodeEvaluator:
 
         # Ensure sandbox session exists
         if self.sandbox_session is None:
-            logger.info("SandboxSession not available, attempting to initialize on demand")
+            logger.info(
+                "SandboxSession not available, attempting to initialize on demand"
+            )
             self._init_sandbox()
 
         if self.sandbox_session is None:
@@ -161,29 +268,37 @@ class CodeEvaluator:
             if not tests_raw:
                 continue
 
-            code_match = re.search(r"```[\w]*\n(.*?)```", predicted_answers[idx], re.DOTALL)
-            pred_code_block = code_match.group(1) if code_match else predicted_answers[idx]
+            code_match = re.search(
+                r"```[\w]*\n(.*?)```", predicted_answers[idx], re.DOTALL
+            )
+            pred_code_block = (
+                code_match.group(1) if code_match else predicted_answers[idx]
+            )
 
             passes = 0
             split_tests: List[str] = []
 
             for snippet in tests_raw:
                 # Simple approach: split on 'def' and treat each as a test case
-                normalized_snippet = snippet.replace('\\n', '\n')
-                
+                normalized_snippet = snippet.replace("\\n", "\n")
+
                 # Extract methods
-                test_methods = re.findall(r'def\s+(\w+)\s*\([^)]*\)\s*:(.*?)(?=\n\s*def|\Z)', normalized_snippet, re.DOTALL)
-                
+                test_methods = re.findall(
+                    r"def\s+(\w+)\s*\([^)]*\)\s*:(.*?)(?=\n\s*def|\Z)",
+                    normalized_snippet,
+                    re.DOTALL,
+                )
+
                 # Extract setUp method if present
                 setup_method = ""
                 test_only_methods = []
-                
+
                 for method_name, method_body in test_methods:
                     if method_name == "setUp":
                         setup_method = f"    def setUp(self):{method_body}"
                     elif method_name.startswith("test_"):
                         test_only_methods.append((method_name, method_body))
-                
+
                 for method_name, method_body in test_only_methods:
                     # Create complete test with user code + just the test method
                     complete_test = f"""import unittest
@@ -200,7 +315,7 @@ if __name__ == '__main__':
     unittest.main()
 """
                     split_tests.append(complete_test)
-                
+
                 # If no test methods found, treat whole snippet as one test
                 if not test_only_methods:
                     # For plain assert statements, combine with user code
@@ -225,7 +340,14 @@ if __name__ == '__main__':
             tests_passed[idx] = passes
             code_scores[idx] = float(passes) * 0.2
 
-        return code_scores, tests_passed, total_tests, stdout_list, stderr_list, error_list
+        return (
+            code_scores,
+            tests_passed,
+            total_tests,
+            stdout_list,
+            stderr_list,
+            error_list,
+        )
 
     def run_unit_tests_combined(
         self,
@@ -235,11 +357,11 @@ if __name__ == '__main__':
         """
         Execute unit tests by combining user code with unit test blocks and parsing unittest output.
         This is a cleaner approach that uses unit test blocks directly without extraction.
-        
+
         Args:
             predicted_answers: List of predicted code answers
             reward_model_info: List of reward model info containing unit tests
-            
+
         Returns:
             Tuple of (code_scores, tests_passed, total_tests, stdout_list, stderr_list, error_list)
         """
@@ -247,7 +369,9 @@ if __name__ == '__main__':
 
         # Ensure sandbox session exists
         if self.sandbox_session is None:
-            logger.info("SandboxSession not available, attempting to initialize on demand")
+            logger.info(
+                "SandboxSession not available, attempting to initialize on demand"
+            )
             self._init_sandbox()
 
         if self.sandbox_session is None:
@@ -288,15 +412,19 @@ if __name__ == '__main__':
             if not tests_raw:
                 continue
 
-            code_match = re.search(r"```[\w]*\n(.*?)```", predicted_answers[idx], re.DOTALL)
-            pred_code_block = code_match.group(1) if code_match else predicted_answers[idx]
+            code_match = re.search(
+                r"```[\w]*\n(.*?)```", predicted_answers[idx], re.DOTALL
+            )
+            pred_code_block = (
+                code_match.group(1) if code_match else predicted_answers[idx]
+            )
 
             # Combine user code with all unit test blocks directly
             all_test_blocks = []
             for snippet in tests_raw:
-                normalized_snippet = snippet.replace('\\n', '\n')
+                normalized_snippet = snippet.replace("\\n", "\n")
                 all_test_blocks.append(normalized_snippet)
-            
+
             # Create combined test file with user code + all test blocks
             combined_test = f"""import unittest
 import pandas as pd
@@ -311,57 +439,83 @@ if __name__ == '__main__':
 """
 
             try:
-                res = sess.run(combined_test, libraries=libs)
-                stdout_list[idx] = res.stdout
-                stderr_list[idx] = res.stderr
+                # Use the safe executor with the existing session
+                result = self.safe_executor.execute_safely(
+                    combined_test, 
+                    session=sess, 
+                    libraries=libs
+                )
                 
+                if result.get("success"):
+                    res = result  # Use the safe executor result
+                    stdout_list[idx] = result["stdout"]
+                    stderr_list[idx] = result["stderr"]
+                else:
+                    # Handle execution error from safe executor
+                    stdout_list[idx] = result.get("stdout", "")
+                    stderr_list[idx] = result.get("stderr", result.get("error", ""))
+                    error_list[idx] = result.get("error", "Unknown error")
+                    total_tests[idx] = 0
+                    tests_passed[idx] = 0
+                    code_scores[idx] = 0.0
+                    continue
+
                 # Parse unittest output to count tests
-                output = res.stdout + res.stderr
-                
+                output = result["stdout"] + result["stderr"]
+
                 # Look for patterns like "Ran X tests in Y.YYYs"
-                ran_match = re.search(r'Ran (\d+) tests? in', output)
+                ran_match = re.search(r"Ran (\d+) tests? in", output)
                 if ran_match:
                     total_tests[idx] = int(ran_match.group(1))
                 else:
                     # Fallback: count test methods in the test blocks
                     test_count = 0
                     for block in all_test_blocks:
-                        test_count += len(re.findall(r'def\s+test_\w+', block))
+                        test_count += len(re.findall(r"def\s+test_\w+", block))
                     total_tests[idx] = test_count
-                
+
                 # Count failures and errors
                 failures = 0
                 errors = 0
-                
+
                 # Look for "FAILED (failures=X, errors=Y)" or "FAILED (failures=X)" or "FAILED (errors=Y)"
-                failed_match = re.search(r'FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)', output)
+                failed_match = re.search(
+                    r"FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)", output
+                )
                 if failed_match:
                     if failed_match.group(1):
                         failures = int(failed_match.group(1))
                     if failed_match.group(2):
                         errors = int(failed_match.group(2))
-                
+
                 # Calculate passed tests
                 tests_passed[idx] = total_tests[idx] - failures - errors
-                
+
                 # If exit code is 0, all tests passed
-                if res.exit_code == 0:
+                if result["exit_code"] == 0:
                     tests_passed[idx] = total_tests[idx]
-                
+
                 # Calculate score (0.2 points per passing test, matching original function)
                 code_scores[idx] = float(tests_passed[idx]) * 0.2
-                
+
             except Exception as exec_e:
                 error_list[idx] = str(exec_e)
                 # Fallback: count test methods in the test blocks
                 test_count = 0
                 for block in all_test_blocks:
-                    test_count += len(re.findall(r'def\s+test_\w+', block))
+                    test_count += len(re.findall(r"def\s+test_\w+", block))
                 total_tests[idx] = test_count
                 tests_passed[idx] = 0
                 code_scores[idx] = 0.0
 
-        return code_scores, tests_passed, total_tests, stdout_list, stderr_list, error_list
+        return (
+            code_scores,
+            tests_passed,
+            total_tests,
+            stdout_list,
+            stderr_list,
+            error_list,
+        )
 
     def evaluate_code(
         self,
@@ -383,11 +537,10 @@ if __name__ == '__main__':
             Tuple of (scores, decisions, explanations, raw_responses, component_rewards)
         """
         # Check if we're doing interleaved reasoning
-        is_interleaved = (
-            self.enable_interleaved_reasoning or 
-            (self.template_type and "interleave" in self.template_type.lower())
+        is_interleaved = self.enable_interleaved_reasoning or (
+            self.template_type and "interleave" in self.template_type.lower()
         )
-        
+
         if is_interleaved:
             logger.info("Using interleaved reasoning evaluation")
             return self._evaluate_interleaved_reasoning(
@@ -403,38 +556,48 @@ if __name__ == '__main__':
         """Extract code snippet from predicted answer."""
         if not predicted_answer.strip():
             return ""
-        
+
         # Method 1: Try to extract code between triple backticks
-        code_block_pattern = r'```(?:python)?\s*(.*?)```'
+        code_block_pattern = r"```(?:python)?\s*(.*?)```"
         code_matches = re.findall(code_block_pattern, predicted_answer, re.DOTALL)
-        
+
         if code_matches:
             # Return the first code block found
             code_snippet = code_matches[0].strip()
-            logger.debug(f"Extracted code from ``` block: {len(code_snippet)} characters")
+            logger.debug(
+                f"Extracted code from ``` block: {len(code_snippet)} characters"
+            )
             return code_snippet
-        
+
         # Method 2: Try to extract from "def task_func" onwards
-        task_func_pattern = r'(def task_func.*?)(?=\n\n|\n(?:def |class |import |from |#|$)|\Z)'
+        task_func_pattern = (
+            r"(def task_func.*?)(?=\n\n|\n(?:def |class |import |from |#|$)|\Z)"
+        )
         task_func_match = re.search(task_func_pattern, predicted_answer, re.DOTALL)
-        
+
         if task_func_match:
             code_snippet = task_func_match.group(1).strip()
-            logger.debug(f"Extracted code from def task_func: {len(code_snippet)} characters")
+            logger.debug(
+                f"Extracted code from def task_func: {len(code_snippet)} characters"
+            )
             return code_snippet
-        
+
         # Method 3: Look for any function definition as fallback
-        function_pattern = r'(def \w+.*?)(?=\n\n|\n(?:def |class |import |from |#|$)|\Z)'
+        function_pattern = (
+            r"(def \w+.*?)(?=\n\n|\n(?:def |class |import |from |#|$)|\Z)"
+        )
         function_matches = re.findall(function_pattern, predicted_answer, re.DOTALL)
-        
+
         if function_matches:
             # Return the first function found
             code_snippet = function_matches[0].strip()
-            logger.debug(f"Extracted code from function def: {len(code_snippet)} characters")
+            logger.debug(
+                f"Extracted code from function def: {len(code_snippet)} characters"
+            )
             return code_snippet
-        
+
         logger.debug(f"No code snippet found in predicted answer")
-        return None 
+        return ""
 
     def _evaluate_code(
         self,
@@ -444,15 +607,16 @@ if __name__ == '__main__':
     ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]]]:
         """
         Evaluate standard code responses using sandbox execution.
-        
+
         Args:
             decoded_pred_answers: List of decoded response strings
             ground_truth_infos: List of ground truth information dictionaries
             batch_size: Number of samples in the batch
-            
+
         Returns:
             Tuple of (scores, decisions, explanations, raw_responses, component_rewards)
         """
+
         # Check if any unit tests are present
         def _has_tests(info: Dict[str, Any]):
             return bool(
@@ -470,18 +634,22 @@ if __name__ == '__main__':
             logger.info("Extracting code snippets from predicted answers")
             extracted_code_answers = []
             failed_extraction_indices = []
-            
+
             for i, pred_answer in enumerate(decoded_pred_answers):
                 extracted_code = self.extract_code_snippet(pred_answer)
-                if extracted_code is None:
+                if not extracted_code.strip():
                     failed_extraction_indices.append(i)
-                    extracted_code_answers.append("")  # Use empty string for failed extractions
+                    extracted_code_answers.append(
+                        ""
+                    )  # Use empty string for failed extractions
                 else:
                     extracted_code_answers.append(extracted_code)
-            
+
             if failed_extraction_indices:
-                logger.warning(f"Failed to extract code from {len(failed_extraction_indices)} samples: {failed_extraction_indices}")
-            
+                logger.warning(
+                    f"Failed to extract code from {len(failed_extraction_indices)} samples: {failed_extraction_indices}"
+                )
+
             # Use local unit test execution
             logger.info("Using local unit test execution for code evaluation")
             (
@@ -497,7 +665,7 @@ if __name__ == '__main__':
             decisions = []
             explanations = []
             normalized_scores = []
-            
+
             for i in range(batch_size):
                 if i in failed_extraction_indices:
                     # Default values for failed code extraction
@@ -510,16 +678,20 @@ if __name__ == '__main__':
                         normalized_score = code_tests_passed[i] / code_total_tests[i]
                     else:
                         normalized_score = 0.0
-                    
+
                     normalized_scores.append(normalized_score)
                     decisions.append(1 if normalized_score > 0 else 0)
-                    explanations.append(f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests")
-            
+                    explanations.append(
+                        f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests \\nstdout: {code_stdout[i]} \\nstderr: {code_stderr[i]} \\nerror: {code_error[i]}"
+                    )
+
             raw_responses = [""] * batch_size
-            
+
             return normalized_scores, decisions, explanations, raw_responses, {}
         else:
-            raise ValueError("No unit tests available, using simple heuristic evaluation")
+            raise ValueError(
+                "No unit tests available, using simple heuristic evaluation"
+            )
 
     def _evaluate_interleaved_reasoning(
         self,
@@ -530,18 +702,18 @@ if __name__ == '__main__':
     ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]]]:
         """
         Evaluate interleaved reasoning responses with multiple <answer> tags.
-        
+
         Expected structure:
         1. First <answer>: Description/explanation of the solution approach
-        2. Second <answer>: Code implementation 
-        3. Third <answer>: Self-generated unit tests 
-        
+        2. Second <answer>: Code implementation
+        3. Third <answer>: Self-generated unit tests
+
         Args:
             decoded_pred_answers: List of decoded response strings
             original_prompts: List of original prompts
             ground_truth_infos: List of ground truth information dictionaries
             batch_size: Number of samples in the batch
-            
+
         Returns:
             Tuple of (scores, decisions, explanations, raw_responses)
         """
@@ -549,18 +721,20 @@ if __name__ == '__main__':
         decisions = []
         explanations = []
         raw_responses = []
-        
+
         # --- Batch-evaluate all descriptions first ---
         description_scores_map = self._evaluate_all_descriptions(
             decoded_pred_answers, original_prompts
         )
-        
+
         component_rewards = collections.defaultdict(list)
 
-        for i, (pred_answer, gt_info) in enumerate(zip(decoded_pred_answers, ground_truth_infos)):
+        for i, (pred_answer, gt_info) in enumerate(
+            zip(decoded_pred_answers, ground_truth_infos)
+        ):
             # Extract all answers from the interleaved response using extract_all=True
             all_answers = extract_solution(pred_answer, extract_all=True)
-            
+
             # The format is guaranteed by the caller (RewardManager), which filters
             # for responses with >= 3 answers. We can assert this.
             assert all_answers is not None, "all_answers should not be None"
@@ -570,14 +744,16 @@ if __name__ == '__main__':
                 # This path should ideally not be taken if extract_solution is consistent
                 answer_parts = [part.strip() for part in str(all_answers).split(",")]
 
-            assert len(answer_parts) >= 3, f"Expected >=3 answer parts, but got {len(answer_parts)}"
+            assert (
+                len(answer_parts) >= 3
+            ), f"Expected >=3 answer parts, but got {len(answer_parts)}"
 
             # Initialize component scores
             description_score = description_scores_map.get(i, 0.0)
             code_score = 0.0
             unit_test_score = 0.0
             component_explanations = []
-            
+
             # Evaluate first answer (description/explanation)
             description_score = description_scores_map.get(i, 0.0)
             component_explanations.append(f"Description Score: {description_score:.2f}")
@@ -586,33 +762,43 @@ if __name__ == '__main__':
             code_text = answer_parts[1]
             # Extract clean code snippet from the code answer
             extracted_code = self.extract_code_snippet(code_text)
-            
+
             # Check if code extraction failed
             if extracted_code is None:
                 code_score = 0.0
                 component_explanations.append("Code: failed code extraction")
             # Check if we have unit tests available for code evaluation
-            elif isinstance(gt_info, dict) and (gt_info.get("unit_tests") or gt_info.get("tests")):
+            elif isinstance(gt_info, dict) and (
+                gt_info.get("unit_tests") or gt_info.get("tests")
+            ):
                 (
                     code_scores_list,
                     code_tests_passed,
                     code_total_tests,
-                    _, _, _,
-                ) = self.run_unit_tests_combined([extracted_code], [{
-                    "ground_truth": "code",
-                    "unit_tests": gt_info.get("unit_tests") or gt_info.get("tests"),
-                    "libs": gt_info.get("libs", [])
-                }])
-                
+                    _,
+                    _,
+                    _,
+                ) = self.run_unit_tests_combined(
+                    [extracted_code],
+                    [
+                        {
+                            "ground_truth": "code",
+                            "unit_tests": gt_info.get("unit_tests")
+                            or gt_info.get("tests"),
+                            "libs": gt_info.get("libs", []),
+                        }
+                    ],
+                )
+
                 passed = code_tests_passed[0] if code_tests_passed else 0
                 total = code_total_tests[0] if code_total_tests else 0
-                
+
                 # Normalize score as passed_tests / total_tests
                 if total > 0:
                     code_score = passed / total
                 else:
                     code_score = 0.0
-                    
+
                 component_explanations.append(f"Code: passed {passed}/{total} tests")
             else:
                 code_score = 0.0
@@ -621,14 +807,20 @@ if __name__ == '__main__':
             # Evaluate third answer (self-generated unit tests) - optional
             unit_test_text = answer_parts[2]
             # Check if unit tests look reasonable
-            if ("assert" in unit_test_text or "test" in unit_test_text.lower() or 
-                "unittest" in unit_test_text.lower() or "def test_" in unit_test_text):
+            if (
+                "assert" in unit_test_text
+                or "test" in unit_test_text.lower()
+                or "unittest" in unit_test_text.lower()
+                or "def test_" in unit_test_text
+            ):
                 unit_test_score = 1.0
-                component_explanations.append("Unit Tests: Self-generated tests provided")
+                component_explanations.append(
+                    "Unit Tests: Self-generated tests provided"
+                )
             else:
                 unit_test_score = 0.0
                 component_explanations.append("Unit Tests: No unit tests found")
-                
+
             # Combine scores with weights
             weights = self.interleaved_reward_weights
             total_score = (
@@ -636,16 +828,18 @@ if __name__ == '__main__':
                 + code_score * weights["code"]
                 + unit_test_score * weights["unit_tests"]
             )
-            
+
             total_scores.append(total_score)
             decisions.append(1 if total_score > 1.0 else 0)  # Threshold for success
             explanations.append(" | ".join(component_explanations))
-            raw_responses.append(f"Interleaved evaluation: {len(answer_parts)} answers found")
-            
+            raw_responses.append(
+                f"Interleaved evaluation: {len(answer_parts)} answers found"
+            )
+
             component_rewards["description_scores"].append(description_score)
             component_rewards["code_scores"].append(code_score)
             component_rewards["unit_test_scores"].append(unit_test_score)
-        
+
         return total_scores, decisions, explanations, raw_responses, component_rewards
 
     def _evaluate_all_descriptions(
@@ -655,7 +849,9 @@ if __name__ == '__main__':
         Evaluate all description parts of interleaved answers in a single batch.
         """
         if not self.autorater_base_url:
-            logger.warning("AutoRater service URL not configured in CodeEvaluator; skipping description evaluation.")
+            logger.warning(
+                "AutoRater service URL not configured in CodeEvaluator; skipping description evaluation."
+            )
             return {}
 
         descriptions_to_eval: List[Tuple[int, str, str]] = []
@@ -669,9 +865,21 @@ if __name__ == '__main__':
 
         # Prepare payload for the AutoRater service
         batch_indices, batch_prompts, batch_responses = zip(*descriptions_to_eval)
-        
-        tokenized_prompts = self.tokenizer(list(batch_prompts), add_special_tokens=True, padding=True, truncation=True, return_tensors="pt").input_ids.tolist()
-        tokenized_responses = self.tokenizer(list(batch_responses), add_special_tokens=False, padding=True, truncation=True, return_tensors="pt").input_ids.tolist()
+
+        tokenized_prompts = self.tokenizer(
+            list(batch_prompts),
+            add_special_tokens=True,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        ).input_ids.tolist()
+        tokenized_responses = self.tokenizer(
+            list(batch_responses),
+            add_special_tokens=False,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        ).input_ids.tolist()
 
         # We need to construct a valid-looking payload even if some parts are dummy
         batch_size = len(batch_indices)
@@ -687,14 +895,16 @@ if __name__ == '__main__':
         }
 
         try:
-            logger.info(f"Calling AutoRater to evaluate {batch_size} description outlines.")
+            logger.info(
+                f"Calling AutoRater to evaluate {batch_size} description outlines."
+            )
             scores, decisions, _, _ = call_autorater_service(
                 self.autorater_base_url,
                 payload,
                 batch_size=batch_size,
-                endpoint="/evaluate_autorater", # Use the main endpoint
+                endpoint="/evaluate_autorater",  # Use the main endpoint
             )
-            
+
             # The decision is what matters: 1 for TRUE, 0 for FALSE. Score is shaped, so use decision.
             final_scores = [1.0 if d == 1 else 0.0 for d in decisions]
             return dict(zip(batch_indices, final_scores))
@@ -714,7 +924,9 @@ if __name__ == '__main__':
                     self.sandbox_session.__exit__(None, None, None)
                     logger.info("SandboxSession cleaned up via __exit__")
                 else:
-                    logger.info("SandboxSession cleanup - no explicit close method available")
+                    logger.info(
+                        "SandboxSession cleanup - no explicit close method available"
+                    )
             except Exception as e:
                 logger.warning(f"Error closing SandboxSession: {e}")
             finally:
@@ -722,4 +934,4 @@ if __name__ == '__main__':
 
     def __del__(self):
         """Destructor to ensure resources are cleaned up."""
-        self.close() 
+        self.close()
