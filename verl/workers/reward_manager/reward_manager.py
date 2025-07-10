@@ -125,7 +125,7 @@ class RewardManager:
             
             # Determine evaluation type and call appropriate method
             if self._should_use_code_evaluation(ground_truth_infos):
-                autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, extracted_pred_answers, extracted_gt_answers = self._evaluate_code(
+                autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, _, extracted_pred_answers, extracted_gt_answers = self._evaluate_code(
                     data, ground_truth_infos, batch_size
                 )
             else:
@@ -217,6 +217,7 @@ class RewardManager:
         autorater_decisions = [0] * batch_size  # 0 = failed/no evaluation
         autorater_explanations = ["No evaluation - insufficient answer count (<3)"] * batch_size
         autorater_raw_responses = ["No evaluation - answer count <3"] * batch_size
+        component_rewards_all = [{k: 0.0 for k in ["description_scores", "code_scores", "unit_test_scores"]} for _ in range(batch_size)]
 
         # --- Evaluate only interleaved samples using CodeEvaluator ---
         if interleaved_indices:
@@ -232,7 +233,7 @@ class RewardManager:
             
             # Use CodeEvaluator for interleaved evaluation
             print("Using CodeEvaluator for interleaved evaluation")
-            interleaved_scores, interleaved_decisions, interleaved_explanations, interleaved_raw = self.code_evaluator.evaluate_code(
+            interleaved_scores, interleaved_decisions, interleaved_explanations, interleaved_raw, component_rewards = self.code_evaluator.evaluate_code(
                 decoded_pred_answers=interleaved_responses,
                 original_prompts=interleaved_prompts,
                 ground_truth_infos=interleaved_ground_truths,
@@ -246,6 +247,7 @@ class RewardManager:
                 autorater_decisions[i] = interleaved_decisions[idx]
                 autorater_explanations[i] = interleaved_explanations[idx]
                 autorater_raw_responses[i] = interleaved_raw[idx]
+                component_rewards_all[i] = {k: v[idx] for k, v in component_rewards.items()}
         else:
             logger.info("No samples qualified for interleaved evaluation (all had answer count ≤3)")
 
@@ -283,6 +285,8 @@ class RewardManager:
             reward_extra_info["answer_counts"].append(answer_counts[i])
             reward_extra_info["used_interleaved_eval"].append(used_interleaved_eval)
             reward_extra_info["final_scores"].append(final_scores[i])
+            for k, v in component_rewards_all[i].items():
+                reward_extra_info[k].append(v)
 
         # Extract answers for logging
         extracted_pred_answers = []
@@ -336,7 +340,7 @@ class RewardManager:
         data: DataProto, 
         ground_truth_infos: List[Dict[str, Any]], 
         batch_size: int
-    ) -> Tuple[List[float], List[int], List[str], List[str], List[str], List[str]]:
+    ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, float], List[str], List[str]]:
         """Evaluate code responses using CodeEvaluator."""
         logger.info("Using CodeEvaluator for evaluation")
         
@@ -353,7 +357,7 @@ class RewardManager:
         decoded_prompts = [self.tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in data.batch["prompts"]]
 
         # Evaluate using CodeEvaluator
-        autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses = self.code_evaluator.evaluate_code(
+        autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, component_rewards = self.code_evaluator.evaluate_code(
             decoded_pred_answers,
             decoded_prompts,
             ground_truth_infos,
@@ -378,7 +382,7 @@ class RewardManager:
                 extracted_pred_answers.append(single_answer if single_answer else "No answer extracted")
             extracted_gt_answers.append(gt_ans)
         
-        return autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, extracted_pred_answers, extracted_gt_answers
+        return autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, component_rewards, extracted_pred_answers, extracted_gt_answers
 
     def _evaluate_text_responses(
         self, 

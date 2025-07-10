@@ -16,7 +16,7 @@ import logging
 import os
 import re
 from typing import Any, Dict, List, Tuple, Optional
-
+import collections
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
@@ -65,9 +65,9 @@ class CodeEvaluator:
         # Interleaved reasoning configuration
         self.enable_interleaved_reasoning = self.config.get("enable_interleaved_reasoning", False)
         self.interleaved_reward_weights = self.config.get("interleaved_reward_weights", {
-            "description": 1.0,
+            "description": 0.5,
             "code": 1.0,
-            "unit_tests": 1.0
+            "unit_tests": 0.5
         })
 
         # Initialize SandboxSession for code execution
@@ -80,7 +80,7 @@ class CodeEvaluator:
             logger.warning("llm_sandbox not available, code execution will be disabled")
             return
         
-        self.sandbox_session = SandboxSession(lang="python", execution_timeout=10, verbose=True)
+        self.sandbox_session = SandboxSession(lang="python", execution_timeout=10, verbose=False)
         
         # Try to open the session - some versions require explicit open()
         if hasattr(self.sandbox_session, 'open'):
@@ -369,7 +369,7 @@ if __name__ == '__main__':
         original_prompts: List[str],
         ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
-    ) -> Tuple[List[float], List[int], List[str], List[str]]:
+    ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]]]:
         """
         Evaluate code responses using either standard or interleaved reasoning.
 
@@ -380,7 +380,7 @@ if __name__ == '__main__':
             batch_size: Number of samples in the batch
 
         Returns:
-            Tuple of (scores, decisions, explanations, raw_responses)
+            Tuple of (scores, decisions, explanations, raw_responses, component_rewards)
         """
         # Check if we're doing interleaved reasoning
         is_interleaved = (
@@ -441,7 +441,7 @@ if __name__ == '__main__':
         decoded_pred_answers: List[str],
         ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
-    ) -> Tuple[List[float], List[int], List[str], List[str]]:
+    ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]]]:
         """
         Evaluate standard code responses using sandbox execution.
         
@@ -451,7 +451,7 @@ if __name__ == '__main__':
             batch_size: Number of samples in the batch
             
         Returns:
-            Tuple of (scores, decisions, explanations, raw_responses)
+            Tuple of (scores, decisions, explanations, raw_responses, component_rewards)
         """
         # Check if any unit tests are present
         def _has_tests(info: Dict[str, Any]):
@@ -517,7 +517,7 @@ if __name__ == '__main__':
             
             raw_responses = [""] * batch_size
             
-            return normalized_scores, decisions, explanations, raw_responses
+            return normalized_scores, decisions, explanations, raw_responses, {}
         else:
             raise ValueError("No unit tests available, using simple heuristic evaluation")
 
@@ -527,7 +527,7 @@ if __name__ == '__main__':
         original_prompts: List[str],
         ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
-    ) -> Tuple[List[float], List[int], List[str], List[str]]:
+    ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]]]:
         """
         Evaluate interleaved reasoning responses with multiple <answer> tags.
         
@@ -554,6 +554,8 @@ if __name__ == '__main__':
         description_scores_map = self._evaluate_all_descriptions(
             decoded_pred_answers, original_prompts
         )
+        
+        component_rewards = collections.defaultdict(list)
 
         for i, (pred_answer, gt_info) in enumerate(zip(decoded_pred_answers, ground_truth_infos)):
             # Extract all answers from the interleaved response using extract_all=True
@@ -630,9 +632,9 @@ if __name__ == '__main__':
             # Combine scores with weights
             weights = self.interleaved_reward_weights
             total_score = (
-                description_score * weights.get("description", 1.0)
-                + code_score * weights.get("code", 1.0)
-                + unit_test_score * weights.get("unit_tests", 1.0)
+                description_score * weights["description"]
+                + code_score * weights["code"]
+                + unit_test_score * weights["unit_tests"]
             )
             
             total_scores.append(total_score)
@@ -640,7 +642,11 @@ if __name__ == '__main__':
             explanations.append(" | ".join(component_explanations))
             raw_responses.append(f"Interleaved evaluation: {len(answer_parts)} answers found")
             
-        return total_scores, decisions, explanations, raw_responses
+            component_rewards["description_scores"].append(description_score)
+            component_rewards["code_scores"].append(code_score)
+            component_rewards["unit_test_scores"].append(unit_test_score)
+        
+        return total_scores, decisions, explanations, raw_responses, component_rewards
 
     def _evaluate_all_descriptions(
         self, decoded_pred_answers: List[str], original_prompts: List[str]
