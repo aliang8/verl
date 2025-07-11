@@ -15,6 +15,9 @@
 import logging
 import os
 import re
+import json
+import time
+from datetime import datetime
 from typing import Any, Dict, List, Tuple, Optional
 import collections
 import threading
@@ -40,6 +43,151 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+class ErrorTracker:
+    """Tracks different types of errors that occur during code evaluation"""
+    
+    def __init__(self):
+        # Track errors by prompt ID and error type
+        self.error_logs: Dict[str, Dict[str, Any]] = {}
+        self.error_counts: Dict[str, int] = collections.defaultdict(int)
+        self.batch_counter = 0
+        self.epoch_start_time = None
+        self.current_epoch = None
+        
+    def start_epoch(self, epoch: int):
+        """Mark the start of a new epoch"""
+        self.current_epoch = epoch
+        self.epoch_start_time = time.time()
+        self.error_logs.clear()
+        self.error_counts.clear()
+        self.batch_counter = 0
+        
+    def log_error(self, prompt_id: str, error_type: str, error_details: Dict[str, Any], 
+                  prompt_text: str = "", response_text: str = ""):
+        """Log an error for a specific prompt"""
+        if prompt_id not in self.error_logs:
+            self.error_logs[prompt_id] = {
+                "prompt_text": prompt_text[:500],  # Truncate for storage
+                "response_text": response_text[:1000],  # Truncate for storage
+                "errors": [],
+                "success": False,
+                "batch_id": self.batch_counter
+            }
+            
+        self.error_logs[prompt_id]["errors"].append({
+            "error_type": error_type,
+            "error_details": error_details,
+            "timestamp": time.time()
+        })
+        
+        self.error_counts[error_type] += 1
+        
+    def log_success(self, prompt_id: str, success_details: Dict[str, Any],
+                   prompt_text: str = "", response_text: str = ""):
+        """Log a successful evaluation for a specific prompt"""
+        if prompt_id not in self.error_logs:
+            self.error_logs[prompt_id] = {
+                "prompt_text": prompt_text[:500],
+                "response_text": response_text[:1000],
+                "errors": [],
+                "success": True,
+                "batch_id": self.batch_counter,
+                "success_details": success_details
+            }
+        else:
+            self.error_logs[prompt_id]["success"] = True
+            self.error_logs[prompt_id]["success_details"] = success_details
+            
+    def increment_batch(self):
+        """Increment the batch counter"""
+        self.batch_counter += 1
+        
+    def get_error_summary(self) -> Dict[str, Any]:
+        """Get a summary of all errors"""
+        total_prompts = len(self.error_logs)
+        successful_prompts = sum(1 for log in self.error_logs.values() if log["success"])
+        failed_prompts = total_prompts - successful_prompts
+        
+        return {
+            "total_prompts": total_prompts,
+            "successful_prompts": successful_prompts,
+            "failed_prompts": failed_prompts,
+            "success_rate": successful_prompts / total_prompts if total_prompts > 0 else 0.0,
+            "error_counts": dict(self.error_counts),
+            "epoch_duration": time.time() - self.epoch_start_time if self.epoch_start_time else 0,
+            "epoch": self.current_epoch
+        }
+        
+    def get_wandb_metrics(self) -> Dict[str, Any]:
+        """Get metrics formatted for wandb logging"""
+        summary = self.get_error_summary()
+        
+        # Create wandb-friendly metrics
+        wandb_metrics = {
+            "code_eval/total_prompts": summary["total_prompts"],
+            "code_eval/successful_prompts": summary["successful_prompts"],
+            "code_eval/failed_prompts": summary["failed_prompts"],
+            "code_eval/success_rate": summary["success_rate"],
+            "code_eval/epoch_duration": summary["epoch_duration"]
+        }
+        
+        # Add individual error type counts
+        for error_type, count in summary["error_counts"].items():
+            wandb_metrics[f"code_eval/errors/{error_type}"] = count
+            
+        return wandb_metrics
+        
+    def save_metadata(self, output_dir: str, epoch: int):
+        """Save detailed metadata to files"""
+        os.makedirs(output_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Save detailed error logs
+        detailed_file = os.path.join(output_dir, f"epoch_{epoch}_detailed_logs_{timestamp}.json")
+        with open(detailed_file, 'w') as f:
+            json.dump(self.error_logs, f, indent=2)
+            
+        # Save error summary
+        summary_file = os.path.join(output_dir, f"epoch_{epoch}_error_summary_{timestamp}.json")
+        summary = self.get_error_summary()
+        summary["epoch"] = epoch
+        summary["timestamp"] = timestamp
+        with open(summary_file, 'w') as f:
+            json.dump(summary, f, indent=2)
+            
+        # Save CSV for easy analysis
+        csv_file = os.path.join(output_dir, f"epoch_{epoch}_prompt_results_{timestamp}.csv")
+        try:
+            import pandas as pd
+            rows = []
+            for prompt_id, log in self.error_logs.items():
+                row = {
+                    "prompt_id": prompt_id,
+                    "success": log["success"],
+                    "batch_id": log["batch_id"],
+                    "num_errors": len(log["errors"]),
+                    "error_types": ",".join([e["error_type"] for e in log["errors"]]),
+                    "prompt_text": log["prompt_text"],
+                    "response_text": log["response_text"]
+                }
+                if log["success"] and "success_details" in log:
+                    row.update({f"success_{k}": v for k, v in log["success_details"].items()})
+                rows.append(row)
+                
+            df = pd.DataFrame(rows)
+            df.to_csv(csv_file, index=False)
+        except ImportError:
+            logger.warning("pandas not available, skipping CSV export")
+            
+        logger.info(f"Saved epoch {epoch} metadata to {output_dir}")
+        print(f"Saved epoch {epoch} error tracking metadata:")
+        print(f"  - Detailed logs: {detailed_file}")
+        print(f"  - Summary: {summary_file}")
+        if os.path.exists(csv_file):
+            print(f"  - CSV: {csv_file}")
+
+
 class SafeResourceManagedExecutor:
     """Combined robust code executor with resource management that reuses sessions"""
 
@@ -63,6 +211,7 @@ class SafeResourceManagedExecutor:
             if not code or not code.strip():
                 return {
                     "error": "Empty code provided",
+                    "error_type": "empty_code",
                     "exit_code": 1,
                     "stdout": "",
                     "stderr": "Empty code provided"
@@ -74,6 +223,7 @@ class SafeResourceManagedExecutor:
                     logger.warning("No session provided, this may cause issues")
                     return {
                         "error": "No sandbox session available",
+                        "error_type": "no_session",
                         "exit_code": 1,
                         "stdout": "",
                         "stderr": "No sandbox session available"
@@ -86,6 +236,7 @@ class SafeResourceManagedExecutor:
                         if not is_safe:
                             return {
                                 "error": "Security violation",
+                                "error_type": "security_violation",
                                 "violations": [
                                     v.description if hasattr(v, 'description') else str(v) 
                                     for v in violations
@@ -102,8 +253,23 @@ class SafeResourceManagedExecutor:
 
                 # Post-execution validation
                 if result.exit_code != 0:
+                    error_type = "execution_failed"
+                    # Categorize error types based on stderr content
+                    stderr_lower = result.stderr.lower()
+                    if "memoryerror" in stderr_lower or "memory" in stderr_lower:
+                        error_type = "memory_error"
+                    elif "timeout" in stderr_lower:
+                        error_type = "timeout_error"
+                    elif "syntaxerror" in stderr_lower:
+                        error_type = "syntax_error"
+                    elif "importerror" in stderr_lower or "modulenotfounderror" in stderr_lower:
+                        error_type = "import_error"
+                    elif "assertionerror" in stderr_lower:
+                        error_type = "assertion_error"
+                    
                     return {
                         "error": "Execution failed",
+                        "error_type": error_type,
                         "stderr": result.stderr,
                         "stdout": result.stdout,
                         "exit_code": result.exit_code
@@ -120,6 +286,7 @@ class SafeResourceManagedExecutor:
         except TimeoutError:
             return {
                 "error": "Execution timeout", 
+                "error_type": "timeout_error",
                 "exit_code": 124,
                 "stdout": "",
                 "stderr": "Execution timeout"
@@ -127,6 +294,7 @@ class SafeResourceManagedExecutor:
         except MemoryError:
             return {
                 "error": "Memory limit exceeded",
+                "error_type": "memory_error",
                 "exit_code": 125,
                 "stdout": "",
                 "stderr": "Memory limit exceeded"
@@ -134,6 +302,7 @@ class SafeResourceManagedExecutor:
         except Exception as e:
             return {
                 "error": f"Unexpected error: {str(e)}",
+                "error_type": "unexpected_error",
                 "exit_code": 126,
                 "stdout": "",
                 "stderr": str(e)
@@ -182,7 +351,27 @@ class CodeEvaluator:
         # Initialize robust execution components
         self.sandbox_session = None
         self.safe_executor = SafeResourceManagedExecutor(max_concurrent=3)
+        
+        # Initialize error tracking
+        self.error_tracker = ErrorTracker()
+        
         self._init_sandbox()
+
+    def start_epoch(self, epoch: int):
+        """Start tracking for a new epoch"""
+        self.error_tracker.start_epoch(epoch)
+        
+    def save_epoch_metadata(self, output_dir: str, epoch: int):
+        """Save metadata for the completed epoch"""
+        self.error_tracker.save_metadata(output_dir, epoch)
+        
+    def get_error_summary(self) -> Dict[str, Any]:
+        """Get current error summary"""
+        return self.error_tracker.get_error_summary()
+    
+    def get_wandb_metrics(self) -> Dict[str, Any]:
+        """Get metrics formatted for wandb logging"""
+        return self.error_tracker.get_wandb_metrics()
 
     def _init_sandbox(self):
         """Initialize SandboxSession with proper error handling."""
@@ -353,6 +542,8 @@ if __name__ == '__main__':
         self,
         predicted_answers: List[str],
         reward_model_info: List[Dict[str, Any]],
+        prompt_ids: Optional[List[str]] = None,
+        prompts: Optional[List[str]] = None,
     ) -> Tuple[List[float], List[int], List[int], List[str], List[str], List[str]]:
         """
         Execute unit tests by combining user code with unit test blocks and parsing unittest output.
@@ -388,6 +579,11 @@ if __name__ == '__main__':
         error_list: List[str] = [""] * batch_size
 
         for idx, rm_info in enumerate(reward_model_info):
+            # Get prompt ID for error tracking
+            prompt_id = prompt_ids[idx] if prompt_ids and idx < len(prompt_ids) else f"batch_{self.error_tracker.batch_counter}_idx_{idx}"
+            prompt_text = prompts[idx] if prompts and idx < len(prompts) else ""
+            response_text = predicted_answers[idx] if idx < len(predicted_answers) else ""
+            
             tests_raw: List[str] = []
             libs: Optional[List[str]] = None
 
@@ -410,6 +606,11 @@ if __name__ == '__main__':
                         tests_raw = [tc]
 
             if not tests_raw:
+                self.error_tracker.log_error(
+                    prompt_id, "no_unit_tests", 
+                    {"message": "No unit tests provided"}, 
+                    prompt_text, response_text
+                )
                 continue
 
             code_match = re.search(
@@ -446,15 +647,39 @@ if __name__ == '__main__':
                     libraries=libs
                 )
                 
-                if result.get("success"):
-                    res = result  # Use the safe executor result
-                    stdout_list[idx] = result["stdout"]
-                    stderr_list[idx] = result["stderr"]
+                # For unit tests, we need to handle the case where execution succeeded
+                # but some tests failed (which results in non-zero exit code)
+                # Check if this is a unittest failure vs actual execution error
+                is_unittest_failure = ("Ran " in result.get("stderr", "") or "FAILED" in result.get("stderr", "") or "PASSED" in result.get("stderr", ""))
+
+                if result.get("success") or is_unittest_failure:
+                    # Continue to parse unittest output for partial scores
+                    stdout_list[idx] = result.get("stdout", "")
+                    stderr_list[idx] = result.get("stderr", "")
+                    
+                    # For unittest failures, we'll parse the output below to get partial scores
+                    if is_unittest_failure:
+                        logger.debug(f"Unittest execution had test failures but will parse partial results for prompt {prompt_id}")
                 else:
-                    # Handle execution error from safe executor
+                    # Handle actual execution error from safe executor
                     stdout_list[idx] = result.get("stdout", "")
                     stderr_list[idx] = result.get("stderr", result.get("error", ""))
                     error_list[idx] = result.get("error", "Unknown error")
+                    
+                    # Log the error with detailed information
+                    self.error_tracker.log_error(
+                        prompt_id, 
+                        result.get("error_type", "execution_error"),
+                        {
+                            "error_message": result.get("error", "Unknown error"),
+                            "exit_code": result.get("exit_code", -1),
+                            "stdout": result.get("stdout", ""),
+                            "stderr": result.get("stderr", ""),
+                            "libraries": libs or []
+                        },
+                        prompt_text, response_text
+                    )
+                    
                     total_tests[idx] = 0
                     tests_passed[idx] = 0
                     code_scores[idx] = 0.0
@@ -497,9 +722,34 @@ if __name__ == '__main__':
 
                 # Calculate score (0.2 points per passing test, matching original function)
                 code_scores[idx] = float(tests_passed[idx]) * 0.2
+                
+                # Log successful execution
+                self.error_tracker.log_success(
+                    prompt_id,
+                    {
+                        "tests_passed": tests_passed[idx],
+                        "total_tests": total_tests[idx],
+                        "code_score": code_scores[idx],
+                        "success_rate": tests_passed[idx] / total_tests[idx] if total_tests[idx] > 0 else 0.0,
+                        "libraries": libs or []
+                    },
+                    prompt_text, response_text
+                )
 
             except Exception as exec_e:
                 error_list[idx] = str(exec_e)
+                
+                # Log the exception
+                self.error_tracker.log_error(
+                    prompt_id, "unexpected_exception",
+                    {
+                        "exception_type": type(exec_e).__name__,
+                        "exception_message": str(exec_e),
+                        "libraries": libs or []
+                    },
+                    prompt_text, response_text
+                )
+                
                 # Fallback: count test methods in the test blocks
                 test_count = 0
                 for block in all_test_blocks:
@@ -507,6 +757,9 @@ if __name__ == '__main__':
                 total_tests[idx] = test_count
                 tests_passed[idx] = 0
                 code_scores[idx] = 0.0
+
+        # Increment batch counter for error tracking
+        self.error_tracker.increment_batch()
 
         return (
             code_scores,
@@ -659,19 +912,25 @@ if __name__ == '__main__':
                 code_stdout,
                 code_stderr,
                 code_error,
-            ) = self.run_unit_tests_combined(extracted_code_answers, ground_truth_infos)
+            ) = self.run_unit_tests_combined(
+                extracted_code_answers, 
+                ground_truth_infos,
+                prompt_ids=[f"prompt_{i}" for i in range(len(extracted_code_answers))],
+                prompts=decoded_pred_answers
+            )
 
             # Create decisions and normalized scores based on test results
             decisions = []
             explanations = []
             normalized_scores = []
-
+            pass_at_1 = []
             for i in range(batch_size):
                 if i in failed_extraction_indices:
                     # Default values for failed code extraction
                     normalized_scores.append(0.0)
                     decisions.append(0)
                     explanations.append("failed code extraction")
+                    pass_at_1.append(0)
                 else:
                     # Normalize score as passed_tests / total_tests
                     if code_total_tests[i] > 0:
@@ -684,10 +943,11 @@ if __name__ == '__main__':
                     explanations.append(
                         f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests \\nstdout: {code_stdout[i]} \\nstderr: {code_stderr[i]} \\nerror: {code_error[i]}"
                     )
+                    pass_at_1.append(1 if normalized_score == 1.0 else 0)
 
             raw_responses = [""] * batch_size
 
-            return normalized_scores, decisions, explanations, raw_responses, {}
+            return normalized_scores, decisions, explanations, raw_responses, {"pass@1": pass_at_1}
         else:
             raise ValueError(
                 "No unit tests available, using simple heuristic evaluation"
@@ -788,6 +1048,8 @@ if __name__ == '__main__':
                             "libs": gt_info.get("libs", []),
                         }
                     ],
+                    prompt_ids=[f"interleaved_prompt_{i}"],
+                    prompts=[pred_answer]
                 )
 
                 passed = code_tests_passed[0] if code_tests_passed else 0
@@ -839,6 +1101,8 @@ if __name__ == '__main__':
             component_rewards["description_scores"].append(description_score)
             component_rewards["code_scores"].append(code_score)
             component_rewards["unit_test_scores"].append(unit_test_score)
+            # if all the unit tests passed, then pass@1 is 1
+            component_rewards["pass@1"].append(1 if code_score == 1.0 else 0)
 
         return total_scores, decisions, explanations, raw_responses, component_rewards
 

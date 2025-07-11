@@ -70,6 +70,47 @@ class RewardManager:
             template_type=template_type,
             autorater_service_url=self.autorater_base_url,
         )
+        
+        # Error tracking configuration
+        self.enable_error_tracking = self.config.get("enable_error_tracking", True)
+        self.error_tracking_output_dir = self.config.get("error_tracking_output_dir", "./error_tracking_logs")
+
+    def start_epoch(self, epoch: int):
+        """Start error tracking for a new epoch"""
+        if self.enable_error_tracking:
+            print(f"Starting error tracking for epoch {epoch}")
+            self.code_evaluator.start_epoch(epoch)
+            
+    def save_epoch_metadata(self, epoch: int, output_dir: Optional[str] = None, log_to_wandb: bool = True):
+        """Save error tracking metadata for the completed epoch and log to wandb"""
+        if self.enable_error_tracking:
+            save_dir = output_dir or self.error_tracking_output_dir
+            print(f"Saving error tracking metadata for epoch {epoch} to {save_dir}")
+            self.code_evaluator.save_epoch_metadata(save_dir, epoch)
+            
+            # Print summary to console
+            summary = self.code_evaluator.get_error_summary()
+            print(f"Epoch {epoch} Error Summary:")
+            print(f"  Total prompts: {summary['total_prompts']}")
+            print(f"  Successful: {summary['successful_prompts']} ({summary['success_rate']:.1%})")
+            print(f"  Failed: {summary['failed_prompts']}")
+            print(f"  Error types: {summary['error_counts']}")
+            print(f"  Duration: {summary['epoch_duration']:.1f}s")
+            
+            # Log to wandb if enabled
+            if log_to_wandb:
+                try:
+                    import wandb
+                    if wandb.run is not None:
+                        wandb_metrics = self.code_evaluator.get_wandb_metrics()
+                        wandb.log(wandb_metrics)
+                        print(f"  Logged {len(wandb_metrics)} error tracking metrics to wandb")
+                    else:
+                        print("  wandb not initialized, skipping wandb logging")
+                except ImportError:
+                    print("  wandb not available, skipping wandb logging")
+                except Exception as e:
+                    print(f"  Error logging to wandb: {e}")
 
     def compute_rewards(
         self,

@@ -1057,7 +1057,10 @@ class RayPPOTrainer:
         last_val_metrics = None
 
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            # Start tracking
+            self.reward_manager.start_epoch(epoch + 1)
+
+            for batch_idx, batch_dict in enumerate(self.train_dataloader):
                 metrics = {}
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
@@ -1319,3 +1322,5 @@ class RayPPOTrainer:
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
+            
+            self.reward_manager.save_epoch_metadata(epoch + 1, log_to_wandb=True)
