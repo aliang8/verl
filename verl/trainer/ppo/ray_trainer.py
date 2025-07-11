@@ -59,6 +59,7 @@ from verl.utils.debug.performance import _timer
 from verl.utils.metric import (
     reduce_metrics,
 )
+from verl.utils.metric.utils import compute_ttft_ratio
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -1285,6 +1286,23 @@ class RayPPOTrainer:
                         "training/epoch": epoch,
                     }
                 )
+                
+                # Compute TTFT ratio metrics (tokens to first answer / total response length)
+                if "responses" in batch.batch:
+                    try:
+                        # Decode the responses to text
+                        response_texts = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+                        
+                        # Compute TTFT ratio metrics
+                        ttft_metrics = compute_ttft_ratio(response_texts)
+                        
+                        # Add prefix to all TTFT metrics
+                        ttft_prefixed_metrics = {f"training/{k}": v for k, v in ttft_metrics.items()}
+                        metrics.update(ttft_prefixed_metrics)
+                    except Exception as e:
+                        # Log error but don't fail training
+                        print(f"Warning: Failed to compute TTFT metrics: {e}")
+                        
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))

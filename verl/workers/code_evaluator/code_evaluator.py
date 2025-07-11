@@ -194,7 +194,7 @@ class CodeEvaluator:
             lang="python",
             execution_timeout=10,
             verbose=False,
-            runtime_configs={"cpu_count": 10, "mem_limit": "256m"},
+            runtime_configs={"cpu_count": 10, "mem_limit": "1024m"},
         )
 
         try:
