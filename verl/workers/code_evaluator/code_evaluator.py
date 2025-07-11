@@ -25,6 +25,7 @@ import queue
 from contextlib import contextmanager
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
+import ast 
 
 from verl.workers.autorater.autorater_utils import (
     extract_solution,
@@ -592,6 +593,8 @@ if __name__ == '__main__':
                 raw_libs = rm_info.get("libs")
                 if isinstance(raw_libs, list):
                     libs = raw_libs
+                elif isinstance(raw_libs, str):
+                    libs = ast.literal_eval(raw_libs)
                 elif raw_libs is not None:
                     libs = [str(raw_libs)]
 
