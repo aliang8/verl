@@ -924,6 +924,7 @@ if __name__ == '__main__':
             explanations = []
             normalized_scores = []
             pass_at_1 = []
+            
             for i in range(batch_size):
                 if i in failed_extraction_indices:
                     # Default values for failed code extraction
@@ -947,7 +948,7 @@ if __name__ == '__main__':
 
             raw_responses = [""] * batch_size
 
-            return normalized_scores, decisions, explanations, raw_responses, {"pass@1": pass_at_1}
+            return normalized_scores, decisions, explanations, raw_responses, {"pass@1": pass_at_1, "code_scores": normalized_scores}
         else:
             raise ValueError(
                 "No unit tests available, using simple heuristic evaluation"
