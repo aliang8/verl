@@ -258,7 +258,7 @@ class RewardManager:
         autorater_decisions = [0] * batch_size  # 0 = failed/no evaluation
         autorater_explanations = ["No evaluation - insufficient answer count (<3)"] * batch_size
         autorater_raw_responses = ["No evaluation - answer count <3"] * batch_size
-        component_rewards_all = [{k: 0.0 for k in ["description_scores", "code_scores", "unit_test_scores"]} for _ in range(batch_size)]
+        component_rewards_all = [{k: 0.0 for k in ["description_scores", "code_scores", "unit_test_scores", "pass@1"]} for _ in range(batch_size)]
 
         # --- Evaluate only interleaved samples using CodeEvaluator ---
         if interleaved_indices:
