@@ -166,7 +166,7 @@ class RewardManager:
             
             # Determine evaluation type and call appropriate method
             if self._should_use_code_evaluation(ground_truth_infos):
-                autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, _, extracted_pred_answers, extracted_gt_answers = self._evaluate_code(
+                autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, component_rewards, extracted_pred_answers, extracted_gt_answers = self._evaluate_code(
                     data, ground_truth_infos, batch_size
                 )
             else:
@@ -208,6 +208,8 @@ class RewardManager:
             reward_extra_info["autorater_raw_responses"].append(autorater_raw_responses[i])
             reward_extra_info["format_scores"].append(format_scores[i])
             reward_extra_info["final_scores"].append(final_scores[i])
+            for k, v in component_rewards.items():
+                reward_extra_info[k].append(v[i])
 
         if return_dict:
             return reward_tensor, reward_extra_info
@@ -381,7 +383,7 @@ class RewardManager:
         data: DataProto, 
         ground_truth_infos: List[Dict[str, Any]], 
         batch_size: int
-    ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, float], List[str], List[str]]:
+    ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]], List[str], List[str]]:
         """Evaluate code responses using CodeEvaluator."""
         logger.info("Using CodeEvaluator for evaluation")
         
