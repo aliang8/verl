@@ -32,6 +32,7 @@ from verl.workers.autorater.autorater_utils import (
     format_code_outline_prompt,
 )
 from verl.utils.autorater_client import call_autorater_service
+from verl.utils.debug.performance import _timer  # Add timing support
 
 # Import SandboxSession for code execution
 try:
@@ -384,7 +385,7 @@ class CodeEvaluator:
             lang="python",
             execution_timeout=10,
             verbose=False,
-            runtime_configs={"cpu_count": 10, "mem_limit": "1024m"},
+            runtime_configs={"cpu_count": 50, "mem_limit": "4096m"},
         )
 
         try:
@@ -545,6 +546,7 @@ if __name__ == '__main__':
         reward_model_info: List[Dict[str, Any]],
         prompt_ids: Optional[List[str]] = None,
         prompts: Optional[List[str]] = None,
+        timing_raw: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[float], List[int], List[int], List[str], List[str], List[str]]:
         """
         Execute unit tests by combining user code with unit test blocks and parsing unittest output.
@@ -553,10 +555,16 @@ if __name__ == '__main__':
         Args:
             predicted_answers: List of predicted code answers
             reward_model_info: List of reward model info containing unit tests
+            prompt_ids: List of prompt IDs for error tracking
+            prompts: List of prompts for error tracking
+            timing_raw: Dictionary to store timing information
 
         Returns:
             Tuple of (code_scores, tests_passed, total_tests, stdout_list, stderr_list, error_list)
         """
+        if timing_raw is None:
+            timing_raw = {}
+            
         batch_size = len(predicted_answers)
 
         # Ensure sandbox session exists
@@ -564,7 +572,8 @@ if __name__ == '__main__':
             logger.info(
                 "SandboxSession not available, attempting to initialize on demand"
             )
-            self._init_sandbox()
+            with _timer("init_sandbox", timing_raw):
+                self._init_sandbox()
 
         if self.sandbox_session is None:
             logger.warning("No SandboxSession available, returning zero scores")
@@ -579,58 +588,62 @@ if __name__ == '__main__':
         stderr_list: List[str] = [""] * batch_size
         error_list: List[str] = [""] * batch_size
 
-        for idx, rm_info in enumerate(reward_model_info):
-            # Get prompt ID for error tracking
-            prompt_id = prompt_ids[idx] if prompt_ids and idx < len(prompt_ids) else f"batch_{self.error_tracker.batch_counter}_idx_{idx}"
-            prompt_text = prompts[idx] if prompts and idx < len(prompts) else ""
-            response_text = predicted_answers[idx] if idx < len(predicted_answers) else ""
-            
-            tests_raw: List[str] = []
-            libs: Optional[List[str]] = None
+        with _timer("unit_tests_execution", timing_raw):
+            for idx, rm_info in enumerate(reward_model_info):
+                # Get prompt ID for error tracking
+                prompt_id = prompt_ids[idx] if prompt_ids and idx < len(prompt_ids) else f"batch_{self.error_tracker.batch_counter}_idx_{idx}"
+                prompt_text = prompts[idx] if prompts and idx < len(prompts) else ""
+                response_text = predicted_answers[idx] if idx < len(predicted_answers) else ""
+                
+                tests_raw: List[str] = []
+                libs: Optional[List[str]] = None
 
-            if isinstance(rm_info, dict):
-                # collect libs for this sample
-                raw_libs = rm_info.get("libs")
-                if isinstance(raw_libs, list):
-                    libs = raw_libs
-                elif isinstance(raw_libs, str):
-                    libs = ast.literal_eval(raw_libs)
-                elif raw_libs is not None:
-                    libs = [str(raw_libs)]
+                with _timer("parse_test_info", timing_raw):
+                    if isinstance(rm_info, dict):
+                        # collect libs for this sample
+                        raw_libs = rm_info.get("libs")
+                        if isinstance(raw_libs, list):
+                            libs = raw_libs
+                        elif isinstance(raw_libs, str):
+                            libs = ast.literal_eval(raw_libs)
+                        elif raw_libs is not None:
+                            libs = [str(raw_libs)]
 
-                # gather tests definitions
-                if isinstance(rm_info.get("unit_tests"), list):
-                    tests_raw = rm_info["unit_tests"]
-                elif isinstance(rm_info.get("tests"), list):
-                    tests_raw = rm_info["tests"]
-                else:
-                    tc = rm_info.get("unit_tests") or rm_info.get("tests")
-                    if tc:
-                        tests_raw = [tc]
+                        # gather tests definitions
+                        if isinstance(rm_info.get("unit_tests"), list):
+                            tests_raw = rm_info["unit_tests"]
+                        elif isinstance(rm_info.get("tests"), list):
+                            tests_raw = rm_info["tests"]
+                        else:
+                            tc = rm_info.get("unit_tests") or rm_info.get("tests")
+                            if tc:
+                                tests_raw = [tc]
 
-            if not tests_raw:
-                self.error_tracker.log_error(
-                    prompt_id, "no_unit_tests", 
-                    {"message": "No unit tests provided"}, 
-                    prompt_text, response_text
-                )
-                continue
+                if not tests_raw:
+                    self.error_tracker.log_error(
+                        prompt_id, "no_unit_tests", 
+                        {"message": "No unit tests provided"}, 
+                        prompt_text, response_text
+                    )
+                    continue
 
-            code_match = re.search(
-                r"```[\w]*\n(.*?)```", predicted_answers[idx], re.DOTALL
-            )
-            pred_code_block = (
-                code_match.group(1) if code_match else predicted_answers[idx]
-            )
+                with _timer("extract_code", timing_raw):
+                    code_match = re.search(
+                        r"```[\w]*\n(.*?)```", predicted_answers[idx], re.DOTALL
+                    )
+                    pred_code_block = (
+                        code_match.group(1) if code_match else predicted_answers[idx]
+                    )
 
-            # Combine user code with all unit test blocks directly
-            all_test_blocks = []
-            for snippet in tests_raw:
-                normalized_snippet = snippet.replace("\\n", "\n")
-                all_test_blocks.append(normalized_snippet)
+                # Combine user code with all unit test blocks directly
+                with _timer("prepare_combined_test", timing_raw):
+                    all_test_blocks = []
+                    for snippet in tests_raw:
+                        normalized_snippet = snippet.replace("\\n", "\n")
+                        all_test_blocks.append(normalized_snippet)
 
-            # Create combined test file with user code + all test blocks
-            combined_test = f"""import unittest
+                    # Create combined test file with user code + all test blocks
+                    combined_test = f"""import unittest
 import pandas as pd
 import numpy as np
 
@@ -642,124 +655,126 @@ if __name__ == '__main__':
     unittest.main(verbosity=2)
 """
 
-            try:
-                # Use the safe executor with the existing session
-                result = self.safe_executor.execute_safely(
-                    combined_test, 
-                    session=sess, 
-                    libraries=libs
-                )
-                
-                # For unit tests, we need to handle the case where execution succeeded
-                # but some tests failed (which results in non-zero exit code)
-                # Check if this is a unittest failure vs actual execution error
-                is_unittest_failure = ("Ran " in result.get("stderr", "") or "FAILED" in result.get("stderr", "") or "PASSED" in result.get("stderr", ""))
+                try:
+                    # Use the safe executor with the existing session
+                    with _timer("execute_combined_test", timing_raw):
+                        result = self.safe_executor.execute_safely(
+                            combined_test, 
+                            session=sess, 
+                            libraries=libs
+                        )
+                    
+                    # For unit tests, we need to handle the case where execution succeeded
+                    # but some tests failed (which results in non-zero exit code)
+                    # Check if this is a unittest failure vs actual execution error
+                    is_unittest_failure = ("Ran " in result.get("stderr", "") or "FAILED" in result.get("stderr", "") or "PASSED" in result.get("stderr", ""))
 
-                if result.get("success") or is_unittest_failure:
-                    # Continue to parse unittest output for partial scores
-                    stdout_list[idx] = result.get("stdout", "")
-                    stderr_list[idx] = result.get("stderr", "")
+                    if result.get("success") or is_unittest_failure:
+                        # Continue to parse unittest output for partial scores
+                        stdout_list[idx] = result.get("stdout", "")
+                        stderr_list[idx] = result.get("stderr", "")
+                        
+                        # For unittest failures, we'll parse the output below to get partial scores
+                        if is_unittest_failure:
+                            logger.debug(f"Unittest execution had test failures but will parse partial results for prompt {prompt_id}")
+                    else:
+                        # Handle actual execution error from safe executor
+                        stdout_list[idx] = result.get("stdout", "")
+                        stderr_list[idx] = result.get("stderr", result.get("error", ""))
+                        error_list[idx] = result.get("error", "Unknown error")
+                        
+                        # Log the error with detailed information
+                        self.error_tracker.log_error(
+                            prompt_id, 
+                            result.get("error_type", "execution_error"),
+                            {
+                                "error_message": result.get("error", "Unknown error"),
+                                "exit_code": result.get("exit_code", -1),
+                                "stdout": result.get("stdout", ""),
+                                "stderr": result.get("stderr", ""),
+                                "libraries": libs or []
+                            },
+                            prompt_text, response_text
+                        )
+                        
+                        total_tests[idx] = 0
+                        tests_passed[idx] = 0
+                        code_scores[idx] = 0.0
+                        continue
+
+                    # Parse unittest output to count tests
+                    with _timer("parse_unittest_output", timing_raw):
+                        output = result["stdout"] + result["stderr"]
+
+                        # Look for patterns like "Ran X tests in Y.YYYs"
+                        ran_match = re.search(r"Ran (\d+) tests? in", output)
+                        if ran_match:
+                            total_tests[idx] = int(ran_match.group(1))
+                        else:
+                            # Fallback: count test methods in the test blocks
+                            test_count = 0
+                            for block in all_test_blocks:
+                                test_count += len(re.findall(r"def\s+test_\w+", block))
+                            total_tests[idx] = test_count
+
+                        # Count failures and errors
+                        failures = 0
+                        errors = 0
+
+                        # Look for "FAILED (failures=X, errors=Y)" or "FAILED (failures=X)" or "FAILED (errors=Y)"
+                        failed_match = re.search(
+                            r"FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)", output
+                        )
+                        if failed_match:
+                            if failed_match.group(1):
+                                failures = int(failed_match.group(1))
+                            if failed_match.group(2):
+                                errors = int(failed_match.group(2))
+
+                        # Calculate passed tests
+                        tests_passed[idx] = total_tests[idx] - failures - errors
+
+                        # If exit code is 0, all tests passed
+                        if result["exit_code"] == 0:
+                            tests_passed[idx] = total_tests[idx]
+
+                        # Calculate score (0.2 points per passing test, matching original function)
+                        code_scores[idx] = float(tests_passed[idx]) * 0.2
+                        
+                        # Log successful execution
+                        self.error_tracker.log_success(
+                            prompt_id,
+                            {
+                                "tests_passed": tests_passed[idx],
+                                "total_tests": total_tests[idx],
+                                "code_score": code_scores[idx],
+                                "success_rate": tests_passed[idx] / total_tests[idx] if total_tests[idx] > 0 else 0.0,
+                                "libraries": libs or []
+                            },
+                            prompt_text, response_text
+                        )
+
+                except Exception as exec_e:
+                    error_list[idx] = str(exec_e)
                     
-                    # For unittest failures, we'll parse the output below to get partial scores
-                    if is_unittest_failure:
-                        logger.debug(f"Unittest execution had test failures but will parse partial results for prompt {prompt_id}")
-                else:
-                    # Handle actual execution error from safe executor
-                    stdout_list[idx] = result.get("stdout", "")
-                    stderr_list[idx] = result.get("stderr", result.get("error", ""))
-                    error_list[idx] = result.get("error", "Unknown error")
-                    
-                    # Log the error with detailed information
+                    # Log the exception
                     self.error_tracker.log_error(
-                        prompt_id, 
-                        result.get("error_type", "execution_error"),
+                        prompt_id, "unexpected_exception",
                         {
-                            "error_message": result.get("error", "Unknown error"),
-                            "exit_code": result.get("exit_code", -1),
-                            "stdout": result.get("stdout", ""),
-                            "stderr": result.get("stderr", ""),
+                            "exception_type": type(exec_e).__name__,
+                            "exception_message": str(exec_e),
                             "libraries": libs or []
                         },
                         prompt_text, response_text
                     )
                     
-                    total_tests[idx] = 0
-                    tests_passed[idx] = 0
-                    code_scores[idx] = 0.0
-                    continue
-
-                # Parse unittest output to count tests
-                output = result["stdout"] + result["stderr"]
-
-                # Look for patterns like "Ran X tests in Y.YYYs"
-                ran_match = re.search(r"Ran (\d+) tests? in", output)
-                if ran_match:
-                    total_tests[idx] = int(ran_match.group(1))
-                else:
                     # Fallback: count test methods in the test blocks
                     test_count = 0
                     for block in all_test_blocks:
                         test_count += len(re.findall(r"def\s+test_\w+", block))
                     total_tests[idx] = test_count
-
-                # Count failures and errors
-                failures = 0
-                errors = 0
-
-                # Look for "FAILED (failures=X, errors=Y)" or "FAILED (failures=X)" or "FAILED (errors=Y)"
-                failed_match = re.search(
-                    r"FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)", output
-                )
-                if failed_match:
-                    if failed_match.group(1):
-                        failures = int(failed_match.group(1))
-                    if failed_match.group(2):
-                        errors = int(failed_match.group(2))
-
-                # Calculate passed tests
-                tests_passed[idx] = total_tests[idx] - failures - errors
-
-                # If exit code is 0, all tests passed
-                if result["exit_code"] == 0:
-                    tests_passed[idx] = total_tests[idx]
-
-                # Calculate score (0.2 points per passing test, matching original function)
-                code_scores[idx] = float(tests_passed[idx]) * 0.2
-                
-                # Log successful execution
-                self.error_tracker.log_success(
-                    prompt_id,
-                    {
-                        "tests_passed": tests_passed[idx],
-                        "total_tests": total_tests[idx],
-                        "code_score": code_scores[idx],
-                        "success_rate": tests_passed[idx] / total_tests[idx] if total_tests[idx] > 0 else 0.0,
-                        "libraries": libs or []
-                    },
-                    prompt_text, response_text
-                )
-
-            except Exception as exec_e:
-                error_list[idx] = str(exec_e)
-                
-                # Log the exception
-                self.error_tracker.log_error(
-                    prompt_id, "unexpected_exception",
-                    {
-                        "exception_type": type(exec_e).__name__,
-                        "exception_message": str(exec_e),
-                        "libraries": libs or []
-                    },
-                    prompt_text, response_text
-                )
-                
-                # Fallback: count test methods in the test blocks
-                test_count = 0
-                for block in all_test_blocks:
-                    test_count += len(re.findall(r"def\s+test_\w+", block))
-                total_tests[idx] = test_count
-                tests_passed[idx] = 0
-                code_scores[idx] = 0.0
+                    tests_passed[idx] = 0
+                    code_scores[idx] = 0.0
 
         # Increment batch counter for error tracking
         self.error_tracker.increment_batch()
@@ -779,6 +794,7 @@ if __name__ == '__main__':
         original_prompts: List[str],
         ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
+        timing_raw: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]]]:
         """
         Evaluate code responses using either standard or interleaved reasoning.
@@ -788,10 +804,14 @@ if __name__ == '__main__':
             original_prompts: List of original prompts
             ground_truth_infos: List of ground truth information dictionaries
             batch_size: Number of samples in the batch
+            timing_raw: Dictionary to store timing information
 
         Returns:
             Tuple of (scores, decisions, explanations, raw_responses, component_rewards)
         """
+        if timing_raw is None:
+            timing_raw = {}
+            
         # Check if we're doing interleaved reasoning
         is_interleaved = self.enable_interleaved_reasoning or (
             self.template_type and "interleave" in self.template_type.lower()
@@ -799,14 +819,16 @@ if __name__ == '__main__':
 
         if is_interleaved:
             logger.info("Using interleaved reasoning evaluation")
-            return self._evaluate_interleaved_reasoning(
-                decoded_pred_answers, original_prompts, ground_truth_infos, batch_size
-            )
+            with _timer("interleaved_reasoning_evaluation", timing_raw):
+                return self._evaluate_interleaved_reasoning(
+                    decoded_pred_answers, original_prompts, ground_truth_infos, batch_size, timing_raw
+                )
         else:
             logger.info("Using standard code evaluation")
-            return self._evaluate_code(
-                decoded_pred_answers, ground_truth_infos, batch_size
-            )
+            with _timer("standard_code_evaluation", timing_raw):
+                return self._evaluate_code(
+                    decoded_pred_answers, ground_truth_infos, batch_size, timing_raw
+                )
 
     def extract_code_snippet(self, predicted_answer: str) -> str:
         """Extract code snippet from predicted answer."""
@@ -860,6 +882,7 @@ if __name__ == '__main__':
         decoded_pred_answers: List[str],
         ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
+        timing_raw: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]]]:
         """
         Evaluate standard code responses using sandbox execution.
@@ -868,10 +891,13 @@ if __name__ == '__main__':
             decoded_pred_answers: List of decoded response strings
             ground_truth_infos: List of ground truth information dictionaries
             batch_size: Number of samples in the batch
+            timing_raw: Dictionary to store timing information
 
         Returns:
             Tuple of (scores, decisions, explanations, raw_responses, component_rewards)
         """
+        if timing_raw is None:
+            timing_raw = {}
 
         # Check if any unit tests are present
         def _has_tests(info: Dict[str, Any]):
@@ -888,68 +914,72 @@ if __name__ == '__main__':
         if use_code_evaluator:
             # Extract code snippets from predicted answers first
             logger.info("Extracting code snippets from predicted answers")
-            extracted_code_answers = []
-            failed_extraction_indices = []
+            with _timer("extract_code_snippets", timing_raw):
+                extracted_code_answers = []
+                failed_extraction_indices = []
 
-            for i, pred_answer in enumerate(decoded_pred_answers):
-                extracted_code = self.extract_code_snippet(pred_answer)
-                if not extracted_code.strip():
-                    failed_extraction_indices.append(i)
-                    extracted_code_answers.append(
-                        ""
-                    )  # Use empty string for failed extractions
-                else:
-                    extracted_code_answers.append(extracted_code)
+                for i, pred_answer in enumerate(decoded_pred_answers):
+                    extracted_code = self.extract_code_snippet(pred_answer)
+                    if not extracted_code.strip():
+                        failed_extraction_indices.append(i)
+                        extracted_code_answers.append(
+                            ""
+                        )  # Use empty string for failed extractions
+                    else:
+                        extracted_code_answers.append(extracted_code)
 
-            if failed_extraction_indices:
-                logger.warning(
-                    f"Failed to extract code from {len(failed_extraction_indices)} samples: {failed_extraction_indices}"
-                )
+                if failed_extraction_indices:
+                    logger.warning(
+                        f"Failed to extract code from {len(failed_extraction_indices)} samples: {failed_extraction_indices}"
+                    )
 
             # Use local unit test execution
             logger.info("Using local unit test execution for code evaluation")
-            (
-                code_scores,
-                code_tests_passed,
-                code_total_tests,
-                code_stdout,
-                code_stderr,
-                code_error,
-            ) = self.run_unit_tests_combined(
-                extracted_code_answers, 
-                ground_truth_infos,
-                prompt_ids=[f"prompt_{i}" for i in range(len(extracted_code_answers))],
-                prompts=decoded_pred_answers
-            )
+            with _timer("run_unit_tests", timing_raw):
+                (
+                    code_scores,
+                    code_tests_passed,
+                    code_total_tests,
+                    code_stdout,
+                    code_stderr,
+                    code_error,
+                ) = self.run_unit_tests_combined(
+                    extracted_code_answers, 
+                    ground_truth_infos,
+                    prompt_ids=[f"prompt_{i}" for i in range(len(extracted_code_answers))],
+                    prompts=decoded_pred_answers,
+                    timing_raw=timing_raw,
+                )
 
             # Create decisions and normalized scores based on test results
-            decisions = []
-            explanations = []
-            normalized_scores = []
-            pass_at_1 = []
-            
-            for i in range(batch_size):
-                if i in failed_extraction_indices:
-                    # Default values for failed code extraction
-                    normalized_scores.append(0.0)
-                    decisions.append(0)
-                    explanations.append("failed code extraction")
-                    pass_at_1.append(0)
-                else:
-                    # Normalize score as passed_tests / total_tests
-                    if code_total_tests[i] > 0:
-                        normalized_score = code_tests_passed[i] / code_total_tests[i]
+            with _timer("create_decisions", timing_raw):
+                decisions = []
+                explanations = []
+                normalized_scores = []
+                pass_at_1 = []
+                
+                for i in range(batch_size):
+                    if i in failed_extraction_indices:
+                        # Default values for failed code extraction
+                        normalized_scores.append(0.0)
+                        decisions.append(0)
+                        explanations.append("failed code extraction")
+                        pass_at_1.append(0)
                     else:
-                        normalized_score = 0.0
+                        # Normalize score as passed_tests / total_tests
+                        if code_total_tests[i] > 0:
+                            normalized_score = code_tests_passed[i] / code_total_tests[i]
+                        else:
+                            normalized_score = 0.0
 
-                    normalized_scores.append(normalized_score)
-                    decisions.append(1 if normalized_score > 0 else 0)
-                    explanations.append(
-                        f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests \\nstdout: {code_stdout[i]} \\nstderr: {code_stderr[i]} \\nerror: {code_error[i]}"
-                    )
-                    pass_at_1.append(1 if normalized_score == 1.0 else 0)
+                        normalized_scores.append(normalized_score)
+                        decisions.append(1 if normalized_score > 0 else 0)
+                        explanations.append(
+                            f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests \\nstdout: {code_stdout[i]} \\nstderr: {code_stderr[i]} \\nerror: {code_error[i]}"
+                        )
+                        pass_at_1.append(1 if normalized_score == 1.0 else 0)
 
-            raw_responses = [""] * batch_size
+                raw_responses = [""] * batch_size
 
             return normalized_scores, decisions, explanations, raw_responses, {"pass@1": pass_at_1, "code_scores": normalized_scores}
         else:
@@ -963,6 +993,7 @@ if __name__ == '__main__':
         original_prompts: List[str],
         ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
+        timing_raw: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]]]:
         """
         Evaluate interleaved reasoning responses with multiple <answer> tags.
@@ -977,156 +1008,167 @@ if __name__ == '__main__':
             original_prompts: List of original prompts
             ground_truth_infos: List of ground truth information dictionaries
             batch_size: Number of samples in the batch
+            timing_raw: Dictionary to store timing information
 
         Returns:
             Tuple of (scores, decisions, explanations, raw_responses)
         """
+        if timing_raw is None:
+            timing_raw = {}
+            
         total_scores = []
         decisions = []
         explanations = []
         raw_responses = []
 
         # --- Batch-evaluate all descriptions first ---
-        description_scores_map = self._evaluate_all_descriptions(
-            decoded_pred_answers, original_prompts
-        )
+        with _timer("evaluate_descriptions", timing_raw):
+            description_scores_map = self._evaluate_all_descriptions(
+                decoded_pred_answers, original_prompts, timing_raw
+            )
 
         component_rewards = collections.defaultdict(list)
 
-        for i, (pred_answer, gt_info) in enumerate(
-            zip(decoded_pred_answers, ground_truth_infos)
-        ):
-            # Extract all answers from the interleaved response using extract_all=True
-            all_answers = extract_solution(pred_answer, extract_all=True)
-
-            # The format is guaranteed by the caller (RewardManager), which filters
-            # for responses with >= 3 answers. We can assert this.
-            assert all_answers is not None, "all_answers should not be None"
-            if isinstance(all_answers, list):
-                answer_parts = [part.strip() for part in all_answers]
-            else:
-                # This path should ideally not be taken if extract_solution is consistent
-                answer_parts = [part.strip() for part in str(all_answers).split(",")]
-
-            assert (
-                len(answer_parts) >= 3
-            ), f"Expected >=3 answer parts, but got {len(answer_parts)}"
-
-            # Initialize component scores
-            description_score = description_scores_map.get(i, 0.0)
-            code_score = 0.0
-            unit_test_score = 0.0
-            component_explanations = []
-
-            # Evaluate first answer (description/explanation)
-            description_score = description_scores_map.get(i, 0.0)
-            component_explanations.append(f"Description Score: {description_score:.2f}")
-
-            # Evaluate second answer (code implementation)
-            code_text = answer_parts[1]
-            # Extract clean code snippet from the code answer
-            extracted_code = self.extract_code_snippet(code_text)
-
-            # Check if code extraction failed
-            if extracted_code is None:
-                code_score = 0.0
-                component_explanations.append("Code: failed code extraction")
-            # Check if we have unit tests available for code evaluation
-            elif isinstance(gt_info, dict) and (
-                gt_info.get("unit_tests") or gt_info.get("tests")
+        with _timer("evaluate_interleaved_components", timing_raw):
+            for i, (pred_answer, gt_info) in enumerate(
+                zip(decoded_pred_answers, ground_truth_infos)
             ):
-                (
-                    code_scores_list,
-                    code_tests_passed,
-                    code_total_tests,
-                    _,
-                    _,
-                    _,
-                ) = self.run_unit_tests_combined(
-                    [extracted_code],
-                    [
-                        {
-                            "ground_truth": "code",
-                            "unit_tests": gt_info.get("unit_tests")
-                            or gt_info.get("tests"),
-                            "libs": gt_info.get("libs", []),
-                        }
-                    ],
-                    prompt_ids=[f"interleaved_prompt_{i}"],
-                    prompts=[pred_answer]
-                )
+                # Extract all answers from the interleaved response using extract_all=True
+                all_answers = extract_solution(pred_answer, extract_all=True)
 
-                passed = code_tests_passed[0] if code_tests_passed else 0
-                total = code_total_tests[0] if code_total_tests else 0
+                # The format is guaranteed by the caller (RewardManager), which filters
+                # for responses with >= 3 answers. We can assert this.
+                assert all_answers is not None, "all_answers should not be None"
+                if isinstance(all_answers, list):
+                    answer_parts = [part.strip() for part in all_answers]
+                else:
+                    # This path should ideally not be taken if extract_solution is consistent
+                    answer_parts = [part.strip() for part in str(all_answers).split(",")]
 
-                # Normalize score as passed_tests / total_tests
-                if total > 0:
-                    code_score = passed / total
+                assert (
+                    len(answer_parts) >= 3
+                ), f"Expected >=3 answer parts, but got {len(answer_parts)}"
+
+                # Initialize component scores
+                description_score = description_scores_map.get(i, 0.0)
+                code_score = 0.0
+                unit_test_score = 0.0
+                component_explanations = []
+
+                # Evaluate first answer (description/explanation)
+                description_score = description_scores_map.get(i, 0.0)
+                component_explanations.append(f"Description Score: {description_score:.2f}")
+
+                # Evaluate second answer (code implementation)
+                code_text = answer_parts[1]
+                # Extract clean code snippet from the code answer
+                extracted_code = self.extract_code_snippet(code_text)
+
+                # Check if code extraction failed
+                if extracted_code is None:
+                    code_score = 0.0
+                    component_explanations.append("Code: failed code extraction")
+                # Check if we have unit tests available for code evaluation
+                elif isinstance(gt_info, dict) and (
+                    gt_info.get("unit_tests") or gt_info.get("tests")
+                ):
+                    (
+                        code_scores_list,
+                        code_tests_passed,
+                        code_total_tests,
+                        _,
+                        _,
+                        _,
+                    ) = self.run_unit_tests_combined(
+                        [extracted_code],
+                        [
+                            {
+                                "ground_truth": "code",
+                                "unit_tests": gt_info.get("unit_tests")
+                                or gt_info.get("tests"),
+                                "libs": gt_info.get("libs", []),
+                            }
+                        ],
+                        prompt_ids=[f"interleaved_prompt_{i}"],
+                        prompts=[pred_answer],
+                        timing_raw=timing_raw,
+                    )
+
+                    passed = code_tests_passed[0] if code_tests_passed else 0
+                    total = code_total_tests[0] if code_total_tests else 0
+
+                    # Normalize score as passed_tests / total_tests
+                    if total > 0:
+                        code_score = passed / total
+                    else:
+                        code_score = 0.0
+
+                    component_explanations.append(f"Code: passed {passed}/{total} tests")
                 else:
                     code_score = 0.0
+                    component_explanations.append("Code: No gt unit tests provided")
 
-                component_explanations.append(f"Code: passed {passed}/{total} tests")
-            else:
-                code_score = 0.0
-                component_explanations.append("Code: No gt unit tests provided")
+                # Evaluate third answer (self-generated unit tests) - optional
+                unit_test_text = answer_parts[2]
+                # Check if unit tests look reasonable
+                if (
+                    "assert" in unit_test_text
+                    or "test" in unit_test_text.lower()
+                    or "unittest" in unit_test_text.lower()
+                    or "def test_" in unit_test_text
+                ):
+                    unit_test_score = 1.0
+                    component_explanations.append(
+                        "Unit Tests: Self-generated tests provided"
+                    )
+                else:
+                    unit_test_score = 0.0
+                    component_explanations.append("Unit Tests: No unit tests found")
 
-            # Evaluate third answer (self-generated unit tests) - optional
-            unit_test_text = answer_parts[2]
-            # Check if unit tests look reasonable
-            if (
-                "assert" in unit_test_text
-                or "test" in unit_test_text.lower()
-                or "unittest" in unit_test_text.lower()
-                or "def test_" in unit_test_text
-            ):
-                unit_test_score = 1.0
-                component_explanations.append(
-                    "Unit Tests: Self-generated tests provided"
+                # Combine scores with weights
+                weights = self.interleaved_reward_weights
+                total_score = (
+                    description_score * weights["description"]
+                    + code_score * weights["code"]
+                    + unit_test_score * weights["unit_tests"]
                 )
-            else:
-                unit_test_score = 0.0
-                component_explanations.append("Unit Tests: No unit tests found")
 
-            # Combine scores with weights
-            weights = self.interleaved_reward_weights
-            total_score = (
-                description_score * weights["description"]
-                + code_score * weights["code"]
-                + unit_test_score * weights["unit_tests"]
-            )
+                total_scores.append(total_score)
+                decisions.append(1 if total_score > 1.0 else 0)  # Threshold for success
+                explanations.append(" | ".join(component_explanations))
+                raw_responses.append(
+                    f"Interleaved evaluation: {len(answer_parts)} answers found"
+                )
 
-            total_scores.append(total_score)
-            decisions.append(1 if total_score > 1.0 else 0)  # Threshold for success
-            explanations.append(" | ".join(component_explanations))
-            raw_responses.append(
-                f"Interleaved evaluation: {len(answer_parts)} answers found"
-            )
-
-            component_rewards["description_scores"].append(description_score)
-            component_rewards["code_scores"].append(code_score)
-            component_rewards["unit_test_scores"].append(unit_test_score)
-            # if all the unit tests passed, then pass@1 is 1
-            component_rewards["pass@1"].append(1 if code_score == 1.0 else 0)
+                component_rewards["description_scores"].append(description_score)
+                component_rewards["code_scores"].append(code_score)
+                component_rewards["unit_test_scores"].append(unit_test_score)
+                # if all the unit tests passed, then pass@1 is 1
+                component_rewards["pass@1"].append(1 if code_score == 1.0 else 0)
 
         return total_scores, decisions, explanations, raw_responses, component_rewards
 
     def _evaluate_all_descriptions(
-        self, decoded_pred_answers: List[str], original_prompts: List[str]
+        self, decoded_pred_answers: List[str], original_prompts: List[str], timing_raw: Optional[Dict[str, float]] = None
     ) -> Dict[int, float]:
         """
         Evaluate all description parts of interleaved answers in a single batch.
         """
+        if timing_raw is None:
+            timing_raw = {}
+            
         if not self.autorater_base_url:
             logger.warning(
                 "AutoRater service URL not configured in CodeEvaluator; skipping description evaluation."
             )
             return {}
 
-        descriptions_to_eval: List[Tuple[int, str, str]] = []
-        for i, pred_answer in enumerate(decoded_pred_answers):
-            first_answer = extract_solution(pred_answer, extract_all=False)
-            if first_answer and isinstance(first_answer, str):
-                descriptions_to_eval.append((i, original_prompts[i], first_answer))
+        with _timer("extract_descriptions", timing_raw):
+            descriptions_to_eval: List[Tuple[int, str, str]] = []
+            for i, pred_answer in enumerate(decoded_pred_answers):
+                first_answer = extract_solution(pred_answer, extract_all=False)
+                if first_answer and isinstance(first_answer, str):
+                    descriptions_to_eval.append((i, original_prompts[i], first_answer))
 
         if not descriptions_to_eval:
             return {}
@@ -1134,44 +1176,47 @@ if __name__ == '__main__':
         # Prepare payload for the AutoRater service
         batch_indices, batch_prompts, batch_responses = zip(*descriptions_to_eval)
 
-        tokenized_prompts = self.tokenizer(
-            list(batch_prompts),
-            add_special_tokens=True,
-            padding=True,
-            truncation=True,
-            return_tensors="pt",
-        ).input_ids.tolist()
-        tokenized_responses = self.tokenizer(
-            list(batch_responses),
-            add_special_tokens=False,
-            padding=True,
-            truncation=True,
-            return_tensors="pt",
-        ).input_ids.tolist()
+        with _timer("tokenize_descriptions", timing_raw):
+            tokenized_prompts = self.tokenizer(
+                list(batch_prompts),
+                add_special_tokens=True,
+                padding=True,
+                truncation=True,
+                return_tensors="pt",
+            ).input_ids.tolist()
+            tokenized_responses = self.tokenizer(
+                list(batch_responses),
+                add_special_tokens=False,
+                padding=True,
+                truncation=True,
+                return_tensors="pt",
+            ).input_ids.tolist()
 
         # We need to construct a valid-looking payload even if some parts are dummy
         batch_size = len(batch_indices)
-        payload = {
-            "prompts": tokenized_prompts,
-            "responses": tokenized_responses,
-            # Dummy values for fields that are not used by outline evaluation but required by schema
-            "attention_mask": [[1] * len(r) for r in tokenized_responses],
-            "position_ids": [list(range(len(r))) for r in tokenized_responses],
-            "reward_model_info": [
-                {"template": "outline", "ground_truth": ""} for _ in range(batch_size)
-            ],
-        }
+        with _timer("prepare_autorater_payload_descriptions", timing_raw):
+            payload = {
+                "prompts": tokenized_prompts,
+                "responses": tokenized_responses,
+                # Dummy values for fields that are not used by outline evaluation but required by schema
+                "attention_mask": [[1] * len(r) for r in tokenized_responses],
+                "position_ids": [list(range(len(r))) for r in tokenized_responses],
+                "reward_model_info": [
+                    {"template": "outline", "ground_truth": ""} for _ in range(batch_size)
+                ],
+            }
 
         try:
             logger.info(
                 f"Calling AutoRater to evaluate {batch_size} description outlines."
             )
-            scores, decisions, _, _ = call_autorater_service(
-                self.autorater_base_url,
-                payload,
-                batch_size=batch_size,
-                endpoint="/evaluate_autorater",  # Use the main endpoint
-            )
+            with _timer("call_autorater_descriptions", timing_raw):
+                scores, decisions, _, _ = call_autorater_service(
+                    self.autorater_base_url,
+                    payload,
+                    batch_size=batch_size,
+                    endpoint="/evaluate_autorater",  # Use the main endpoint
+                )
 
             # The decision is what matters: 1 for TRUE, 0 for FALSE. Score is shaped, so use decision.
             final_scores = [1.0 if d == 1 else 0.0 for d in decisions]

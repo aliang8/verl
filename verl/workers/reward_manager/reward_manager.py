@@ -18,6 +18,7 @@ from verl.workers.autorater.autorater_utils import extract_solution, format_auto
 from verl.workers.code_evaluator import CodeEvaluator # Import the new CodeEvaluator
 from verl.trainer.ppo.reward_fns import count_interleaved_answers, interleaved_format_reward # Import interleaved functions
 from verl.utils.autorater_client import call_autorater_service  # New modular AutoRater client
+from verl.utils.debug.performance import _timer  # Add timing support
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -116,6 +117,7 @@ class RewardManager:
         self,
         data: DataProto,
         return_dict: bool = False,
+        timing_raw: Optional[Dict[str, float]] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
         """
         Computes AutoRater and format rewards for a batch of data.
@@ -124,22 +126,28 @@ class RewardManager:
         Args:
             data: DataProto containing batch data (prompts, responses, reward_model_info).
             return_dict: If True, returns a dictionary with detailed reward info.
+            timing_raw: Dictionary to store timing information.
 
         Returns:
             A tensor of combined rewards or a tuple containing a tensor and a dictionary with detailed reward information.
         """
+        # Initialize timing_raw if not provided
+        if timing_raw is None:
+            timing_raw = {}
+            
         # Check if we're doing interleaved reasoning
         is_interleaved = self.template_type and "interleave" in self.template_type.lower()
 
         if is_interleaved:
-            return self.compute_interleaved_rewards(data, return_dict)
+            return self.compute_interleaved_rewards(data, return_dict, timing_raw)
         else:
-            return self.compute_rewards_flat(data, return_dict)
+            return self.compute_rewards_flat(data, return_dict, timing_raw)
 
     def compute_rewards_flat(
         self,
         data: DataProto,
         return_dict: bool = False,
+        timing_raw: Optional[Dict[str, float]] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
         """
         Computes standard (non-interleaved) rewards for a batch of data.
@@ -147,10 +155,14 @@ class RewardManager:
         Args:
             data: DataProto containing batch data (prompts, responses, reward_model_info).
             return_dict: If True, returns a dictionary with detailed reward info.
+            timing_raw: Dictionary to store timing information.
 
         Returns:
             A tensor of combined rewards or a tuple containing a tensor and a dictionary with detailed reward information.
         """
+        if timing_raw is None:
+            timing_raw = {}
+            
         batch_size = len(data)
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
@@ -166,13 +178,15 @@ class RewardManager:
             
             # Determine evaluation type and call appropriate method
             if self._should_use_code_evaluation(ground_truth_infos):
-                autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, component_rewards, extracted_pred_answers, extracted_gt_answers = self._evaluate_code(
-                    data, ground_truth_infos, batch_size
-                )
+                with _timer("code_evaluation", timing_raw):
+                    autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, component_rewards, extracted_pred_answers, extracted_gt_answers = self._evaluate_code(
+                        data, ground_truth_infos, batch_size, timing_raw
+                    )
             else:
-                autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, extracted_pred_answers, extracted_gt_answers = self._evaluate_text_responses(
-                    data, ground_truth_infos, batch_size
-                )
+                with _timer("text_evaluation", timing_raw):
+                    autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, extracted_pred_answers, extracted_gt_answers = self._evaluate_text_responses(
+                        data, ground_truth_infos, batch_size, timing_raw
+                    )
 
             # Append extracted answers to extra info so that they can be dumped later
             reward_extra_info["extracted_pred"].extend(extracted_pred_answers)
@@ -181,7 +195,8 @@ class RewardManager:
             logger.info("Remote AutoRater service not enabled or base URL not provided in RewardManager.")
 
         # --- Compute Format Rewards ---
-        format_scores = self._compute_standard_format_scores(data, batch_size)
+        with _timer("format_reward", timing_raw):
+            format_scores = self._compute_standard_format_scores(data, batch_size)
 
         # --- Combine scores and populate reward_tensor and reward_extra_info ---
         final_scores = []
@@ -192,7 +207,9 @@ class RewardManager:
             valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
 
             # Calculate combined score
-            current_final_score = autorater_scores[i] + (self.format_reward_weight * format_scores[i])
+            base_score = autorater_scores[i]
+            format_score = self.format_reward_weight * format_scores[i]
+            current_final_score = base_score + format_score
 
             # Ensure we have a valid position to place the reward
             if valid_response_length > 0:
@@ -220,6 +237,7 @@ class RewardManager:
         self,
         data: DataProto,
         return_dict: bool = False,
+        timing_raw: Optional[Dict[str, float]] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
         """
         Computes interleaved reasoning rewards for a batch of data.
@@ -229,10 +247,14 @@ class RewardManager:
         Args:
             data: DataProto containing batch data (prompts, responses, reward_model_info).
             return_dict: If True, returns a dictionary with detailed reward info.
+            timing_raw: Dictionary to store timing information.
 
         Returns:
             A tensor of combined rewards or a tuple containing a tensor and a dictionary with detailed reward information.
         """
+        if timing_raw is None:
+            timing_raw = {}
+            
         print("Computing interleaved reasoning rewards")
         batch_size = len(data)
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
@@ -242,11 +264,13 @@ class RewardManager:
         ground_truth_infos = data.non_tensor_batch.get("reward_model", [{} for _ in range(batch_size)])
         
         # Prepare decoded responses
-        decoded_pred_answers = [self.tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in data.batch["responses"]]
-        decoded_prompts = [self.tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in data.batch["prompts"]]
+        with _timer("decode_responses", timing_raw):
+            decoded_pred_answers = [self.tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in data.batch["responses"]]
+            decoded_prompts = [self.tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in data.batch["prompts"]]
 
         # --- First, compute format scores and answer counts ---
-        interleaved_format_scores, answer_counts = self._compute_interleaved_format_scores(data, batch_size)
+        with _timer("interleaved_format_reward", timing_raw):
+            interleaved_format_scores, answer_counts = self._compute_interleaved_format_scores(data, batch_size)
 
         # --- Filter samples that meet the interleaved criteria (answer count > 3) ---
         interleaved_indices = []
@@ -266,22 +290,23 @@ class RewardManager:
         if interleaved_indices:
             logger.info(f"Evaluating {len(interleaved_indices)} samples with interleaved reasoning (answer count > 3)")
             logger.info(f"Skipping {batch_size - len(interleaved_indices)} samples with insufficient answer count (≤3)")
-            # print(f"Evaluating {len(interleaved_indices)} samples with interleaved reasoning (answer count > 3)")
-            # print(f"Skipping {batch_size - len(interleaved_indices)} samples with insufficient answer count (≤3)")
             
             # Prepare data for interleaved samples
-            interleaved_responses = [decoded_pred_answers[i] for i in interleaved_indices]
-            interleaved_prompts = [decoded_prompts[i] for i in interleaved_indices]
-            interleaved_ground_truths = [ground_truth_infos[i] for i in interleaved_indices]
+            with _timer("interleaved_eval_prep", timing_raw):
+                interleaved_responses = [decoded_pred_answers[i] for i in interleaved_indices]
+                interleaved_prompts = [decoded_prompts[i] for i in interleaved_indices]
+                interleaved_ground_truths = [ground_truth_infos[i] for i in interleaved_indices]
             
             # Use CodeEvaluator for interleaved evaluation
             print("Using CodeEvaluator for interleaved evaluation")
-            interleaved_scores, interleaved_decisions, interleaved_explanations, interleaved_raw, component_rewards = self.code_evaluator.evaluate_code(
-                decoded_pred_answers=interleaved_responses,
-                original_prompts=interleaved_prompts,
-                ground_truth_infos=interleaved_ground_truths,
-                batch_size=len(interleaved_indices),
-            )
+            with _timer("interleaved_code_evaluation", timing_raw):
+                interleaved_scores, interleaved_decisions, interleaved_explanations, interleaved_raw, component_rewards = self.code_evaluator.evaluate_code(
+                    decoded_pred_answers=interleaved_responses,
+                    original_prompts=interleaved_prompts,
+                    ground_truth_infos=interleaved_ground_truths,
+                    batch_size=len(interleaved_indices),
+                    timing_raw=timing_raw,
+                )
             print(f"Done evaluating {len(interleaved_indices)} samples with interleaved reasoning (answer count > 3)")
             
             # Assign back to main arrays (only for qualified samples)
@@ -295,56 +320,58 @@ class RewardManager:
             logger.info("No samples qualified for interleaved evaluation (all had answer count ≤3)")
 
         # --- Combine scores and populate reward_tensor and reward_extra_info ---
-        final_scores = []
-        for i in range(batch_size):
-            # Retrieve the correct length for storing the reward
-            data_item = data[i]
-            prompt_length = data_item.batch["prompts"].shape[-1]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+        with _timer("combine_scores", timing_raw):
+            final_scores = []
+            for i in range(batch_size):
+                # Retrieve the correct length for storing the reward
+                data_item = data[i]
+                prompt_length = data_item.batch["prompts"].shape[-1]
+                valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
 
-            # Calculate combined score
-            base_score = autorater_scores[i]  # 0.0 for samples with insufficient answer count
-            format_score = self.interleaved_format_reward_weight * interleaved_format_scores[i]
-            
-            # Determine evaluation type used
-            used_interleaved_eval = i in interleaved_indices
-            
-            # Simple addition - no penalty system needed since insufficient samples get 0 base score
-            current_final_score = base_score + format_score
+                # Calculate combined score
+                base_score = autorater_scores[i]  # 0.0 for samples with insufficient answer count
+                format_score = self.interleaved_format_reward_weight * interleaved_format_scores[i]
+                
+                # Determine evaluation type used
+                used_interleaved_eval = i in interleaved_indices
+                
+                # Simple addition - no penalty system needed since insufficient samples get 0 base score
+                current_final_score = base_score + format_score
 
-            # Ensure we have a valid position to place the reward
-            if valid_response_length > 0:
-                reward_tensor[i, valid_response_length - 1] = current_final_score
-                final_scores.append(current_final_score)
-            else:
-                logger.warning(f"Response length is 0 for sample {i}, no reward applied to token.")
-                final_scores.append(0.0)
-            
-            reward_extra_info["autorater_scores"].append(autorater_scores[i])
-            reward_extra_info["autorater_decisions"].append(autorater_decisions[i])
-            reward_extra_info["autorater_explanations"].append(autorater_explanations[i])
-            reward_extra_info["autorater_raw_responses"].append(autorater_raw_responses[i])
-            reward_extra_info["interleaved_format_scores"].append(interleaved_format_scores[i])
-            reward_extra_info["answer_counts"].append(answer_counts[i])
-            reward_extra_info["used_interleaved_eval"].append(used_interleaved_eval)
-            reward_extra_info["final_scores"].append(final_scores[i])
-            for k, v in component_rewards_all[i].items():
-                reward_extra_info[k].append(v)
+                # Ensure we have a valid position to place the reward
+                if valid_response_length > 0:
+                    reward_tensor[i, valid_response_length - 1] = current_final_score
+                    final_scores.append(current_final_score)
+                else:
+                    logger.warning(f"Response length is 0 for sample {i}, no reward applied to token.")
+                    final_scores.append(0.0)
+                
+                reward_extra_info["autorater_scores"].append(autorater_scores[i])
+                reward_extra_info["autorater_decisions"].append(autorater_decisions[i])
+                reward_extra_info["autorater_explanations"].append(autorater_explanations[i])
+                reward_extra_info["autorater_raw_responses"].append(autorater_raw_responses[i])
+                reward_extra_info["interleaved_format_scores"].append(interleaved_format_scores[i])
+                reward_extra_info["answer_counts"].append(answer_counts[i])
+                reward_extra_info["used_interleaved_eval"].append(used_interleaved_eval)
+                reward_extra_info["final_scores"].append(final_scores[i])
+                for k, v in component_rewards_all[i].items():
+                    reward_extra_info[k].append(v)
 
         # Extract answers for logging
-        extracted_pred_answers = []
-        extracted_gt_answers = []
-        for pred_ans, gt_info in zip(decoded_pred_answers, ground_truth_infos):
-            all_answers = extract_solution(pred_ans, extract_all=True)
-            extracted_pred_answers.append(all_answers if all_answers else "No answers extracted")
-            
-            if isinstance(gt_info, dict) and "ground_truth" in gt_info:
-                extracted_gt_answers.append(str(gt_info["ground_truth"]))
-            else:
-                extracted_gt_answers.append(str(gt_info))
+        with _timer("extract_answers", timing_raw):
+            extracted_pred_answers = []
+            extracted_gt_answers = []
+            for pred_ans, gt_info in zip(decoded_pred_answers, ground_truth_infos):
+                all_answers = extract_solution(pred_ans, extract_all=True)
+                extracted_pred_answers.append(all_answers if all_answers else "No answers extracted")
+                
+                if isinstance(gt_info, dict) and "ground_truth" in gt_info:
+                    extracted_gt_answers.append(str(gt_info["ground_truth"]))
+                else:
+                    extracted_gt_answers.append(str(gt_info))
 
-        reward_extra_info["extracted_pred"].extend(extracted_pred_answers)
-        reward_extra_info["extracted_gt"].extend(extracted_gt_answers)
+            reward_extra_info["extracted_pred"].extend(extracted_pred_answers)
+            reward_extra_info["extracted_gt"].extend(extracted_gt_answers)
 
         if return_dict:
             return reward_tensor, reward_extra_info
@@ -352,7 +379,7 @@ class RewardManager:
         return reward_tensor
 
     def _get_tokenizer(self):
-        return self.tokenizer 
+        return self.tokenizer
 
     # ------------------------------------------------------------------
     # Helper methods for remote evaluation
@@ -382,30 +409,38 @@ class RewardManager:
         self, 
         data: DataProto, 
         ground_truth_infos: List[Dict[str, Any]], 
-        batch_size: int
+        batch_size: int,
+        timing_raw: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]], List[str], List[str]]:
         """Evaluate code responses using CodeEvaluator."""
+        if timing_raw is None:
+            timing_raw = {}
+            
         logger.info("Using CodeEvaluator for evaluation")
         
         # Extract ground truth information
-        decoded_ground_truth_answers = []
-        for gt in ground_truth_infos:
-            if isinstance(gt, dict) and "ground_truth" in gt:
-                decoded_ground_truth_answers.append(str(gt["ground_truth"]))
-            else:
-                decoded_ground_truth_answers.append(str(gt))
+        with _timer("extract_ground_truth", timing_raw):
+            decoded_ground_truth_answers = []
+            for gt in ground_truth_infos:
+                if isinstance(gt, dict) and "ground_truth" in gt:
+                    decoded_ground_truth_answers.append(str(gt["ground_truth"]))
+                else:
+                    decoded_ground_truth_answers.append(str(gt))
 
         # Prepare decoded responses
-        decoded_pred_answers = [self.tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in data.batch["responses"]]
-        decoded_prompts = [self.tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in data.batch["prompts"]]
+        with _timer("decode_responses_code", timing_raw):
+            decoded_pred_answers = [self.tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in data.batch["responses"]]
+            decoded_prompts = [self.tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in data.batch["prompts"]]
 
         # Evaluate using CodeEvaluator
-        autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, component_rewards = self.code_evaluator.evaluate_code(
-            decoded_pred_answers,
-            decoded_prompts,
-            ground_truth_infos,
-            batch_size,
-        )
+        with _timer("code_evaluator_evaluate", timing_raw):
+            autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, component_rewards = self.code_evaluator.evaluate_code(
+                decoded_pred_answers,
+                decoded_prompts,
+                ground_truth_infos,
+                batch_size,
+                timing_raw=timing_raw,
+            )
         
         # Check if we're doing interleaved reasoning for logging
         is_interleaved = (
@@ -414,16 +449,17 @@ class RewardManager:
         )
         
         # Extract answers for logging
-        extracted_pred_answers = []
-        extracted_gt_answers = []
-        for pred_ans, gt_ans in zip(decoded_pred_answers, decoded_ground_truth_answers):
-            if is_interleaved:
-                all_answers = extract_solution(pred_ans, extract_all=True)
-                extracted_pred_answers.append(all_answers if all_answers else "No answers extracted")
-            else:
-                single_answer = extract_solution(pred_ans)
-                extracted_pred_answers.append(single_answer if single_answer else "No answer extracted")
-            extracted_gt_answers.append(gt_ans)
+        with _timer("extract_answers_code", timing_raw):
+            extracted_pred_answers = []
+            extracted_gt_answers = []
+            for pred_ans, gt_ans in zip(decoded_pred_answers, decoded_ground_truth_answers):
+                if is_interleaved:
+                    all_answers = extract_solution(pred_ans, extract_all=True)
+                    extracted_pred_answers.append(all_answers if all_answers else "No answers extracted")
+                else:
+                    single_answer = extract_solution(pred_ans)
+                    extracted_pred_answers.append(single_answer if single_answer else "No answer extracted")
+                extracted_gt_answers.append(gt_ans)
         
         return autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, component_rewards, extracted_pred_answers, extracted_gt_answers
 
@@ -431,76 +467,88 @@ class RewardManager:
         self, 
         data: DataProto, 
         ground_truth_infos: List[Dict[str, Any]], 
-        batch_size: int
+        batch_size: int,
+        timing_raw: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[float], List[int], List[str], List[str], List[str], List[str]]:
         """Evaluate text responses using remote AutoRater service."""
+        if timing_raw is None:
+            timing_raw = {}
+            
         logger.info("Using remote AutoRater service for text evaluation")
         
         # Extract ground truth information
-        decoded_ground_truth_answers = []
-        for gt in ground_truth_infos:
-            if isinstance(gt, dict) and "ground_truth" in gt:
-                decoded_ground_truth_answers.append(str(gt["ground_truth"]))
-            else:
-                decoded_ground_truth_answers.append(str(gt))
+        with _timer("extract_ground_truth_text", timing_raw):
+            decoded_ground_truth_answers = []
+            for gt in ground_truth_infos:
+                if isinstance(gt, dict) and "ground_truth" in gt:
+                    decoded_ground_truth_answers.append(str(gt["ground_truth"]))
+                else:
+                    decoded_ground_truth_answers.append(str(gt))
 
         # Prepare decoded responses
-        decoded_pred_answers = [self.tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in data.batch["responses"]]
-        decoded_prompts = [self.tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in data.batch["prompts"]]
+        with _timer("decode_responses_text", timing_raw):
+            decoded_pred_answers = [self.tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in data.batch["responses"]]
+            decoded_prompts = [self.tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in data.batch["prompts"]]
 
         # Extract solutions (predicted answers only)
-        processed_pred_answers = []
-        processed_gt_answers = []
-        extracted_pred_answers = []
-        extracted_gt_answers = []
+        with _timer("extract_solutions", timing_raw):
+            processed_pred_answers = []
+            processed_gt_answers = []
+            extracted_pred_answers = []
+            extracted_gt_answers = []
 
-        for pred_ans, gt_ans in zip(decoded_pred_answers, decoded_ground_truth_answers):
-            # Attempt to parse predicted answer inside <answer> tags
-            extr_pred_raw = extract_solution(pred_ans)
-            extracted_pred_answers.append(extr_pred_raw)
+            for pred_ans, gt_ans in zip(decoded_pred_answers, decoded_ground_truth_answers):
+                # Attempt to parse predicted answer inside <answer> tags
+                extr_pred_raw = extract_solution(pred_ans)
+                extracted_pred_answers.append(extr_pred_raw)
 
-            # Ground-truth answer stays as-is
-            extr_gt_raw = gt_ans
-            extracted_gt_answers.append(extr_gt_raw)
+                # Ground-truth answer stays as-is
+                extr_gt_raw = gt_ans
+                extracted_gt_answers.append(extr_gt_raw)
 
-            if extr_pred_raw is None:
-                processed_pred_answers.append(pred_ans)  # fallback to full string
-            else:
-                processed_pred_answers.append(extr_pred_raw)
+                if extr_pred_raw is None:
+                    processed_pred_answers.append(pred_ans)  # fallback to full string
+                else:
+                    processed_pred_answers.append(extr_pred_raw)
 
-            processed_gt_answers.append(extr_gt_raw)
+                processed_gt_answers.append(extr_gt_raw)
 
         # Re-tokenize processed answers
-        pred_answers_token_ids = [self.tokenizer.encode(ans, add_special_tokens=False) for ans in processed_pred_answers]
+        with _timer("retokenize_answers", timing_raw):
+            pred_answers_token_ids = [self.tokenizer.encode(ans, add_special_tokens=False) for ans in processed_pred_answers]
 
         # Rebuild reward_model_info with ground_truth and pass through unit_tests/libs when available
-        new_reward_model_info = []
-        for orig_info, gt in zip(ground_truth_infos, processed_gt_answers):
-            info_dict: Dict[str, Any] = {"ground_truth": gt}
-            if isinstance(orig_info, dict):
-                # pass unit tests if present so code evaluator can run them
-                if orig_info.get("unit_tests"):
-                    info_dict["unit_tests"] = orig_info["unit_tests"]
-                elif orig_info.get("tests"):
-                    info_dict["unit_tests"] = orig_info["tests"]
-                # include optional libs
-                if orig_info.get("libs"):
-                    info_dict["libs"] = orig_info["libs"]
-            new_reward_model_info.append(info_dict)
+        with _timer("rebuild_reward_model_info", timing_raw):
+            new_reward_model_info = []
+            for orig_info, gt in zip(ground_truth_infos, processed_gt_answers):
+                info_dict: Dict[str, Any] = {"ground_truth": gt}
+                if isinstance(orig_info, dict):
+                    # pass unit tests if present so code evaluator can run them
+                    if orig_info.get("unit_tests"):
+                        info_dict["unit_tests"] = orig_info["unit_tests"]
+                    elif orig_info.get("tests"):
+                        info_dict["unit_tests"] = orig_info["tests"]
+                    # include optional libs
+                    if orig_info.get("libs"):
+                        info_dict["libs"] = orig_info["libs"]
+                new_reward_model_info.append(info_dict)
         
-        payload_common = {
-            "prompts": data.batch["prompts"].cpu().tolist(),
-            "responses": pred_answers_token_ids,
-            "attention_mask": data.batch["attention_mask"].cpu().tolist(),
-            "position_ids": data.batch["position_ids"].cpu().tolist(),
-            "reward_model_info": new_reward_model_info,
-        }
+        with _timer("prepare_autorater_payload", timing_raw):
+            payload_common = {
+                "prompts": data.batch["prompts"].cpu().tolist(),
+                "responses": pred_answers_token_ids,
+                "attention_mask": data.batch["attention_mask"].cpu().tolist(),
+                "position_ids": data.batch["position_ids"].cpu().tolist(),
+                "reward_model_info": new_reward_model_info,
+            }
 
         # mypy: self.autorater_base_url is ensured non-None by caller when use_autorater is True
         assert self.autorater_base_url is not None, "autorater_base_url must be provided when calling AutoRater service"
-        autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(  # type: ignore[arg-type]
-            self.autorater_base_url, payload_common, batch_size
-        )
+        
+        with _timer("call_autorater_service", timing_raw):
+            autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(  # type: ignore[arg-type]
+                self.autorater_base_url, payload_common, batch_size
+            )
         
         return autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, extracted_pred_answers, extracted_gt_answers
 
@@ -524,7 +572,7 @@ class RewardManager:
 
     def _compute_interleaved_format_scores(self, data: DataProto, batch_size: int) -> Tuple[List[float], List[int]]:
         """Compute interleaved format scores and answer counts for responses."""
-        interleaved_format_scores = []
+        format_scores = []
         answer_counts = []
         
         for i in range(batch_size):
@@ -532,9 +580,17 @@ class RewardManager:
             response_ids = data_item.batch["responses"]
             predicted_answer = self.tokenizer.decode(response_ids, skip_special_tokens=True)
             
+            # Count answers and compute interleaved format reward
             answer_count = count_interleaved_answers(predicted_answer)
             interleaved_score = interleaved_format_reward(predicted_answer, self.min_answer_count_for_interleaved)
             interleaved_format_scores.append(interleaved_score)
             answer_counts.append(answer_count)
             
-        return interleaved_format_scores, answer_counts
+            # Interleaved format reward
+            if self.enable_format_reward:
+                score = interleaved_format_reward(predicted_answer, answer_count)
+                format_scores.append(score)
+            else:
+                format_scores.append(0.0)
+        
+        return format_scores, answer_counts

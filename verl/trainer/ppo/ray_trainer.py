@@ -1143,7 +1143,7 @@ class RayPPOTrainer:
                         # The RewardManager is now responsible for calling the remote AutoRater service
                         # if self.use_autorater is True and a URL is provided.
                         # This simplifies the logic here, as reward_manager.compute_rewards will handle the HTTP call.
-                        reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(batch, return_dict=True)
+                        reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(batch, return_dict=True, timing_raw=timing_raw)
 
                     # Add data source breakdown for format/content rewards
                     if hasattr(batch, 'non_tensor_batch') and 'data_source' in batch.non_tensor_batch:
