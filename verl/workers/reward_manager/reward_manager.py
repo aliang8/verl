@@ -583,7 +583,7 @@ class RewardManager:
             # Count answers and compute interleaved format reward
             answer_count = count_interleaved_answers(predicted_answer)
             interleaved_score = interleaved_format_reward(predicted_answer, self.min_answer_count_for_interleaved)
-            interleaved_format_scores.append(interleaved_score)
+            format_scores.append(interleaved_score)
             answer_counts.append(answer_count)
             
             # Interleaved format reward

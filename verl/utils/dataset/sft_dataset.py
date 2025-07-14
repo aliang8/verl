@@ -95,6 +95,7 @@ class SFTDataset(Dataset):
         self.dataframe = pd.concat(dataframes)
 
         self.prompts = self.dataframe[self.prompt_key]
+
         for key in self.prompt_dict_keys:
             # type(x): pandas.core.series.Series
             # type(x[0]): numpy.ndarray
