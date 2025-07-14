@@ -26,6 +26,7 @@ from contextlib import contextmanager
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 import ast 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from verl.workers.autorater.autorater_utils import (
     extract_solution,
@@ -350,9 +351,12 @@ class CodeEvaluator:
             {"description": 0.5, "code": 1.0, "unit_tests": 0.5},
         )
 
+        # Parallelism config
+        self.num_workers = self.config.get("num_workers", 32)
+
         # Initialize robust execution components
         self.sandbox_session = None
-        self.safe_executor = SafeResourceManagedExecutor(max_concurrent=3)
+        self.safe_executor = SafeResourceManagedExecutor(max_concurrent=self.num_workers)
         
         # Initialize error tracking
         self.error_tracker = ErrorTracker()
@@ -588,193 +592,139 @@ if __name__ == '__main__':
         stderr_list: List[str] = [""] * batch_size
         error_list: List[str] = [""] * batch_size
 
-        with _timer("unit_tests_execution", timing_raw):
-            for idx, rm_info in enumerate(reward_model_info):
-                # Get prompt ID for error tracking
-                prompt_id = prompt_ids[idx] if prompt_ids and idx < len(prompt_ids) else f"batch_{self.error_tracker.batch_counter}_idx_{idx}"
-                prompt_text = prompts[idx] if prompts and idx < len(prompts) else ""
-                response_text = predicted_answers[idx] if idx < len(predicted_answers) else ""
-                
-                tests_raw: List[str] = []
-                libs: Optional[List[str]] = None
-
-                with _timer("parse_test_info", timing_raw):
-                    if isinstance(rm_info, dict):
-                        # collect libs for this sample
-                        raw_libs = rm_info.get("libs")
-                        if isinstance(raw_libs, list):
-                            libs = raw_libs
-                        elif isinstance(raw_libs, str):
-                            libs = ast.literal_eval(raw_libs)
-                        elif raw_libs is not None:
-                            libs = [str(raw_libs)]
-
-                        # gather tests definitions
-                        if isinstance(rm_info.get("unit_tests"), list):
-                            tests_raw = rm_info["unit_tests"]
-                        elif isinstance(rm_info.get("tests"), list):
-                            tests_raw = rm_info["tests"]
-                        else:
-                            tc = rm_info.get("unit_tests") or rm_info.get("tests")
-                            if tc:
-                                tests_raw = [tc]
-
-                if not tests_raw:
-                    self.error_tracker.log_error(
-                        prompt_id, "no_unit_tests", 
-                        {"message": "No unit tests provided"}, 
-                        prompt_text, response_text
-                    )
-                    continue
-
-                with _timer("extract_code", timing_raw):
-                    code_match = re.search(
-                        r"```[\w]*\n(.*?)```", predicted_answers[idx], re.DOTALL
-                    )
-                    pred_code_block = (
-                        code_match.group(1) if code_match else predicted_answers[idx]
-                    )
-
-                # Combine user code with all unit test blocks directly
-                with _timer("prepare_combined_test", timing_raw):
-                    all_test_blocks = []
-                    for snippet in tests_raw:
-                        normalized_snippet = snippet.replace("\\n", "\n")
-                        all_test_blocks.append(normalized_snippet)
-
-                    # Create combined test file with user code + all test blocks
-                    combined_test = f"""import unittest
-import pandas as pd
-import numpy as np
-
-{pred_code_block}
-
-{chr(10).join(all_test_blocks)}
-
-if __name__ == '__main__':
-    unittest.main(verbosity=2)
-"""
-
-                try:
-                    # Use the safe executor with the existing session
-                    with _timer("execute_combined_test", timing_raw):
-                        result = self.safe_executor.execute_safely(
-                            combined_test, 
-                            session=sess, 
-                            libraries=libs
-                        )
-                    
-                    # For unit tests, we need to handle the case where execution succeeded
-                    # but some tests failed (which results in non-zero exit code)
-                    # Check if this is a unittest failure vs actual execution error
-                    is_unittest_failure = ("Ran " in result.get("stderr", "") or "FAILED" in result.get("stderr", "") or "PASSED" in result.get("stderr", ""))
-
-                    if result.get("success") or is_unittest_failure:
-                        # Continue to parse unittest output for partial scores
-                        stdout_list[idx] = result.get("stdout", "")
-                        stderr_list[idx] = result.get("stderr", "")
-                        
-                        # For unittest failures, we'll parse the output below to get partial scores
-                        if is_unittest_failure:
-                            logger.debug(f"Unittest execution had test failures but will parse partial results for prompt {prompt_id}")
+        def run_single(idx, rm_info):
+            prompt_id = prompt_ids[idx] if prompt_ids and idx < len(prompt_ids) else f"batch_{self.error_tracker.batch_counter}_idx_{idx}"
+            prompt_text = prompts[idx] if prompts and idx < len(prompts) else ""
+            response_text = predicted_answers[idx] if idx < len(predicted_answers) else ""
+            tests_raw: List[str] = []
+            libs: Optional[List[str]] = None
+            import ast
+            if isinstance(rm_info, dict):
+                raw_libs = rm_info.get("libs")
+                if isinstance(raw_libs, list):
+                    libs = raw_libs
+                elif isinstance(raw_libs, str):
+                    try:
+                        libs = ast.literal_eval(raw_libs)
+                    except Exception:
+                        libs = [str(raw_libs)]
+                elif raw_libs is not None:
+                    libs = [str(raw_libs)]
+                if isinstance(rm_info.get("unit_tests"), list):
+                    tests_raw = rm_info["unit_tests"]
+                elif isinstance(rm_info.get("tests"), list):
+                    tests_raw = rm_info["tests"]
+                else:
+                    tc = rm_info.get("unit_tests") or rm_info.get("tests")
+                    if tc:
+                        tests_raw = [tc]
+            if not tests_raw:
+                self.error_tracker.log_error(
+                    prompt_id, "no_unit_tests", 
+                    {"message": "No unit tests provided"}, 
+                    prompt_text, response_text
+                )
+                return (idx, 0.0, 0, 0, "", "", "No unit tests provided")
+            code_match = re.search(
+                r"```[\w]*\n(.*?)```", predicted_answers[idx], re.DOTALL
+            )
+            pred_code_block = (
+                code_match.group(1) if code_match else predicted_answers[idx]
+            )
+            all_test_blocks = []
+            for snippet in tests_raw:
+                normalized_snippet = snippet.replace("\\n", "\n")
+                all_test_blocks.append(normalized_snippet)
+            combined_test = f"""import unittest\nimport pandas as pd\nimport numpy as np\n\n{pred_code_block}\n\n{chr(10).join(all_test_blocks)}\n\nif __name__ == '__main__':\n    unittest.main(verbosity=2)\n"""
+            try:
+                result = self.safe_executor.execute_safely(
+                    combined_test, 
+                    session=sess, 
+                    libraries=libs
+                )
+                is_unittest_failure = ("Ran " in result.get("stderr", "") or "FAILED" in result.get("stderr", "") or "PASSED" in result.get("stderr", ""))
+                if result.get("success") or is_unittest_failure:
+                    stdout = result.get("stdout", "")
+                    stderr = result.get("stderr", "")
+                    output = stdout + stderr
+                    ran_match = re.search(r"Ran (\d+) tests? in", output)
+                    if ran_match:
+                        total = int(ran_match.group(1))
                     else:
-                        # Handle actual execution error from safe executor
-                        stdout_list[idx] = result.get("stdout", "")
-                        stderr_list[idx] = result.get("stderr", result.get("error", ""))
-                        error_list[idx] = result.get("error", "Unknown error")
-                        
-                        # Log the error with detailed information
-                        self.error_tracker.log_error(
-                            prompt_id, 
-                            result.get("error_type", "execution_error"),
-                            {
-                                "error_message": result.get("error", "Unknown error"),
-                                "exit_code": result.get("exit_code", -1),
-                                "stdout": result.get("stdout", ""),
-                                "stderr": result.get("stderr", ""),
-                                "libraries": libs or []
-                            },
-                            prompt_text, response_text
-                        )
-                        
-                        total_tests[idx] = 0
-                        tests_passed[idx] = 0
-                        code_scores[idx] = 0.0
-                        continue
-
-                    # Parse unittest output to count tests
-                    with _timer("parse_unittest_output", timing_raw):
-                        output = result["stdout"] + result["stderr"]
-
-                        # Look for patterns like "Ran X tests in Y.YYYs"
-                        ran_match = re.search(r"Ran (\d+) tests? in", output)
-                        if ran_match:
-                            total_tests[idx] = int(ran_match.group(1))
-                        else:
-                            # Fallback: count test methods in the test blocks
-                            test_count = 0
-                            for block in all_test_blocks:
-                                test_count += len(re.findall(r"def\s+test_\w+", block))
-                            total_tests[idx] = test_count
-
-                        # Count failures and errors
-                        failures = 0
-                        errors = 0
-
-                        # Look for "FAILED (failures=X, errors=Y)" or "FAILED (failures=X)" or "FAILED (errors=Y)"
-                        failed_match = re.search(
-                            r"FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)", output
-                        )
-                        if failed_match:
-                            if failed_match.group(1):
-                                failures = int(failed_match.group(1))
-                            if failed_match.group(2):
-                                errors = int(failed_match.group(2))
-
-                        # Calculate passed tests
-                        tests_passed[idx] = total_tests[idx] - failures - errors
-
-                        # If exit code is 0, all tests passed
-                        if result["exit_code"] == 0:
-                            tests_passed[idx] = total_tests[idx]
-
-                        # Calculate score (0.2 points per passing test, matching original function)
-                        code_scores[idx] = float(tests_passed[idx]) * 0.2
-                        
-                        # Log successful execution
-                        self.error_tracker.log_success(
-                            prompt_id,
-                            {
-                                "tests_passed": tests_passed[idx],
-                                "total_tests": total_tests[idx],
-                                "code_score": code_scores[idx],
-                                "success_rate": tests_passed[idx] / total_tests[idx] if total_tests[idx] > 0 else 0.0,
-                                "libraries": libs or []
-                            },
-                            prompt_text, response_text
-                        )
-
-                except Exception as exec_e:
-                    error_list[idx] = str(exec_e)
-                    
-                    # Log the exception
-                    self.error_tracker.log_error(
-                        prompt_id, "unexpected_exception",
+                        test_count = 0
+                        for block in all_test_blocks:
+                            test_count += len(re.findall(r"def\\s+test_\\w+", block))
+                        total = test_count
+                    failures = 0
+                    errors = 0
+                    failed_match = re.search(
+                        r"FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)", output
+                    )
+                    if failed_match:
+                        if failed_match.group(1):
+                            failures = int(failed_match.group(1))
+                        if failed_match.group(2):
+                            errors = int(failed_match.group(2))
+                    passed = total - failures - errors
+                    if result["exit_code"] == 0:
+                        passed = total
+                    code_score = float(passed) * 0.2
+                    self.error_tracker.log_success(
+                        prompt_id,
                         {
-                            "exception_type": type(exec_e).__name__,
-                            "exception_message": str(exec_e),
+                            "tests_passed": passed,
+                            "total_tests": total,
+                            "code_score": code_score,
+                            "success_rate": passed / total if total > 0 else 0.0,
                             "libraries": libs or []
                         },
                         prompt_text, response_text
                     )
-                    
-                    # Fallback: count test methods in the test blocks
-                    test_count = 0
-                    for block in all_test_blocks:
-                        test_count += len(re.findall(r"def\s+test_\w+", block))
-                    total_tests[idx] = test_count
-                    tests_passed[idx] = 0
-                    code_scores[idx] = 0.0
+                    return (idx, code_score, passed, total, stdout, stderr, "")
+                else:
+                    stdout = result.get("stdout", "")
+                    stderr = result.get("stderr", result.get("error", ""))
+                    error = result.get("error", "Unknown error")
+                    self.error_tracker.log_error(
+                        prompt_id, 
+                        result.get("error_type", "execution_error"),
+                        {
+                            "error_message": result.get("error", "Unknown error"),
+                            "exit_code": result.get("exit_code", -1),
+                            "stdout": result.get("stdout", ""),
+                            "stderr": result.get("stderr", ""),
+                            "libraries": libs or []
+                        },
+                        prompt_text, response_text
+                    )
+                    return (idx, 0.0, 0, 0, stdout, stderr, error)
+            except Exception as exec_e:
+                error = str(exec_e)
+                self.error_tracker.log_error(
+                    prompt_id, "unexpected_exception",
+                    {
+                        "exception_type": type(exec_e).__name__,
+                        "exception_message": str(exec_e),
+                        "libraries": libs or []
+                    },
+                    prompt_text, response_text
+                )
+                test_count = 0
+                for block in all_test_blocks:
+                    test_count += len(re.findall(r"def\s+test_\w+", block))
+                return (idx, 0.0, 0, test_count, "", "", error)
+
+        # Parallel execution
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            futures = [executor.submit(run_single, idx, rm_info) for idx, rm_info in enumerate(reward_model_info)]
+            for future in as_completed(futures):
+                idx, code_score, passed, total, stdout, stderr, error = future.result()
+                code_scores[idx] = code_score
+                tests_passed[idx] = passed
+                total_tests[idx] = total
+                stdout_list[idx] = stdout
+                stderr_list[idx] = stderr
+                error_list[idx] = error
 
         # Increment batch counter for error tracking
         self.error_tracker.increment_batch()
