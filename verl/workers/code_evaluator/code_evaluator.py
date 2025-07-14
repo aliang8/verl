@@ -827,6 +827,30 @@ if __name__ == '__main__':
         logger.debug(f"No code snippet found in predicted answer")
         return ""
 
+    def _check_generated_unit_tests(self, unit_test_text: str) -> Tuple[float, str]:
+        """
+        Check if generated unit tests look reasonable.
+        
+        Args:
+            unit_test_text: The generated unit test text
+            
+        Returns:
+            Tuple of (score, explanation)
+        """
+        if not unit_test_text or not unit_test_text.strip():
+            return 0.0, "Unit Tests: No unit tests found"
+            
+        # Check if unit tests look reasonable (same logic as in interleaved reasoning)
+        if (
+            "assert" in unit_test_text
+            or "test" in unit_test_text.lower()
+            or "unittest" in unit_test_text.lower()
+            or "def test_" in unit_test_text
+        ):
+            return 1.0, "Unit Tests: Self-generated tests provided"
+        else:
+            return 0.0, "Unit Tests: No unit tests found"
+
     def _evaluate_code(
         self,
         decoded_pred_answers: List[str],
@@ -907,6 +931,7 @@ if __name__ == '__main__':
                 explanations = []
                 normalized_scores = []
                 pass_at_1 = []
+                unit_test_scores = []
                 
                 for i in range(batch_size):
                     if i in failed_extraction_indices:
@@ -915,6 +940,7 @@ if __name__ == '__main__':
                         decisions.append(0)
                         explanations.append("failed code extraction")
                         pass_at_1.append(0)
+                        unit_test_scores.append(0.0)
                     else:
                         # Normalize score as passed_tests / total_tests
                         if code_total_tests[i] > 0:
@@ -922,16 +948,24 @@ if __name__ == '__main__':
                         else:
                             normalized_score = 0.0
 
+                        # Check for generated unit tests in the original response
+                        unit_test_score, unit_test_explanation = self._check_generated_unit_tests(decoded_pred_answers[i])
+
                         normalized_scores.append(normalized_score)
                         decisions.append(1 if normalized_score > 0 else 0)
                         explanations.append(
-                            f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests \\nstdout: {code_stdout[i]} \\nstderr: {code_stderr[i]} \\nerror: {code_error[i]}"
+                            f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests | {unit_test_explanation} \\nstdout: {code_stdout[i]} \\nstderr: {code_stderr[i]} \\nerror: {code_error[i]}"
                         )
                         pass_at_1.append(1 if normalized_score == 1.0 else 0)
+                        unit_test_scores.append(unit_test_score)
 
                 raw_responses = [""] * batch_size
 
-            return normalized_scores, decisions, explanations, raw_responses, {"pass@1": pass_at_1, "code_scores": normalized_scores}
+            return normalized_scores, decisions, explanations, raw_responses, {
+                "pass@1": pass_at_1, 
+                "code_scores": normalized_scores,
+                "unit_test_scores": unit_test_scores
+            }
         else:
             raise ValueError(
                 "No unit tests available, using simple heuristic evaluation"
@@ -966,10 +1000,10 @@ if __name__ == '__main__':
         if timing_raw is None:
             timing_raw = {}
             
-        total_scores = []
-        decisions = []
-        explanations = []
-        raw_responses = []
+        total_scores = [0.0] * batch_size
+        decisions = [0] * batch_size
+        explanations = [""] * batch_size
+        raw_responses = [""] * batch_size
 
         # --- Batch-evaluate all descriptions first ---
         with _timer("evaluate_descriptions", timing_raw):
@@ -979,102 +1013,87 @@ if __name__ == '__main__':
 
         component_rewards = collections.defaultdict(list)
 
+        # --- Collect all code/unit-test pairs for batch execution ---
+        all_extracted_code = []
+        all_unit_test_info = []
+        code_eval_indices = []  # Indices where we have code/unit-tests to evaluate
+        for i, (pred_answer, gt_info) in enumerate(zip(decoded_pred_answers, ground_truth_infos)):
+            all_answers = extract_solution(pred_answer, extract_all=True)
+            if isinstance(all_answers, list):
+                answer_parts = [part.strip() for part in all_answers]
+            else:
+                answer_parts = [part.strip() for part in str(all_answers).split(",")]
+            # Defensive: ensure at least 3 parts
+            if len(answer_parts) < 3:
+                all_extracted_code.append("")
+                all_unit_test_info.append({})
+                continue
+            code_text = answer_parts[1]
+            extracted_code = self.extract_code_snippet(code_text)
+            all_extracted_code.append(extracted_code)
+            if isinstance(gt_info, dict) and (gt_info.get("unit_tests") or gt_info.get("tests")):
+                all_unit_test_info.append({
+                    "ground_truth": "code",
+                    "unit_tests": gt_info.get("unit_tests") or gt_info.get("tests"),
+                    "libs": gt_info.get("libs", []),
+                })
+                code_eval_indices.append(i)
+            else:
+                all_unit_test_info.append({})
+
+        # --- Run all code/unit-tests in parallel (single batch call) ---
+        code_scores_list = [0.0] * batch_size
+        code_tests_passed = [0] * batch_size
+        code_total_tests = [0] * batch_size
+        if any(all_unit_test_info[i] for i in code_eval_indices):
+            (
+                batch_code_scores,
+                batch_tests_passed,
+                batch_total_tests,
+                _, _, _
+            ) = self.run_unit_tests_combined(
+                all_extracted_code,
+                all_unit_test_info,
+                prompt_ids=[f"interleaved_prompt_{i}" for i in range(batch_size)],
+                prompts=decoded_pred_answers,
+                timing_raw=timing_raw,
+            )
+            for idx in code_eval_indices:
+                code_scores_list[idx] = batch_code_scores[idx]
+                code_tests_passed[idx] = batch_tests_passed[idx]
+                code_total_tests[idx] = batch_total_tests[idx]
+
+        # --- Main evaluation loop (now just uses batch results) ---
         with _timer("evaluate_interleaved_components", timing_raw):
             for i, (pred_answer, gt_info) in enumerate(
                 zip(decoded_pred_answers, ground_truth_infos)
             ):
-                # Extract all answers from the interleaved response using extract_all=True
                 all_answers = extract_solution(pred_answer, extract_all=True)
-
-                # The format is guaranteed by the caller (RewardManager), which filters
-                # for responses with >= 3 answers. We can assert this.
-                assert all_answers is not None, "all_answers should not be None"
                 if isinstance(all_answers, list):
                     answer_parts = [part.strip() for part in all_answers]
                 else:
-                    # This path should ideally not be taken if extract_solution is consistent
                     answer_parts = [part.strip() for part in str(all_answers).split(",")]
-
-                assert (
-                    len(answer_parts) >= 3
-                ), f"Expected >=3 answer parts, but got {len(answer_parts)}"
-
+                if len(answer_parts) < 3:
+                    explanations[i] = "Not enough answer parts"
+                    continue
                 # Initialize component scores
                 description_score = description_scores_map.get(i, 0.0)
                 code_score = 0.0
                 unit_test_score = 0.0
                 component_explanations = []
-
                 # Evaluate first answer (description/explanation)
                 description_score = description_scores_map.get(i, 0.0)
                 component_explanations.append(f"Description Score: {description_score:.2f}")
-
                 # Evaluate second answer (code implementation)
-                code_text = answer_parts[1]
-                # Extract clean code snippet from the code answer
-                extracted_code = self.extract_code_snippet(code_text)
-
-                # Check if code extraction failed
-                if extracted_code is None:
-                    code_score = 0.0
-                    component_explanations.append("Code: failed code extraction")
-                # Check if we have unit tests available for code evaluation
-                elif isinstance(gt_info, dict) and (
-                    gt_info.get("unit_tests") or gt_info.get("tests")
-                ):
-                    (
-                        code_scores_list,
-                        code_tests_passed,
-                        code_total_tests,
-                        _,
-                        _,
-                        _,
-                    ) = self.run_unit_tests_combined(
-                        [extracted_code],
-                        [
-                            {
-                                "ground_truth": "code",
-                                "unit_tests": gt_info.get("unit_tests")
-                                or gt_info.get("tests"),
-                                "libs": gt_info.get("libs", []),
-                            }
-                        ],
-                        prompt_ids=[f"interleaved_prompt_{i}"],
-                        prompts=[pred_answer],
-                        timing_raw=timing_raw,
-                    )
-
-                    passed = code_tests_passed[0] if code_tests_passed else 0
-                    total = code_total_tests[0] if code_total_tests else 0
-
-                    # Normalize score as passed_tests / total_tests
-                    if total > 0:
-                        code_score = passed / total
-                    else:
-                        code_score = 0.0
-
-                    component_explanations.append(f"Code: passed {passed}/{total} tests")
+                if code_total_tests[i] > 0:
+                    code_score = code_tests_passed[i] / code_total_tests[i]
+                    component_explanations.append(f"Code: passed {code_tests_passed[i]}/{code_total_tests[i]} tests")
                 else:
-                    code_score = 0.0
-                    component_explanations.append("Code: No gt unit tests provided")
-
+                    component_explanations.append("Code: No gt unit tests provided or failed extraction")
                 # Evaluate third answer (self-generated unit tests) - optional
                 unit_test_text = answer_parts[2]
-                # Check if unit tests look reasonable
-                if (
-                    "assert" in unit_test_text
-                    or "test" in unit_test_text.lower()
-                    or "unittest" in unit_test_text.lower()
-                    or "def test_" in unit_test_text
-                ):
-                    unit_test_score = 1.0
-                    component_explanations.append(
-                        "Unit Tests: Self-generated tests provided"
-                    )
-                else:
-                    unit_test_score = 0.0
-                    component_explanations.append("Unit Tests: No unit tests found")
-
+                unit_test_score, unit_test_explanation = self._check_generated_unit_tests(unit_test_text)
+                component_explanations.append(unit_test_explanation)
                 # Combine scores with weights
                 weights = self.interleaved_reward_weights
                 total_score = (
@@ -1082,20 +1101,14 @@ if __name__ == '__main__':
                     + code_score * weights["code"]
                     + unit_test_score * weights["unit_tests"]
                 )
-
-                total_scores.append(total_score)
-                decisions.append(1 if total_score > 1.0 else 0)  # Threshold for success
-                explanations.append(" | ".join(component_explanations))
-                raw_responses.append(
-                    f"Interleaved evaluation: {len(answer_parts)} answers found"
-                )
-
+                total_scores[i] = total_score
+                decisions[i] = 1 if total_score > 1.0 else 0  # Threshold for success
+                explanations[i] = " | ".join(component_explanations)
+                raw_responses[i] = f"Interleaved evaluation: {len(answer_parts)} answers found"
                 component_rewards["description_scores"].append(description_score)
                 component_rewards["code_scores"].append(code_score)
                 component_rewards["unit_test_scores"].append(unit_test_score)
-                # if all the unit tests passed, then pass@1 is 1
                 component_rewards["pass@1"].append(1 if code_score == 1.0 else 0)
-
         return total_scores, decisions, explanations, raw_responses, component_rewards
 
     def _evaluate_all_descriptions(
