@@ -176,18 +176,20 @@ class RewardManager:
         if self.use_autorater and self.autorater_base_url:
             ground_truth_infos = data.non_tensor_batch.get("reward_model", [{} for _ in range(batch_size)])
             
+            print("Running code evaluation flat")
             # Determine evaluation type and call appropriate method
             if self._should_use_code_evaluation(ground_truth_infos):
                 with _timer("code_evaluation", timing_raw):
                     autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, component_rewards, extracted_pred_answers, extracted_gt_answers = self._evaluate_code(
                         data, ground_truth_infos, batch_size, timing_raw
                     )
+                print("Done code evaluation flat, took", timing_raw["code_evaluation"])
             else:
                 with _timer("text_evaluation", timing_raw):
                     autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, extracted_pred_answers, extracted_gt_answers = self._evaluate_text_responses(
                         data, ground_truth_infos, batch_size, timing_raw
                     )
-
+            
             # Append extracted answers to extra info so that they can be dumped later
             reward_extra_info["extracted_pred"].extend(extracted_pred_answers)
             reward_extra_info["extracted_gt"].extend(extracted_gt_answers)
@@ -308,7 +310,8 @@ class RewardManager:
                     timing_raw=timing_raw,
                 )
             print(f"Done evaluating {len(interleaved_indices)} samples with interleaved reasoning (answer count > 3)")
-            
+            print("Interleaved evaluation took", timing_raw["interleaved_code_evaluation"])
+
             # Assign back to main arrays (only for qualified samples)
             for idx, i in enumerate(interleaved_indices):
                 autorater_scores[i] = interleaved_scores[idx]

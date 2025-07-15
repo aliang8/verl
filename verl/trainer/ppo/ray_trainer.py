@@ -1060,6 +1060,7 @@ class RayPPOTrainer:
             # Start tracking
             self.reward_manager.start_epoch(epoch + 1)
 
+            print(f"Epoch {epoch + 1} of {self.config.trainer.total_epochs}, Length of train_dataloader: {len(self.train_dataloader)}")
             for batch_idx, batch_dict in enumerate(self.train_dataloader):
                 metrics = {}
                 timing_raw = {}

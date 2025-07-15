@@ -352,11 +352,11 @@ class CodeEvaluator:
         )
 
         # Parallelism config
-        self.num_workers = self.config.get("num_workers", 32)
+        self.num_workers = self.config.get("num_workers", 10)
 
         # Initialize robust execution components
         self.sandbox_session = None
-        self.safe_executor = SafeResourceManagedExecutor(max_concurrent=self.num_workers)
+        self.safe_executor = SafeResourceManagedExecutor(max_concurrent=10)
         
         # Initialize error tracking
         self.error_tracker = ErrorTracker()
@@ -401,148 +401,6 @@ class CodeEvaluator:
             self.sandbox_session = None
             raise e
 
-    def run_unit_tests(
-        self,
-        predicted_answers: List[str],
-        reward_model_info: List[Dict[str, Any]],
-    ) -> Tuple[List[float], List[int], List[int], List[str], List[str], List[str]]:
-        """
-        Execute unit tests in SandboxSession and aggregate scores and outputs.
-
-        Args:
-            predicted_answers: List of predicted code answers
-            reward_model_info: List of reward model info containing unit tests
-
-        Returns:
-            Tuple of (code_scores, tests_passed, total_tests, stdout_list, stderr_list, error_list)
-        """
-        batch_size = len(predicted_answers)
-
-        # Ensure sandbox session exists
-        if self.sandbox_session is None:
-            logger.info(
-                "SandboxSession not available, attempting to initialize on demand"
-            )
-            self._init_sandbox()
-
-        if self.sandbox_session is None:
-            logger.warning("No SandboxSession available, returning zero scores")
-            raise Exception("No SandboxSession available")
-
-        sess = self.sandbox_session
-
-        code_scores: List[float] = [0.0] * batch_size
-        tests_passed: List[int] = [0] * batch_size
-        total_tests: List[int] = [0] * batch_size
-        stdout_list: List[str] = [""] * batch_size
-        stderr_list: List[str] = [""] * batch_size
-        error_list: List[str] = [""] * batch_size
-
-        for idx, rm_info in enumerate(reward_model_info):
-            tests_raw: List[str] = []
-            libs: Optional[List[str]] = None
-
-            if isinstance(rm_info, dict):
-                # collect libs for this sample
-                raw_libs = rm_info.get("libs")
-                if isinstance(raw_libs, list):
-                    libs = raw_libs
-                elif raw_libs is not None:
-                    libs = [str(raw_libs)]
-
-                # gather tests definitions
-                if isinstance(rm_info.get("unit_tests"), list):
-                    tests_raw = rm_info["unit_tests"]
-                elif isinstance(rm_info.get("tests"), list):
-                    tests_raw = rm_info["tests"]
-                else:
-                    tc = rm_info.get("unit_tests") or rm_info.get("tests")
-                    if tc:
-                        tests_raw = [tc]
-
-            if not tests_raw:
-                continue
-
-            code_match = re.search(
-                r"```[\w]*\n(.*?)```", predicted_answers[idx], re.DOTALL
-            )
-            pred_code_block = (
-                code_match.group(1) if code_match else predicted_answers[idx]
-            )
-
-            passes = 0
-            split_tests: List[str] = []
-
-            for snippet in tests_raw:
-                # Simple approach: split on 'def' and treat each as a test case
-                normalized_snippet = snippet.replace("\\n", "\n")
-
-                # Extract methods
-                test_methods = re.findall(
-                    r"def\s+(\w+)\s*\([^)]*\)\s*:(.*?)(?=\n\s*def|\Z)",
-                    normalized_snippet,
-                    re.DOTALL,
-                )
-
-                # Extract setUp method if present
-                setup_method = ""
-                test_only_methods = []
-
-                for method_name, method_body in test_methods:
-                    if method_name == "setUp":
-                        setup_method = f"    def setUp(self):{method_body}"
-                    elif method_name.startswith("test_"):
-                        test_only_methods.append((method_name, method_body))
-
-                for method_name, method_body in test_only_methods:
-                    # Create complete test with user code + just the test method
-                    complete_test = f"""import unittest
-import pandas as pd
-import numpy as np
-
-{pred_code_block}
-
-class TestCases(unittest.TestCase):
-{setup_method}
-    def {method_name}(self):{method_body}
-
-if __name__ == '__main__':
-    unittest.main()
-"""
-                    split_tests.append(complete_test)
-
-                # If no test methods found, treat whole snippet as one test
-                if not test_only_methods:
-                    # For plain assert statements, combine with user code
-                    complete_fallback = f"""{pred_code_block}
-
-{normalized_snippet}
-"""
-                    split_tests.append(complete_fallback)
-
-            for test_snippet in split_tests:
-                exec_code = test_snippet
-                try:
-                    res = sess.run(exec_code, libraries=libs)
-                    if res.exit_code == 0:
-                        passes += 1
-                    stdout_list[idx] += res.stdout + "\n"
-                    stderr_list[idx] += res.stderr + "\n"
-                except Exception as exec_e:
-                    error_list[idx] += str(exec_e) + "\n"
-
-            total_tests[idx] = len(split_tests)
-            tests_passed[idx] = passes
-            code_scores[idx] = float(passes) * 0.2
-
-        return (
-            code_scores,
-            tests_passed,
-            total_tests,
-            stdout_list,
-            stderr_list,
-            error_list,
-        )
 
     def run_unit_tests_combined(
         self,
@@ -715,7 +573,7 @@ if __name__ == '__main__':
                 return (idx, 0.0, 0, test_count, "", "", error)
 
         # Parallel execution
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+        with ThreadPoolExecutor(max_workers=8) as executor:
             futures = [executor.submit(run_single, idx, rm_info) for idx, rm_info in enumerate(reward_model_info)]
             for future in as_completed(futures):
                 idx, code_score, passed, total, stdout, stderr, error = future.result()
@@ -929,18 +787,20 @@ if __name__ == '__main__':
             with _timer("create_decisions", timing_raw):
                 decisions = []
                 explanations = []
-                normalized_scores = []
+                total_scores = []
+                code_scores = []
                 pass_at_1 = []
                 unit_test_scores = []
                 
                 for i in range(batch_size):
                     if i in failed_extraction_indices:
                         # Default values for failed code extraction
-                        normalized_scores.append(0.0)
+                        total_scores.append(0.0)
                         decisions.append(0)
                         explanations.append("failed code extraction")
                         pass_at_1.append(0)
                         unit_test_scores.append(0.0)
+                        code_scores.append(0.0)
                     else:
                         # Normalize score as passed_tests / total_tests
                         if code_total_tests[i] > 0:
@@ -951,7 +811,13 @@ if __name__ == '__main__':
                         # Check for generated unit tests in the original response
                         unit_test_score, unit_test_explanation = self._check_generated_unit_tests(decoded_pred_answers[i])
 
-                        normalized_scores.append(normalized_score)
+                        weights = self.interleaved_reward_weights
+                        total_score = (
+                            normalized_score * weights["code"]
+                            + unit_test_score * weights["unit_tests"]
+                        )
+                        code_scores.append(normalized_score)
+                        total_scores.append(total_score)
                         decisions.append(1 if normalized_score > 0 else 0)
                         explanations.append(
                             f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests | {unit_test_explanation} \\nstdout: {code_stdout[i]} \\nstderr: {code_stderr[i]} \\nerror: {code_error[i]}"
@@ -961,10 +827,11 @@ if __name__ == '__main__':
 
                 raw_responses = [""] * batch_size
 
-            return normalized_scores, decisions, explanations, raw_responses, {
+            return total_scores, decisions, explanations, raw_responses, {
                 "pass@1": pass_at_1, 
-                "code_scores": normalized_scores,
-                "unit_test_scores": unit_test_scores
+                "code_scores": code_scores,
+                "unit_test_scores": unit_test_scores,
+                "total_scores": total_scores,
             }
         else:
             raise ValueError(
