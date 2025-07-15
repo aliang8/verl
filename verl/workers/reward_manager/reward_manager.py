@@ -163,6 +163,7 @@ class RewardManager:
         if timing_raw is None:
             timing_raw = {}
             
+        batch_indices = data.batch["index"]
         batch_size = len(data)
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
@@ -256,7 +257,9 @@ class RewardManager:
         """
         if timing_raw is None:
             timing_raw = {}
-            
+        
+        batch_indices = data.non_tensor_batch["index"]
+
         print("Computing interleaved reasoning rewards")
         batch_size = len(data)
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
@@ -307,6 +310,7 @@ class RewardManager:
                     original_prompts=interleaved_prompts,
                     ground_truth_infos=interleaved_ground_truths,
                     batch_size=len(interleaved_indices),
+                    batch_indices=batch_indices,
                     timing_raw=timing_raw,
                 )
             print(f"Done evaluating {len(interleaved_indices)} samples with interleaved reasoning (answer count > 3)")
@@ -420,6 +424,7 @@ class RewardManager:
             timing_raw = {}
             
         logger.info("Using CodeEvaluator for evaluation")
+        batch_indices = data.non_tensor_batch["index"]
         
         # Extract ground truth information
         with _timer("extract_ground_truth", timing_raw):
@@ -442,15 +447,12 @@ class RewardManager:
                 decoded_prompts,
                 ground_truth_infos,
                 batch_size,
+                batch_indices=batch_indices,
                 timing_raw=timing_raw,
             )
         
-        # Check if we're doing interleaved reasoning for logging
-        is_interleaved = (
-            self.code_evaluator.enable_interleaved_reasoning or 
-            (self.template_type and "interleave" in self.template_type.lower())
-        )
-        
+        is_interleaved = self.code_evaluator.is_interleaved
+
         # Extract answers for logging
         with _timer("extract_answers_code", timing_raw):
             extracted_pred_answers = []

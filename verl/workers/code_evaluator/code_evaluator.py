@@ -360,6 +360,12 @@ class CodeEvaluator:
         
         # Initialize error tracking
         self.error_tracker = ErrorTracker()
+
+        # Check if we're doing interleaved reasoning
+        is_interleaved = self.enable_interleaved_reasoning or (
+            self.template_type and "interleave" in self.template_type.lower()
+        )
+        self.is_interleaved = is_interleaved
         
         self._init_sandbox()
 
@@ -602,6 +608,7 @@ class CodeEvaluator:
         original_prompts: List[str],
         ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
+        batch_indices: List[int],
         timing_raw: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]]]:
         """
@@ -619,23 +626,18 @@ class CodeEvaluator:
         """
         if timing_raw is None:
             timing_raw = {}
-            
-        # Check if we're doing interleaved reasoning
-        is_interleaved = self.enable_interleaved_reasoning or (
-            self.template_type and "interleave" in self.template_type.lower()
-        )
 
-        if is_interleaved:
+        if self.is_interleaved:
             logger.info("Using interleaved reasoning evaluation")
             with _timer("interleaved_reasoning_evaluation", timing_raw):
                 return self._evaluate_interleaved_reasoning(
-                    decoded_pred_answers, original_prompts, ground_truth_infos, batch_size, timing_raw
+                    decoded_pred_answers, original_prompts, ground_truth_infos, batch_size, batch_indices, timing_raw
                 )
         else:
             logger.info("Using standard code evaluation")
             with _timer("standard_code_evaluation", timing_raw):
                 return self._evaluate_code(
-                    decoded_pred_answers, ground_truth_infos, batch_size, timing_raw
+                    decoded_pred_answers, ground_truth_infos, batch_size, batch_indices, timing_raw
                 )
 
     def extract_code_snippet(self, predicted_answer: str) -> str:
@@ -714,6 +716,7 @@ class CodeEvaluator:
         decoded_pred_answers: List[str],
         ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
+        batch_indices: List[int],
         timing_raw: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]]]:
         """
@@ -778,7 +781,7 @@ class CodeEvaluator:
                 ) = self.run_unit_tests_combined(
                     extracted_code_answers, 
                     ground_truth_infos,
-                    prompt_ids=[f"prompt_{i}" for i in range(len(extracted_code_answers))],
+                    prompt_ids=[f"prompt_{i}" for i in batch_indices],
                     prompts=decoded_pred_answers,
                     timing_raw=timing_raw,
                 )
@@ -844,6 +847,7 @@ class CodeEvaluator:
         original_prompts: List[str],
         ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
+        batch_indices: List[int],
         timing_raw: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]]]:
         """
@@ -921,7 +925,7 @@ class CodeEvaluator:
             ) = self.run_unit_tests_combined(
                 all_extracted_code,
                 all_unit_test_info,
-                prompt_ids=[f"interleaved_prompt_{i}" for i in range(batch_size)],
+                prompt_ids=[f"interleaved_prompt_{i}" for i in batch_indices],
                 prompts=decoded_pred_answers,
                 timing_raw=timing_raw,
             )
