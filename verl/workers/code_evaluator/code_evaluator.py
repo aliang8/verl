@@ -912,7 +912,7 @@ class CodeEvaluator:
                 code_eval_indices.append(i)
             else:
                 all_unit_test_info.append({})
-                raise ValueError(f"No unit tests found for sample {i}, batch_indx: {batch_indices[i]}")
+                # raise ValueError(f"No unit tests found for sample {i}, batch_indx: {batch_indices[i]}")
 
         # --- Run all code/unit-tests in parallel (single batch call) ---
         code_scores_list = [0.0] * batch_size
