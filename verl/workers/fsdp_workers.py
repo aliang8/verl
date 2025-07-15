@@ -673,7 +673,8 @@ class ActorRolloutRefWorker(Worker):
             with _timer("generate_sequences", timing_generate):
                 print(f"Generating sequences with kwargs: {kwargs}")
                 output = self.rollout.generate_sequences(prompts=prompts, **kwargs)
-
+            
+            print(f"Done generating sequences, total time: {timing_generate}")
             log_gpu_memory_usage("After rollout generation", logger=logger)
 
             output = self.rollout_sharding_manager.postprocess_data(output)

@@ -126,3 +126,5 @@ outputs
 .history
 
 results/*
+
+*.jsonl

@@ -628,13 +628,13 @@ class CodeEvaluator:
             timing_raw = {}
 
         if self.is_interleaved:
-            logger.info("Using interleaved reasoning evaluation")
+            print("Using interleaved reasoning evaluation")
             with _timer("interleaved_reasoning_evaluation", timing_raw):
                 return self._evaluate_interleaved_reasoning(
                     decoded_pred_answers, original_prompts, ground_truth_infos, batch_size, batch_indices, timing_raw
                 )
         else:
-            logger.info("Using standard code evaluation")
+            print("Using standard code evaluation")
             with _timer("standard_code_evaluation", timing_raw):
                 return self._evaluate_code(
                     decoded_pred_answers, ground_truth_infos, batch_size, batch_indices, timing_raw
@@ -863,6 +863,7 @@ class CodeEvaluator:
             original_prompts: List of original prompts
             ground_truth_infos: List of ground truth information dictionaries
             batch_size: Number of samples in the batch
+            batch_indices: List of batch indices
             timing_raw: Dictionary to store timing information
 
         Returns:
@@ -911,11 +912,13 @@ class CodeEvaluator:
                 code_eval_indices.append(i)
             else:
                 all_unit_test_info.append({})
+                raise ValueError(f"No unit tests found for sample {i}, batch_indx: {batch_indices[i]}")
 
         # --- Run all code/unit-tests in parallel (single batch call) ---
         code_scores_list = [0.0] * batch_size
         code_tests_passed = [0] * batch_size
         code_total_tests = [0] * batch_size
+        print(f"Running unit tests for {len(code_eval_indices)} samples")
         if any(all_unit_test_info[i] for i in code_eval_indices):
             (
                 batch_code_scores,
@@ -933,6 +936,7 @@ class CodeEvaluator:
                 code_scores_list[idx] = batch_code_scores[idx]
                 code_tests_passed[idx] = batch_tests_passed[idx]
                 code_total_tests[idx] = batch_total_tests[idx]
+        print(f"Done running unit tests")
 
         # --- Main evaluation loop (now just uses batch results) ---
         with _timer("evaluate_interleaved_components", timing_raw):
