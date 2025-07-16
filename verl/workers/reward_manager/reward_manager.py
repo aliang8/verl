@@ -162,7 +162,7 @@ class RewardManager:
         """
         if timing_raw is None:
             timing_raw = {}
-            
+        
         batch_indices = data.batch["index"]
         batch_size = len(data)
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
@@ -172,30 +172,58 @@ class RewardManager:
         autorater_decisions = [-1] * batch_size
         autorater_explanations = ["N/A"] * batch_size
         autorater_raw_responses = ["N/A"] * batch_size
+        component_rewards = defaultdict(lambda: [0.0] * batch_size)
+        extracted_pred_answers = ["" for _ in range(batch_size)]
+        extracted_gt_answers = ["" for _ in range(batch_size)]
 
-        # --- Call remote AutoRater service or CodeEvaluator if enabled ---
-        if self.use_autorater and self.autorater_base_url:
-            ground_truth_infos = data.non_tensor_batch.get("reward_model", [{} for _ in range(batch_size)])
-            
-            print("Running code evaluation flat")
-            # Determine evaluation type and call appropriate method
-            if self._should_use_code_evaluation(ground_truth_infos):
-                with _timer("code_evaluation", timing_raw):
-                    autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, component_rewards, extracted_pred_answers, extracted_gt_answers = self._evaluate_code(
-                        data, ground_truth_infos, batch_size, timing_raw
-                    )
-                print("Done code evaluation flat, took", timing_raw["code_evaluation"])
+        data_sources = data.non_tensor_batch.get("data_source", [None] * batch_size)
+        ground_truth_infos = data.non_tensor_batch.get("reward_model", [{} for _ in range(batch_size)])
+
+        # Group indices by data_source type
+        code_indices = []
+        text_indices = []
+        for i, ds in enumerate(data_sources):
+            if ds and "code" in str(ds).lower():
+                code_indices.append(i)
             else:
-                with _timer("text_evaluation", timing_raw):
-                    autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, extracted_pred_answers, extracted_gt_answers = self._evaluate_text_responses(
-                        data, ground_truth_infos, batch_size, timing_raw
-                    )
-            
-            # Append extracted answers to extra info so that they can be dumped later
-            reward_extra_info["extracted_pred"].extend(extracted_pred_answers)
-            reward_extra_info["extracted_gt"].extend(extracted_gt_answers)
-        else:
-            logger.info("Remote AutoRater service not enabled or base URL not provided in RewardManager.")
+                text_indices.append(i)
+
+        print(f"number of code_indices: {len(code_indices)}")
+        print(f"number of text_indices: {len(text_indices)}")
+
+        # Evaluate code samples in a batch
+        if code_indices:
+            code_data = data.select_idxs(code_indices)
+            code_gt_infos = [ground_truth_infos[i] for i in code_indices]
+            eval_scores, eval_decisions, eval_explanations, eval_raw, comp_rewards, pred_ans, gt_ans = self._evaluate_code(
+                code_data, code_gt_infos, len(code_indices), timing_raw
+            )
+            for idx, i in enumerate(code_indices):
+                autorater_scores[i] = eval_scores[idx]
+                autorater_decisions[i] = eval_decisions[idx]
+                autorater_explanations[i] = eval_explanations[idx]
+                autorater_raw_responses[i] = eval_raw[idx]
+                for k, v in comp_rewards.items():
+                    if k not in component_rewards:
+                        component_rewards[k] = [0.0] * batch_size
+                    component_rewards[k][i] = v[idx] if v[idx] is not None else 0.0
+                extracted_pred_answers[i] = pred_ans[idx] if pred_ans[idx] is not None else ""
+                extracted_gt_answers[i] = gt_ans[idx] if gt_ans[idx] is not None else ""
+
+        # Evaluate text samples in a batch
+        if text_indices:
+            text_data = data.select_idxs(text_indices)
+            text_gt_infos = [ground_truth_infos[i] for i in text_indices]
+            eval_scores, eval_decisions, eval_explanations, eval_raw, pred_ans, gt_ans = self._evaluate_text_responses(
+                text_data, text_gt_infos, len(text_indices), timing_raw
+            )
+            for idx, i in enumerate(text_indices):
+                autorater_scores[i] = eval_scores[idx]
+                autorater_decisions[i] = eval_decisions[idx]
+                autorater_explanations[i] = eval_explanations[idx]
+                autorater_raw_responses[i] = eval_raw[idx]
+                extracted_pred_answers[i] = pred_ans[idx] if pred_ans[idx] is not None else ""
+                extracted_gt_answers[i] = gt_ans[idx] if gt_ans[idx] is not None else ""
 
         # --- Compute Format Rewards ---
         with _timer("format_reward", timing_raw):
@@ -221,7 +249,6 @@ class RewardManager:
             else:
                 logger.warning(f"Response length is 0 for sample {i}, no reward applied to token.")
                 final_scores.append(0.0)
-            
             reward_extra_info["autorater_scores"].append(autorater_scores[i])
             reward_extra_info["autorater_decisions"].append(autorater_decisions[i])
             reward_extra_info["autorater_explanations"].append(autorater_explanations[i])
@@ -231,9 +258,11 @@ class RewardManager:
             for k, v in component_rewards.items():
                 reward_extra_info[k].append(v[i])
 
+        reward_extra_info["extracted_pred"].extend(extracted_pred_answers)
+        reward_extra_info["extracted_gt"].extend(extracted_gt_answers)
+
         if return_dict:
             return reward_tensor, reward_extra_info
-        
         return reward_tensor
 
     def compute_interleaved_rewards(
@@ -267,8 +296,7 @@ class RewardManager:
 
         logger.info("Computing interleaved reasoning rewards")
         ground_truth_infos = data.non_tensor_batch.get("reward_model", [{} for _ in range(batch_size)])
-        
-        # Prepare decoded responses
+        data_sources = data.non_tensor_batch.get("data_source", [None] * batch_size)
         with _timer("decode_responses", timing_raw):
             decoded_pred_answers = [self.tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in data.batch["responses"]]
             decoded_prompts = [self.tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in data.batch["prompts"]]
@@ -276,57 +304,65 @@ class RewardManager:
         # --- First, compute format scores and answer counts ---
         with _timer("interleaved_format_reward", timing_raw):
             interleaved_format_scores, answer_counts = self._compute_interleaved_format_scores(data, batch_size)
+        # Group indices by data_source type
+        code_indices = []
+        text_indices = []
+        for i, ds in enumerate(data_sources):
+            if ds and "code" in str(ds).lower():
+                code_indices.append(i)
+            else:
+                text_indices.append(i)
 
-        # --- Filter samples that meet the interleaved criteria (answer count > 3) ---
-        interleaved_indices = []
+        # Only do interleaved evaluation if answer count > 3
+        interleaved_indices = [i for i in range(batch_size) if answer_counts[i] >= 3]
+        # Intersect with code_indices and text_indices
+        code_interleaved_indices = [i for i in interleaved_indices if i in code_indices]
+        text_interleaved_indices = [i for i in interleaved_indices if i in text_indices]
         
-        for i in range(batch_size):
-            if answer_counts[i] >= 3:  # Only do interleaved evaluation if answer count > 3
-                interleaved_indices.append(i)
-
-        # Initialize scores arrays - samples with insufficient answers get no reward
+        print(f"number of code_interleaved_indices: {len(code_interleaved_indices)}")
+        print(f"number of text_interleaved_indices: {len(text_interleaved_indices)}")
+        print(f"number of interleaved_indices: {len(interleaved_indices)}")
+        
         autorater_scores = [0.0] * batch_size
-        autorater_decisions = [0] * batch_size  # 0 = failed/no evaluation
+        autorater_decisions = [0] * batch_size
         autorater_explanations = ["No evaluation - insufficient answer count (<3)"] * batch_size
         autorater_raw_responses = ["No evaluation - answer count <3"] * batch_size
-        component_rewards_all = [{k: 0.0 for k in ["description_scores", "code_scores", "unit_test_scores", "pass@1"]} for _ in range(batch_size)]
-
-        # --- Evaluate only interleaved samples using CodeEvaluator ---
-        if interleaved_indices:
-            logger.info(f"Evaluating {len(interleaved_indices)} samples with interleaved reasoning (answer count > 3)")
-            logger.info(f"Skipping {batch_size - len(interleaved_indices)} samples with insufficient answer count (≤3)")
-            
-            # Prepare data for interleaved samples
-            with _timer("interleaved_eval_prep", timing_raw):
-                interleaved_responses = [decoded_pred_answers[i] for i in interleaved_indices]
-                interleaved_prompts = [decoded_prompts[i] for i in interleaved_indices]
-                interleaved_ground_truths = [ground_truth_infos[i] for i in interleaved_indices]
-            
-            # Use CodeEvaluator for interleaved evaluation
-            print("Using CodeEvaluator for interleaved evaluation")
-            with _timer("interleaved_code_evaluation", timing_raw):
-                interleaved_scores, interleaved_decisions, interleaved_explanations, interleaved_raw, component_rewards = self.code_evaluator.evaluate_code(
-                    decoded_pred_answers=interleaved_responses,
-                    original_prompts=interleaved_prompts,
-                    ground_truth_infos=interleaved_ground_truths,
-                    batch_size=len(interleaved_indices),
-                    batch_indices=batch_indices,
-                    timing_raw=timing_raw,
-                )
-            print(f"Done evaluating {len(interleaved_indices)} samples with interleaved reasoning (answer count > 3)")
-            print("Interleaved evaluation took", timing_raw["interleaved_code_evaluation"])
-
-            # Assign back to main arrays (only for qualified samples)
-            for idx, i in enumerate(interleaved_indices):
+        component_rewards_all = {k: [0.0] * batch_size for k in ["description_scores", "code_scores", "unit_test_scores", "pass@1"]}
+        # Evaluate code interleaved samples in a batch
+        if code_interleaved_indices:
+            code_data = data.select_idxs(code_interleaved_indices)
+            code_gt_infos = [ground_truth_infos[i] for i in code_interleaved_indices]
+            interleaved_scores, interleaved_decisions, interleaved_explanations, interleaved_raw, component_rewards = self.code_evaluator.evaluate_code(
+                decoded_pred_answers=[decoded_pred_answers[i] for i in code_interleaved_indices],
+                original_prompts=[decoded_prompts[i] for i in code_interleaved_indices],
+                ground_truth_infos=code_gt_infos,
+                batch_size=len(code_interleaved_indices),
+                batch_indices=[batch_indices[i] for i in code_interleaved_indices],
+                timing_raw=timing_raw,
+            )
+            for idx, i in enumerate(code_interleaved_indices):
                 autorater_scores[i] = interleaved_scores[idx]
                 autorater_decisions[i] = interleaved_decisions[idx]
                 autorater_explanations[i] = interleaved_explanations[idx]
                 autorater_raw_responses[i] = interleaved_raw[idx]
-                component_rewards_all[i] = {k: v[idx] for k, v in component_rewards.items()}
-        else:
-            logger.info("No samples qualified for interleaved evaluation (all had answer count ≤3)")
-
-        # --- Combine scores and populate reward_tensor and reward_extra_info ---
+                for k, v in component_rewards.items():
+                    if k not in component_rewards_all:
+                        component_rewards_all[k] = [0.0] * batch_size
+                    component_rewards_all[k][i] = v[idx] if v[idx] is not None else 0.0
+        
+        # Evaluate text interleaved samples in a batch
+        if text_interleaved_indices:
+            text_data = data.select_idxs(text_interleaved_indices)
+            text_gt_infos = [ground_truth_infos[i] for i in text_interleaved_indices]
+            interleaved_scores, interleaved_decisions, interleaved_explanations, interleaved_raw, component_rewards, _ = self._evaluate_text_responses(
+                text_data, text_gt_infos, len(text_interleaved_indices), timing_raw
+            )
+            for idx, i in enumerate(text_interleaved_indices):
+                autorater_scores[i] = interleaved_scores[idx]
+                autorater_decisions[i] = interleaved_decisions[idx]
+                autorater_explanations[i] = interleaved_explanations[idx]
+                autorater_raw_responses[i] = interleaved_raw[idx]
+        
         with _timer("combine_scores", timing_raw):
             final_scores = []
             for i in range(batch_size):
@@ -334,25 +370,16 @@ class RewardManager:
                 data_item = data[i]
                 prompt_length = data_item.batch["prompts"].shape[-1]
                 valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
-
-                # Calculate combined score
-                base_score = autorater_scores[i]  # 0.0 for samples with insufficient answer count
+                base_score = autorater_scores[i]
                 format_score = self.interleaved_format_reward_weight * interleaved_format_scores[i]
-                
-                # Determine evaluation type used
                 used_interleaved_eval = i in interleaved_indices
-                
-                # Simple addition - no penalty system needed since insufficient samples get 0 base score
                 current_final_score = base_score + format_score
-
-                # Ensure we have a valid position to place the reward
                 if valid_response_length > 0:
                     reward_tensor[i, valid_response_length - 1] = current_final_score
                     final_scores.append(current_final_score)
                 else:
                     logger.warning(f"Response length is 0 for sample {i}, no reward applied to token.")
                     final_scores.append(0.0)
-                
                 reward_extra_info["autorater_scores"].append(autorater_scores[i])
                 reward_extra_info["autorater_decisions"].append(autorater_decisions[i])
                 reward_extra_info["autorater_explanations"].append(autorater_explanations[i])
@@ -361,9 +388,8 @@ class RewardManager:
                 reward_extra_info["answer_counts"].append(answer_counts[i])
                 reward_extra_info["used_interleaved_eval"].append(used_interleaved_eval)
                 reward_extra_info["final_scores"].append(final_scores[i])
-                for k, v in component_rewards_all[i].items():
-                    reward_extra_info[k].append(v)
-
+                for k, v in component_rewards_all.items():
+                    reward_extra_info[k].append(v[i])
         # Extract answers for logging
         with _timer("extract_answers", timing_raw):
             extracted_pred_answers = []
@@ -371,18 +397,14 @@ class RewardManager:
             for pred_ans, gt_info in zip(decoded_pred_answers, ground_truth_infos):
                 all_answers = extract_solution(pred_ans, extract_all=True)
                 extracted_pred_answers.append(all_answers if all_answers else "No answers extracted")
-                
                 if isinstance(gt_info, dict) and "ground_truth" in gt_info:
                     extracted_gt_answers.append(str(gt_info["ground_truth"]))
                 else:
                     extracted_gt_answers.append(str(gt_info))
-
             reward_extra_info["extracted_pred"].extend(extracted_pred_answers)
             reward_extra_info["extracted_gt"].extend(extracted_gt_answers)
-
         if return_dict:
             return reward_tensor, reward_extra_info
-        
         return reward_tensor
 
     def _get_tokenizer(self):

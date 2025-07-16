@@ -57,7 +57,8 @@ Decision:  """
 
 
 # AutoRater template for evaluating helpfulness of a response
-HELPFULNESS_RATER_TEMPLATE = """===Task===\nYou are given a user question and a response from an AI assistant.
+HELPFULNESS_RATER_TEMPLATE = """===Task===
+You are given a user question and a response from an AI assistant.
 Your job is to judge whether the response is helpful, relevant, and addresses the user's question.
 
 ===User Question===
