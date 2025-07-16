@@ -749,24 +749,23 @@ class CodeEvaluator:
         if use_code_evaluator:
             # Extract code snippets from predicted answers first
             logger.info("Extracting code snippets from predicted answers")
-            with _timer("extract_code_snippets", timing_raw):
-                extracted_code_answers = []
-                failed_extraction_indices = []
+            extracted_code_answers = []
+            failed_extraction_indices = []
 
-                for i, pred_answer in enumerate(decoded_pred_answers):
-                    extracted_code = self.extract_code_snippet(pred_answer)
-                    if not extracted_code.strip():
-                        failed_extraction_indices.append(i)
-                        extracted_code_answers.append(
-                            ""
-                        )  # Use empty string for failed extractions
-                    else:
-                        extracted_code_answers.append(extracted_code)
+            for i, pred_answer in enumerate(decoded_pred_answers):
+                extracted_code = self.extract_code_snippet(pred_answer)
+                if not extracted_code.strip():
+                    failed_extraction_indices.append(i)
+                    extracted_code_answers.append(
+                        ""
+                    )  # Use empty string for failed extractions
+                else:
+                    extracted_code_answers.append(extracted_code)
 
-                if failed_extraction_indices:
-                    logger.warning(
-                        f"Failed to extract code from {len(failed_extraction_indices)} samples: {failed_extraction_indices}"
-                    )
+            if failed_extraction_indices:
+                logger.warning(
+                    f"Failed to extract code from {len(failed_extraction_indices)} samples: {failed_extraction_indices}"
+                )
 
             # Use local unit test execution
             logger.info("Using local unit test execution for code evaluation")

@@ -406,9 +406,9 @@ class RewardManager:
         """
         Compute helpfulness scores for a list of (prompt, answer) pairs using the AutoRater service.
         If interleaving is enabled, extract all intermediate answers and compute helpfulness for each.
+        Only non-empty extracted answers are sent to AutoRater; empty ones default to 0.0 score and 0 decision.
         Returns a tuple of (autorater_scores, autorater_decisions), both lists of length equal to the number of extracted answers.
         """
-        import ipdb; ipdb.set_trace()
         if not self.use_autorater or not self.autorater_base_url:
             raise RuntimeError("AutoRater service is not enabled or URL is not set.")
         batch_size = len(answers)
@@ -431,18 +431,42 @@ class RewardManager:
                 ans = extract_solution(a)
                 extracted_prompts.append(p)
                 extracted_answers.append(ans if ans is not None else "")
-        responses = [self.tokenizer.encode(ans, add_special_tokens=False) for ans in extracted_answers]
-        attention_mask = [[1] * len(r) for r in responses]
-        position_ids = [[i for i in range(len(r))] for r in responses]
-        reward_model_info = [{"template": "helpfulness"} for _ in range(len(extracted_answers))]
-        payload = {
-            "prompts": extracted_prompts,
-            "responses": responses,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids,
-            "reward_model_info": reward_model_info,
-        }
-        autorater_scores, autorater_decisions, *_ = call_autorater_service(self.autorater_base_url, payload, len(extracted_answers))
+        
+        # Filter out empty answers and prepare for AutoRater
+        non_empty_indices = []
+        non_empty_prompts = []
+        non_empty_answers = []
+        
+        for i, (prompt, answer) in enumerate(zip(extracted_prompts, extracted_answers)):
+            if answer and answer.strip():  # Check if answer is non-empty
+                non_empty_indices.append(i)
+                non_empty_prompts.append(prompt)
+                non_empty_answers.append(answer)
+        
+        # Initialize results with defaults (0.0 score, 0 decision for all)
+        autorater_scores = [0.0] * len(extracted_answers)
+        autorater_decisions = [0] * len(extracted_answers)
+        
+        # Only call AutoRater if we have non-empty answers
+        if non_empty_answers:
+            responses = [self.tokenizer.encode(ans, add_special_tokens=False) for ans in non_empty_answers]
+            attention_mask = [[1] * len(r) for r in responses]
+            position_ids = [[i for i in range(len(r))] for r in responses]
+            reward_model_info = [{"template": "helpfulness"} for _ in range(len(non_empty_answers))]
+            payload = {
+                "prompts": non_empty_prompts,
+                "responses": responses,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "reward_model_info": reward_model_info,
+            }
+            non_empty_scores, non_empty_decisions, *_ = call_autorater_service(self.autorater_base_url, payload, len(non_empty_answers))
+            
+            # Update the results for non-empty answers
+            for idx, score, decision in zip(non_empty_indices, non_empty_scores, non_empty_decisions):
+                autorater_scores[idx] = score
+                autorater_decisions[idx] = decision
+        
         return autorater_scores, autorater_decisions
 
     def _get_tokenizer(self):
