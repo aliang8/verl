@@ -11,7 +11,7 @@ data:
   response_dict_keys: null
   # System template settings
   use_system_template: true  # Enable system message in chat template
-  system_template_type: "interleave"  # Template type for system message:
+  system_template_type: interleave  # Template type for system message:
     # - "interleave": Interleaved reasoning with <think></think> and <answer></answer> tags
     # - "think_answer": Basic think/answer template  
     # - "tool": Tool use template

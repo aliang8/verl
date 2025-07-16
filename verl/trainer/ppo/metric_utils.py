@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List
 
 import numpy as np
 import torch
+import re
 
 from verl import DataProto
 from verl.utils.import_utils import deprecated
@@ -77,7 +78,7 @@ def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
     )
 
 
-def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str, Any]:
+def compute_data_metrics(batch: DataProto, use_critic: bool = True, tokenizer=None) -> Dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
 
@@ -88,6 +89,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     Args:
         batch: A DataProto object containing batch data with token-level scores, rewards, advantages, etc.
         use_critic: Whether to include critic-specific metrics. Defaults to True.
+        tokenizer: The tokenizer to use for thought/answer length metrics. Required for those metrics.
 
     Returns:
         A dictionary of metrics including:
@@ -99,6 +101,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             - critic/vf_explained_var: Explained variance of the value function (if use_critic=True)
             - response_length/mean, max, min, clip_ratio: Statistics about response lengths
             - prompt_length/mean, max, min, clip_ratio: Statistics about prompt lengths
+            - thought_length/mean, max, min, total: Statistics about <think> token lengths (if tokenizer provided)
+            - answer_length/mean, max, min, total: Statistics about <answer> token lengths (if tokenizer provided)
     """
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
@@ -166,6 +170,23 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         "prompt_length/min": torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
     }
+
+    # Add thought/answer length metrics if tokenizer is provided
+    if tokenizer is not None:
+        ta_lengths = compute_thought_and_answer_lengths(batch, tokenizer)
+        all_thought_lengths = [l for d in ta_lengths for l in d['thought_lengths']]
+        all_answer_lengths = [l for d in ta_lengths for l in d['answer_lengths']]
+        metrics.update({
+            'thought_length/mean': float(np.mean(all_thought_lengths)) if all_thought_lengths else 0.0,
+            'thought_length/max': float(np.max(all_thought_lengths)) if all_thought_lengths else 0.0,
+            'thought_length/min': float(np.min(all_thought_lengths)) if all_thought_lengths else 0.0,
+            'thought_length/total': int(np.sum(all_thought_lengths)) if all_thought_lengths else 0,
+            'answer_length/mean': float(np.mean(all_answer_lengths)) if all_answer_lengths else 0.0,
+            'answer_length/max': float(np.max(all_answer_lengths)) if all_answer_lengths else 0.0,
+            'answer_length/min': float(np.min(all_answer_lengths)) if all_answer_lengths else 0.0,
+            'answer_length/total': int(np.sum(all_answer_lengths)) if all_answer_lengths else 0,
+        })
+
     return metrics
 
 
@@ -458,3 +479,45 @@ def process_training_reward_metrics(data_sources: list[str], reward_extra_infos_
                     metrics[f"rewards/{data_source}/{metric_name}"] = np.mean(data_source_values)
     
     return metrics
+
+
+def compute_thought_and_answer_lengths(batch: DataProto, tokenizer) -> list[dict[str, any]]:
+    """
+    For each response in the batch, compute the number of tokens in each <think>...</think> and <answer>...</answer> span.
+    Returns a list of dicts, one per batch item, with keys:
+        - 'thought_lengths': list of ints
+        - 'answer_lengths': list of ints
+        - 'total_thought_length': int
+        - 'total_answer_length': int
+    """
+    results = []
+    responses = batch.batch["responses"]  # (batch_size, response_length)
+    attention_mask = batch.batch["attention_mask"]  # (batch_size, prompt+response_length)
+    response_length = responses.shape[1]
+    batch_size = responses.shape[0]
+
+    # The response tokens are the last response_length tokens in attention_mask
+    for i in range(batch_size):
+        # Get valid response tokens (ignore padding)
+        # Find the start index of the response in the full attention mask
+        attn_mask = attention_mask[i]
+        valid_response_mask = attn_mask[-response_length:]
+        valid_len = valid_response_mask.sum().item()
+        valid_response_ids = responses[i][:int(valid_len)]
+        response_str = tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+
+        # Find all <think>...</think> and <answer>...</answer> spans
+        think_spans = [m.group(1) for m in re.finditer(r'<think>(.*?)</think>', response_str, re.DOTALL | re.IGNORECASE)]
+        answer_spans = [m.group(1) for m in re.finditer(r'<answer>(.*?)</answer>', response_str, re.DOTALL | re.IGNORECASE)]
+
+        # Compute token lengths for each span
+        thought_lengths = [len(tokenizer.encode(span, add_special_tokens=False)) for span in think_spans]
+        answer_lengths = [len(tokenizer.encode(span, add_special_tokens=False)) for span in answer_spans]
+
+        results.append({
+            'thought_lengths': thought_lengths,
+            'answer_lengths': answer_lengths,
+            'total_thought_length': sum(thought_lengths),
+            'total_answer_length': sum(answer_lengths),
+        })
+    return results

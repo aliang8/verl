@@ -38,9 +38,9 @@ TOOL_USE_AND_INTERLEAVE_TEMPLATE = (
 )
 
 INTERLEAVE_TEMPLATE = (
-    "You are a helpful assistant. You reason through problems step by step before providing an answer. You "
-    "conduct your reasoning within <think></think> and share partial answers within <answer></answer> "
-    "as soon as you become confident about the intermediate results. You continue this pattern of "
+    "You are a helpful assistant. You reason through problems step-by-step before providing an answer. You "
+    "conduct your reasoning within <think></think> and share partial answers that are useful for the user "
+    "within <answer></answer>. You continue this pattern of "
     "<think></think><answer></answer><think></think><answer></answer> until you reach the final answer."
 )
 
