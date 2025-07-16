@@ -806,6 +806,16 @@ class RayPPOTrainer:
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
 
+        # Compute and log helpfulness scores for all outputs (only during evaluation)
+        helpfulness_scores, helpfulness_decisions = self.reward_manager.compute_helpfulness_scores(sample_inputs, sample_outputs)
+        mean_helpfulness = float(np.mean(helpfulness_scores)) if helpfulness_scores else 0.0
+        std_helpfulness = float(np.std(helpfulness_scores)) if helpfulness_scores else 0.0
+        mean_decision = float(np.mean(helpfulness_decisions)) if helpfulness_decisions else 0.0
+        metric_dict['val-aux/helpfulness/mean'] = mean_helpfulness
+        metric_dict['val-aux/helpfulness/std'] = std_helpfulness
+        metric_dict['val-aux/helpfulness/decision_mean'] = mean_decision
+        print(f"[Eval] Mean helpfulness score: {mean_helpfulness:.4f}, Mean decision: {mean_decision:.4f}")
+
         return metric_dict
 
     def init_workers(self):
