@@ -29,6 +29,7 @@ from verl.workers.autorater.autorater_utils import (
     format_autorater_prompt,
     parse_autorater_response,
     format_code_outline_prompt,
+    format_helpfulness_prompt, 
 )
 
 # Configure logging
@@ -123,7 +124,7 @@ class AutoRaterActor:
         """Evaluate a batch of responses using AutoRater template"""
         if self.inference_engine is None:
             raise RuntimeError("AutoRater not initialized")
-                    
+                
         # Format evaluation prompts
         evaluation_prompts = []
         if not template_types:
@@ -135,6 +136,11 @@ class AutoRaterActor:
             if tmpl == "outline":
                 prompt = format_code_outline_prompt(
                     problem_description=question, outline_answer=predicted_answer
+                )
+            elif tmpl == "helpfulness":
+                prompt = format_helpfulness_prompt(
+                    question=question,
+                    predicted_answer=predicted_answer
                 )
             else:
                 prompt = format_autorater_prompt(
@@ -463,7 +469,9 @@ def _run_llm_autorater(
     batch_size = len(questions)
 
     template_types = [
-        "outline" if isinstance(rm, dict) and rm.get("template") == "outline" else "standard"
+        "outline" if isinstance(rm, dict) and rm.get("template") == "outline"
+        else "helpfulness" if isinstance(rm, dict) and rm.get("template") == "helpfulness"
+        else "standard"
         for rm in reward_model_info
     ]
 

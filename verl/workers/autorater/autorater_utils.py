@@ -53,8 +53,33 @@ or
 "Decision: FALSE" (if the outline misses important aspects or is wrong).
 
 Please proceed with the evaluation.
-Decision: 
-"""
+Decision:  """
+
+
+# AutoRater template for evaluating helpfulness of a response
+HELPFULNESS_RATER_TEMPLATE = """===Task===\nYou are given a user question and a response from an AI assistant.
+Your job is to judge whether the response is helpful, relevant, and addresses the user's question.
+
+===User Question===
+{question}
+
+===AI Response===
+{predicted_answer}
+
+===Evaluation Instructions===
+1. Consider if the response provides useful, accurate, and relevant information for the user's question.
+2. Ignore minor phrasing or style issues; focus on substance and helpfulness.
+3. If the response is off-topic, incorrect, or unhelpful, mark as FALSE.
+4. If the response is generally helpful and addresses the question, mark as TRUE.
+
+===Output Format===
+Respond with exactly one line in this format:
+"Decision: TRUE"  (if the response is helpful)
+or
+"Decision: FALSE" (if the response is not helpful).
+
+Please proceed with the evaluation.
+Decision: """
 
 
 def extract_solution(
@@ -171,4 +196,22 @@ def format_code_outline_prompt(
     return template.format(
         problem_description=problem_description.strip(),
         outline_answer=outline_answer.strip(),
+    ) 
+
+
+def format_helpfulness_prompt(question: str, predicted_answer: str, template: Union[str, None] = None) -> str:
+    """
+    Format the helpfulness rater prompt with the given inputs.
+    Args:
+        question: The original user question
+        predicted_answer: The AI's response to evaluate
+        template: Custom template to use (defaults to HELPFULNESS_RATER_TEMPLATE)
+    Returns:
+        Formatted prompt string
+    """
+    if template is None:
+        template = HELPFULNESS_RATER_TEMPLATE
+    return template.format(
+        question=question,
+        predicted_answer=predicted_answer
     ) 
