@@ -163,7 +163,6 @@ class RewardManager:
         if timing_raw is None:
             timing_raw = {}
         
-        batch_indices = data.batch["index"]
         batch_size = len(data)
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)

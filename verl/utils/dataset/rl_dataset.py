@@ -27,6 +27,8 @@ import torch
 from omegaconf import DictConfig, ListConfig
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
+from datasets import Features, Value
+from datasets.features import List as HFList
 
 import verl.utils.torch_functional as verl_F
 from verl.utils.model import compute_position_id_with_mask
@@ -132,6 +134,89 @@ class RLHFDataset(Dataset):
             # read parquet files and cache
             dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
             dataframes.append(dataframe)
+
+        all_columns = set()
+        for df in dataframes:
+            all_columns.update(df.column_names)
+        all_columns = list(all_columns)
+
+        column_types = {}
+        for df in dataframes:
+            features = df.features
+            for col in features:
+                column_types[col] = features[col]
+
+        # Function to add missing columns to a dataset
+        def add_missing_columns(dataset, target_columns):
+            new_features = dataset.features.copy()
+            for col in target_columns:
+                if col not in dataset.column_names:
+                    # You can specify the type of the new column, e.g., Value("string")
+                    # For simplicity, we'll let it infer or assume None is acceptable
+                    dataset = dataset.add_column(col, [None] * len(dataset))
+                    # If you need to explicitly define the feature type:
+                    # new_features[col] = Value("string") # Or Value("int64"), Value("bool")
+                    new_features[col] = column_types[col]
+                    dataset = dataset.cast(new_features)
+            # Ensure column order is consistent (optional but good practice)
+            dataset = dataset.select_columns(target_columns)
+            return dataset.cast(dataset.features) # Cast to ensure consistent types if needed
+
+        dataframes = [add_missing_columns(df, all_columns) for df in dataframes]
+
+        # Get all keys from reward_model in both datasets
+        rm_keys = []
+        for df in dataframes:
+            rm_keys.extend(list(df.features['reward_model'].keys()))
+        all_rm_keys = sorted(list(set(rm_keys)))
+
+        print("\nAll unique reward_model keys:", all_rm_keys)
+
+        # Define the target features for the 'reward_model' column
+        # All values will be strings, so we use Value('string') for consistency
+        target_reward_model_features = {key: Value('string') for key in all_rm_keys}
+
+        # --- 3. Transformation Function for `map()` ---
+
+        def harmonize_reward_model(example, target_keys, target_feature_type):
+            new_reward_model = {}
+            for key in target_keys:
+                # Get the value from the original 'reward_model' dict, or None if not present
+                value = example['reward_model'].get(key)
+                new_reward_model[key] = value
+                if value is None:
+                    # If the value is missing, use the default based on the target type
+                    # This is where target_feature_types_dict becomes useful
+                    feature_type = target_feature_type.get(key)
+                    if isinstance(feature_type, Value):
+                        if feature_type.dtype == 'string':
+                            new_reward_model[key] = "" # Default to empty string for missing strings
+                        elif feature_type.dtype in ['int32', 'int64']:
+                            new_reward_model[key] = 0 # Default to 0 for missing integers
+                        elif feature_type.dtype in ['float32', 'float64']:
+                            new_reward_model[key] = 0.0 # Default to 0.0 for missing floats
+                        elif feature_type.dtype == 'bool':
+                            new_reward_model[key] = False # Default to False for missing booleans
+                        else:
+                            new_reward_model[key] = None # Fallback for other Value types
+                    else:
+                        new_reward_model[key] = None # For non-Value features (e.g., Sequence, though less likely here)
+                else:
+                    new_reward_model[key] = value
+            
+            # print(new_reward_model)
+            example['reward_model'] = new_reward_model
+            return example
+
+        # --- 4. Apply transformations to each dataset ---
+        for index, df in enumerate(dataframes):
+            print(f"\nTransforming df{index}...")
+            dataframes[index] = df.map(
+                lambda example: harmonize_reward_model(example, all_rm_keys, target_reward_model_features),
+            )
+            print(f"df{index}_harmonized features:", dataframes[index].features)
+            print(f"df{index}_harmonized example 0:", dataframes[index][0])
+
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
         print(f"dataset len: {len(self.dataframe)}")
