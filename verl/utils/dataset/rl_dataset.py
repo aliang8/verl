@@ -27,8 +27,7 @@ import torch
 from omegaconf import DictConfig, ListConfig
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
-from datasets import Features, Value
-from datasets import List as HFList
+from datasets import Value
 
 import verl.utils.torch_functional as verl_F
 from verl.utils.model import compute_position_id_with_mask
