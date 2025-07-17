@@ -60,8 +60,12 @@ Decision:  """
 # explain what intermediate response is  
 # meta eval set for the autorater prompt, maybe as in-context examples too
 HELPFULNESS_RATER_TEMPLATE = """===Task===
-You are given a user question and an intermediate response from an AI assistant.
-In the context of interleaved reasoning, an 'intermediate response' refers to a partial output or a visible step presented by an AI assistant during its reasoning process. It is not the final answer, but rather a piece of information or an action (like a search query) explicitly shared with the user to provide useful and relevant context. Your job is to judge whether the intermediate response is helpful for the user.
+You are given a user question, previous context and a new intermediate response from an AI assistant.
+In the context of interleaved reasoning, an 'intermediate response' refers to a partial output or a visible step presented by an AI assistant during its reasoning process. 
+A good partial answer should directly address some part of a user query. 
+For example, in a trip planning prompt an intermediate answer should concretely mention hotel options, or flight options rather than provide half-baked information.
+Importantly, a good partial response goes beyond reasoning and gives actual relevant and actionable output to the user.
+Your job is to judge whether the intermediate response is a good intermediate response.
 
 ===User Question===
 {question}
@@ -73,25 +77,27 @@ In the context of interleaved reasoning, an 'intermediate response' refers to a 
 {predicted_answer}
 
 ===Evaluation Instructions===
-1. Consider if the response provides information that is useful and relevant to the user's question.
-2. Evaluate if the response logically contributes to fulfilling the user's request, even if it's not the final answer itself.
-3. Assess whether the response clarifies aspects of the question.
-4. Determine if the information presented is novel and not merely a rephrasing or repetition of what's already known or implied by the user's question.
-5. Consider the context of previous responses - if this response builds upon or adds to previous helpful information, it may be more valuable.
+1. Consider if the response provides information that is useful, relevant and actionable to the user's question.
+2. Determine if the information presented is novel and not merely a rephrasing or repetition of what's already known or implied by the user's question.
+3. Consider the context of previous responses - if this response builds upon or adds to previous helpful information.
 
 ===Output Format===
 Respond with exactly one line in this format:
-"Decision: TRUE"  (if the response is helpful)
+"Decision: TRUE"  (if the response is a good intermediate response)
 or
-"Decision: FALSE" (if the response is not helpful).
+"Decision: FALSE" (if the response is not a good intermediate response).
 
 Please proceed with the evaluation.
 Decision: """
 
 HELPFULNESS_RATER_TEMPLATE_RATING = """
 ===Task===
-You are given a user question and an intermediate response from an AI assistant.
-In the context of interleaved reasoning, an 'intermediate response' refers to a partial output or a visible step presented by an AI assistant during its reasoning process. It is not the final answer, but rather a piece of information or an action (like a search query) explicitly shared with the user to provide useful and relevant context towards the user's request. Your job is to judge how helpful the intermediate response is for the user.
+You are given a user question, previous context and a new intermediate response from an AI assistant.
+In the context of interleaved reasoning, an 'intermediate response' refers to a partial output or a visible step presented by an AI assistant during its reasoning process.
+A good partial answer should directly address some part of a user query.
+For example, in a trip planning prompt an intermediate answer should concretely mention hotel options, or flight options rather than provide half-baked information.
+Importantly, a good partial response goes beyond reasoning and gives actual relevant and actionable output to the user.
+Your job is to judge how good the intermediate response is.
 
 ===User Question===
 {question}
@@ -103,17 +109,15 @@ In the context of interleaved reasoning, an 'intermediate response' refers to a 
 {predicted_answer}
 
 ===Evaluation Instructions===
-Rate the helpfulness of the AI Response on a scale of 1 to 5, where:
-*   **1 - Not Helpful:** The response is irrelevant, incorrect, misleading, or completely redundant. It actively hinders progress or provides no value.
-*   **2 - Minimally Helpful:** The response has very little relevance or provides extremely limited value. It might be technically correct but doesn't significantly move the user closer to understanding or solving the question.
-*   **3 - Moderately Helpful:** The response is generally relevant and provides some useful information or clarifies an aspect. It contributes a bit to progress but isn't a major step forward.
-*   **4 - Very Helpful:** The response is clearly relevant, provides valuable and novel information, and significantly helps in moving towards understanding or solving the question. It clarifies important aspects.
-*   **5 - Extremely Helpful:** The response is highly relevant, crucial for progress, and provides essential, novel insights. It represents a significant and effective step towards fulfilling the user's request.
+Rate the quality of the AI Response as an intermediate step on a scale of 1 to 5, where:
+*   **1 - Very Poor:** The response is irrelevant, incorrect, or provides no useful/actionable information. It does not contribute to the user's progress.
+*   **2 - Poor:** The response provides very little useful or actionable information, or it's mostly redundant with previous context. It barely moves the user forward.
+*   **3 - Fair:** The response offers some useful or actionable information, but it might be incomplete, slightly vague, or not as concrete as it could be. It contributes moderately to progress.
+*   **4 - Good:** The response is clearly useful, relevant, and provides concrete, actionable information that directly addresses part of the user's query. It builds well on previous context if applicable and moves the user significantly forward.
+*   **5 - Excellent:** The response is highly relevant, provides crucial, concrete, and actionable information, and is novel. It represents a significant and effective step towards fulfilling the user's request, demonstrating clear progress.
 
 Consider the following points when assigning your score:
-*   Does the response provide information that is useful and relevant to the user's question?
-*   Does the response logically contribute to fulfilling the user's request, even if it's not the final answer itself?
-*   Does the response clarify aspects of the question?
+*   Does the response provide information that is useful, relevant, and actionable to the user's question?
 *   Is the information presented novel and not merely a rephrasing or repetition of what's already known or implied by the user's question?
 *   Does the response build upon or add to previous helpful information in the context?
 
@@ -251,7 +255,7 @@ def format_helpfulness_prompt(question: str, predicted_answer: str, context: Opt
         template = HELPFULNESS_RATER_TEMPLATE
     elif template == "helpfulness_rating":
         template = HELPFULNESS_RATER_TEMPLATE_RATING
-        
+
     # Format context as numbered list if provided
     if context and isinstance(context, list):
         context_str = "\n".join([f"{i+1}. {ans}" for i, ans in enumerate(context)])

@@ -968,6 +968,7 @@ class CodeEvaluator:
                 all_extracted_code.append("")
                 all_unit_test_info.append({})
                 continue
+
             code_text = answer_parts[1]
             extracted_code = self.extract_code_snippet(code_text)
             all_extracted_code.append(extracted_code)
