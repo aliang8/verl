@@ -57,21 +57,27 @@ Decision:  """
 
 
 # AutoRater template for evaluating helpfulness of a response
+# explain what intermediate response is  
+# meta eval set for the autorater prompt, maybe as in-context examples too
 HELPFULNESS_RATER_TEMPLATE = """===Task===
-You are given a user question and a response from an AI assistant.
-Your job is to judge whether the response is helpful, relevant, and addresses the user's question.
+You are given a user question and an intermediate response from an AI assistant.
+In the context of interleaved reasoning, an 'intermediate response' refers to a partial output or a visible step presented by an AI assistant during its reasoning process. It is not the final answer, but rather a piece of information or an action (like a search query) explicitly shared with the user to provide useful and relevant context. Your job is to judge whether the intermediate response is helpful for the user.
 
 ===User Question===
 {question}
+
+===Previous Context===
+{context}
 
 ===AI Response===
 {predicted_answer}
 
 ===Evaluation Instructions===
-1. Consider if the response provides useful, accurate, and relevant information for the user's question.
-2. Ignore minor phrasing or style issues; focus on substance and helpfulness.
-3. If the response is off-topic, incorrect, or unhelpful, mark as FALSE.
-4. If the response is generally helpful and addresses the question, mark as TRUE.
+1. Consider if the response provides information that is useful and relevant to the user's question.
+2. Evaluate if the response logically contributes to fulfilling the user's request, even if it's not the final answer itself.
+3. Assess whether the response clarifies aspects of the question.
+4. Determine if the information presented is novel and not merely a rephrasing or repetition of what's already known or implied by the user's question.
+5. Consider the context of previous responses - if this response builds upon or adds to previous helpful information, it may be more valuable.
 
 ===Output Format===
 Respond with exactly one line in this format:
@@ -82,43 +88,73 @@ or
 Please proceed with the evaluation.
 Decision: """
 
+HELPFULNESS_RATER_TEMPLATE_RATING = """
+===Task===
+You are given a user question and an intermediate response from an AI assistant.
+In the context of interleaved reasoning, an 'intermediate response' refers to a partial output or a visible step presented by an AI assistant during its reasoning process. It is not the final answer, but rather a piece of information or an action (like a search query) explicitly shared with the user to provide useful and relevant context towards the user's request. Your job is to judge how helpful the intermediate response is for the user.
+
+===User Question===
+{question}
+
+===Previous Context===
+{context}
+
+===AI Response===
+{predicted_answer}
+
+===Evaluation Instructions===
+Rate the helpfulness of the AI Response on a scale of 1 to 5, where:
+*   **1 - Not Helpful:** The response is irrelevant, incorrect, misleading, or completely redundant. It actively hinders progress or provides no value.
+*   **2 - Minimally Helpful:** The response has very little relevance or provides extremely limited value. It might be technically correct but doesn't significantly move the user closer to understanding or solving the question.
+*   **3 - Moderately Helpful:** The response is generally relevant and provides some useful information or clarifies an aspect. It contributes a bit to progress but isn't a major step forward.
+*   **4 - Very Helpful:** The response is clearly relevant, provides valuable and novel information, and significantly helps in moving towards understanding or solving the question. It clarifies important aspects.
+*   **5 - Extremely Helpful:** The response is highly relevant, crucial for progress, and provides essential, novel insights. It represents a significant and effective step towards fulfilling the user's request.
+
+Consider the following points when assigning your score:
+*   Does the response provide information that is useful and relevant to the user's question?
+*   Does the response logically contribute to fulfilling the user's request, even if it's not the final answer itself?
+*   Does the response clarify aspects of the question?
+*   Is the information presented novel and not merely a rephrasing or repetition of what's already known or implied by the user's question?
+*   Does the response build upon or add to previous helpful information in the context?
+
+===Output Format===
+Respond with exactly one line in this format:
+"Decision: [SCORE]" (where [SCORE] is an integer from 1 to 5)
+
+Please proceed with the evaluation.
+Decision: """
 
 def extract_solution(
     solution_str: str,
-    method: str = "any",
-    answer_formats: Optional[List[str]] = None,
-    extract_all: bool = False,
+    template_type: str = "default",
 ) -> Union[str, List[str], None]:
-    """Extract content inside <answer>...</answer> tags.
+    """
+    Extract answer(s) from a solution string based on template type.
 
     Args:
-        solution_str: The input string containing answer tags
+        solution_str: The input string containing answer tags or think tags
+        template_type: The template type (e.g., 'interleave' or other)
         method: Extraction method (kept for backward compatibility, currently ignored)
-        answer_formats: Answer formats (kept for backward compatibility, currently ignored)
-        extract_all: If True, extracts all <answer> tags and returns as comma-separated list
-    
     Returns:
-        If extract_all=False: Content of first <answer> tag or None if missing/empty
-        If extract_all=True: All <answer> tag contents joined by commas, or None if no tags found
+        If template_type contains 'interleave': List of all <answer>...</answer> contents (stripped), or None if no tags found
+        Otherwise: String after the last </think> tag (stripped), or the whole string if no </think> tag is found
     """
-
-    if extract_all:
+    if template_type and "interleave" in template_type.lower():
         # Find all matches between <answer> and </answer> tags
         matches = re.findall(r"<answer>(.*?)</answer>", solution_str, re.IGNORECASE | re.DOTALL)
         if not matches:
             return None
-        
-        # Strip whitespace from each match and filter out empty ones
         extracted_items = [match.strip() for match in matches if match.strip()]
         return extracted_items
     else:
-        # Original behavior: extract first match only
-        match = re.search(r"<answer>(.*?)</answer>", solution_str, re.IGNORECASE | re.DOTALL)
-        if not match:
-            return None
+        # Find the last </think> tag and return everything after it
+        think_match = list(re.finditer(r"</think>", solution_str, re.IGNORECASE))
+        if think_match:
+            last = think_match[-1]
+            after = solution_str[last.end():].strip()
+            return after if after else None
 
-        extracted = match.group(1).strip()
-        return extracted if extracted else None
+        return None
 
 
 def format_autorater_prompt(question: str, predicted_answer: str, ground_truth_answer: str, template: Union[str, None] = None) -> str:
@@ -200,19 +236,31 @@ def format_code_outline_prompt(
     ) 
 
 
-def format_helpfulness_prompt(question: str, predicted_answer: str, template: Union[str, None] = None) -> str:
+def format_helpfulness_prompt(question: str, predicted_answer: str, context: Optional[List[str]] = None, template: Union[str, None] = None) -> str:
     """
     Format the helpfulness rater prompt with the given inputs.
     Args:
         question: The original user question
         predicted_answer: The AI's response to evaluate
+        context: Optional list of previous answers for context
         template: Custom template to use (defaults to HELPFULNESS_RATER_TEMPLATE)
     Returns:
         Formatted prompt string
     """
-    if template is None:
+    if template == "helpfulness":
         template = HELPFULNESS_RATER_TEMPLATE
+    elif template == "helpfulness_rating":
+        template = HELPFULNESS_RATER_TEMPLATE_RATING
+        
+    # Format context as numbered list if provided
+    if context and isinstance(context, list):
+        context_str = "\n".join([f"{i+1}. {ans}" for i, ans in enumerate(context)])
+    else:
+        context_str = "None"
+    
     return template.format(
         question=question,
-        predicted_answer=predicted_answer
+        predicted_answer=predicted_answer,
+        context=context_str
     ) 
+

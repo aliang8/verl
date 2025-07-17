@@ -120,6 +120,7 @@ class AutoRaterActor:
         predicted_answers: List[str],
         ground_truth_answers: List[str],
         template_types: Optional[List[str]] = None,
+        reward_model_info: Optional[List[Dict[str, Any]]] = None,
     ):
         """Evaluate a batch of responses using AutoRater template"""
         if self.inference_engine is None:
@@ -129,18 +130,27 @@ class AutoRaterActor:
         evaluation_prompts = []
         if not template_types:
             template_types = ["standard"] * len(questions)
+        if not reward_model_info:
+            reward_model_info = [{}] * len(questions)
 
-        for question, predicted_answer, ground_truth, tmpl in zip(
-            questions, predicted_answers, ground_truth_answers, template_types
+        for i, (question, predicted_answer, ground_truth, tmpl) in enumerate(
+            zip(questions, predicted_answers, ground_truth_answers, template_types)
         ):
+            # Extract context from reward_model_info
+            context = None
+            if i < len(reward_model_info) and isinstance(reward_model_info[i], dict):
+                context = reward_model_info[i].get("context")
+            
             if tmpl == "outline":
                 prompt = format_code_outline_prompt(
                     problem_description=question, outline_answer=predicted_answer
                 )
-            elif tmpl == "helpfulness":
+            elif "helpfulness" in tmpl:
                 prompt = format_helpfulness_prompt(
                     question=question,
-                    predicted_answer=predicted_answer
+                    predicted_answer=predicted_answer,
+                    context=context,
+                    template=tmpl
                 )
             else:
                 prompt = format_autorater_prompt(
@@ -195,8 +205,7 @@ class AutoRaterRequest(BaseModel):
 
 
 class AutoRaterResponse(BaseModel):
-    """Response model for AutoRater evaluation"""
-    autorater_scores: List[float]
+    """Response model for AutoRater evaluation (no autorater_scores)"""
     autorater_decisions: List[int]
     autorater_explanations: Optional[List[str]] = None
     autorater_raw_responses: Optional[List[str]] = None
@@ -342,14 +351,13 @@ async def evaluate_responses(request: AutoRaterRequest):
     questions, predicted_answers, ground_truth_answers = _decode_request(request, tokenizer)
 
     # --- LLM AutoRater ---
-    autorater_scores, autorater_decisions, autorater_explanations, autorater_raw = _run_llm_autorater(
+    autorater_decisions, autorater_explanations, autorater_raw = _run_llm_autorater(
         questions, predicted_answers, ground_truth_answers, request.reward_model_info
     )
 
     processing_time = time.time() - start_time
 
     return AutoRaterResponse(
-        autorater_scores=autorater_scores,
         autorater_decisions=autorater_decisions,
         autorater_explanations=autorater_explanations,
         autorater_raw_responses=autorater_raw,
@@ -464,8 +472,8 @@ def _run_llm_autorater(
     predicted_answers: List[str],
     ground_truth_answers: List[str],
     reward_model_info: List[Dict[str, Any]],
-) -> Tuple[List[float], List[int], List[str], List[str]]:
-    """Run LLM-based AutoRater on the full batch and return results."""
+) -> Tuple[List[int], List[str], List[str]]:
+    """Run LLM-based AutoRater on the full batch and return results (no autorater_scores)."""
     batch_size = len(questions)
 
     template_types = [
@@ -490,13 +498,12 @@ def _run_llm_autorater(
             predicted_answers[i : i + chunk_size],
             ground_truth_answers[i : i + chunk_size],
             template_types=template_types[i : i + chunk_size],
+            reward_model_info=reward_model_info[i : i + chunk_size],
         )
         futures.append(fut)
 
     results = ray.get(futures)
 
-    # Flatten keeping order – we appended sequentially so order is preserved
-    autorater_scores: List[float] = []
     autorater_decisions: List[int] = []
     autorater_explanations: List[str] = []
     autorater_raw: List[str] = []
@@ -504,19 +511,16 @@ def _run_llm_autorater(
     for res in results:
         for decision in res["decisions"]:
             if decision == "TRUE":
-                autorater_scores.append(1.0)
                 autorater_decisions.append(1)
             elif decision == "FALSE":
-                autorater_scores.append(0.0)
                 autorater_decisions.append(0)
             else:
-                autorater_scores.append(0.5)
                 autorater_decisions.append(0)
 
         autorater_explanations.extend(res["explanations"])
         autorater_raw.extend(res["raw_responses"])
 
-    return autorater_scores, autorater_decisions, autorater_explanations, autorater_raw
+    return autorater_decisions, autorater_explanations, autorater_raw
 
 
 # -------------------- New Lightweight Endpoints --------------------
@@ -533,14 +537,13 @@ async def evaluate_autorater_only(request: AutoRaterRequest):
 
     questions, predicted_answers, ground_truth_answers = _decode_request(request, tokenizer)
 
-    autorater_scores, autorater_decisions, autorater_explanations, autorater_raw = _run_llm_autorater(
+    autorater_decisions, autorater_explanations, autorater_raw = _run_llm_autorater(
         questions, predicted_answers, ground_truth_answers, request.reward_model_info
     )
 
     processing_time = time.time() - start_time
 
     return AutoRaterResponse(
-        autorater_scores=autorater_scores,
         autorater_decisions=autorater_decisions,
         autorater_explanations=autorater_explanations,
         autorater_raw_responses=autorater_raw,

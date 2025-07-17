@@ -14,7 +14,7 @@ from verl.single_controller.base.decorator import register as base_register
 from verl.workers.reward_manager.registry import register
 from verl.utils.reward_score.autorater_reward import AutoRaterReward
 from verl.trainer.ppo.reward_fns import format_check_reward
-from verl.workers.autorater.autorater_utils import extract_solution, format_autorater_prompt # Added extract_solution and format_autorater_prompt
+from verl.workers.autorater.autorater_utils import extract_solution # Added extract_solution and format_autorater_prompt
 from verl.workers.code_evaluator import CodeEvaluator # Import the new CodeEvaluator
 from verl.trainer.ppo.reward_fns import count_interleaved_answers, interleaved_format_reward # Import interleaved functions
 from verl.utils.autorater_client import call_autorater_service  # New modular AutoRater client
@@ -390,7 +390,7 @@ class RewardManager:
         extracted_pred_answers = []
         extracted_gt_answers = []
         for pred_ans, gt_info in zip(decoded_pred_answers, ground_truth_infos):
-            all_answers = extract_solution(pred_ans, extract_all=True)
+            all_answers = extract_solution(pred_ans, template_type=self.template_type)
             extracted_pred_answers.append(all_answers if all_answers else "No answers extracted")
             if isinstance(gt_info, dict) and "ground_truth" in gt_info:
                 extracted_gt_answers.append(str(gt_info["ground_truth"]))
@@ -415,35 +415,44 @@ class RewardManager:
         assert len(prompts) == batch_size, "prompts and answers must have the same length"
         extracted_prompts = []
         extracted_answers = []
+        reward_model_info = []
         # Interleaving: extract all intermediate answers
         if self.template_type and "interleave" in self.template_type.lower():
             for p, a in zip(prompts, answers):
-                all_answers = extract_solution(a, extract_all=True)
+                all_answers = extract_solution(a, template_type=self.template_type)
                 if all_answers:
+                    context = []
                     for ans in all_answers:
                         extracted_prompts.append(p)
                         extracted_answers.append(ans)
+                        # Add context with previous answers
+                        reward_model_info.append({"template": "helpfulness", "context": context.copy()})
+                        context.append(ans)  # Accumulate context for next answer
                 else:
                     extracted_prompts.append(p)
                     extracted_answers.append("")
+                    reward_model_info.append({"template": "helpfulness", "context": []})
         else:
             for p, a in zip(prompts, answers):
-                ans = extract_solution(a)
+                ans = extract_solution(a, template_type=self.template_type)
                 extracted_prompts.append(p)
                 extracted_answers.append(ans if ans is not None else "")
+                reward_model_info.append({"template": "helpfulness", "context": []})
         
         # Filter out empty answers and prepare for AutoRater
         non_empty_indices = []
         non_empty_prompts = []
         non_empty_answers = []
+        non_empty_reward_model_info = []
         
-        for i, (prompt, answer) in enumerate(zip(extracted_prompts, extracted_answers)):
+        for i, (prompt, answer, rm_info) in enumerate(zip(extracted_prompts, extracted_answers, reward_model_info)):
             if answer and answer.strip():  # Check if answer is non-empty
                 non_empty_indices.append(i)
                 non_empty_prompts.append(prompt)
                 non_empty_answers.append(answer)
+                non_empty_reward_model_info.append(rm_info)
         
-        # Initialize results with defaults (0.0 score, 0 decision for all)
+        # Initialize results with defaults (0.0 score, 0decision for all)
         autorater_scores = [0.0] * len(extracted_answers)
         autorater_decisions = [0] * len(extracted_answers)
         
@@ -452,13 +461,12 @@ class RewardManager:
             responses = [self.tokenizer.encode(ans, add_special_tokens=False) for ans in non_empty_answers]
             attention_mask = [[1] * len(r) for r in responses]
             position_ids = [[i for i in range(len(r))] for r in responses]
-            reward_model_info = [{"template": "helpfulness"} for _ in range(len(non_empty_answers))]
             payload = {
                 "prompts": non_empty_prompts,
                 "responses": responses,
                 "attention_mask": attention_mask,
                 "position_ids": position_ids,
-                "reward_model_info": reward_model_info,
+                "reward_model_info": non_empty_reward_model_info,
             }
             non_empty_scores, non_empty_decisions, *_ = call_autorater_service(self.autorater_base_url, payload, len(non_empty_answers))
             
@@ -540,10 +548,10 @@ class RewardManager:
         extracted_gt_answers = []
         for pred_ans, gt_ans in zip(decoded_pred_answers, decoded_ground_truth_answers):
             if is_interleaved:
-                all_answers = extract_solution(pred_ans, extract_all=True)
+                all_answers = extract_solution(pred_ans, template_type=self.template_type)
                 extracted_pred_answers.append(all_answers if all_answers else "No answers extracted")
             else:
-                single_answer = extract_solution(pred_ans)
+                single_answer = extract_solution(pred_ans, template_type=self.template_type)
                 extracted_pred_answers.append(single_answer if single_answer else "No answer extracted")
             extracted_gt_answers.append(gt_ans)
         
@@ -582,7 +590,7 @@ class RewardManager:
 
         for pred_ans, gt_ans in zip(decoded_pred_answers, decoded_ground_truth_answers):
             # Attempt to parse predicted answer inside <answer> tags
-            extr_pred_raw = extract_solution(pred_ans)
+            extr_pred_raw = extract_solution(pred_ans, template_type=self.template_type)
             extracted_pred_answers.append(extr_pred_raw)
 
             # Ground-truth answer stays as-is

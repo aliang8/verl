@@ -25,12 +25,11 @@ import queue
 from contextlib import contextmanager
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
-import ast 
+import ast
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from verl.workers.autorater.autorater_utils import (
     extract_solution,
-    format_code_outline_prompt,
 )
 from verl.utils.autorater_client import call_autorater_service
 from verl.utils.debug.performance import _timer  # Add timing support
@@ -48,7 +47,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 class ErrorTracker:
     """Tracks different types of errors that occur during code evaluation"""
-    
+
     def __init__(self):
         # Track errors by prompt ID and error type
         self.error_logs: Dict[str, Dict[str, Any]] = {}
@@ -56,7 +55,7 @@ class ErrorTracker:
         self.batch_counter = 0
         self.epoch_start_time = None
         self.current_epoch = None
-        
+
     def start_epoch(self, epoch: int):
         """Mark the start of a new epoch"""
         self.current_epoch = epoch
@@ -64,9 +63,15 @@ class ErrorTracker:
         self.error_logs.clear()
         self.error_counts.clear()
         self.batch_counter = 0
-        
-    def log_error(self, prompt_id: str, error_type: str, error_details: Dict[str, Any], 
-                  prompt_text: str = "", response_text: str = ""):
+
+    def log_error(
+        self,
+        prompt_id: str,
+        error_type: str,
+        error_details: Dict[str, Any],
+        prompt_text: str = "",
+        response_text: str = "",
+    ):
         """Log an error for a specific prompt"""
         if prompt_id not in self.error_logs:
             self.error_logs[prompt_id] = {
@@ -74,19 +79,26 @@ class ErrorTracker:
                 "response_text": response_text[:1000],  # Truncate for storage
                 "errors": [],
                 "success": False,
-                "batch_id": self.batch_counter
+                "batch_id": self.batch_counter,
             }
-            
-        self.error_logs[prompt_id]["errors"].append({
-            "error_type": error_type,
-            "error_details": error_details,
-            "timestamp": time.time()
-        })
-        
+
+        self.error_logs[prompt_id]["errors"].append(
+            {
+                "error_type": error_type,
+                "error_details": error_details,
+                "timestamp": time.time(),
+            }
+        )
+
         self.error_counts[error_type] += 1
-        
-    def log_success(self, prompt_id: str, success_details: Dict[str, Any],
-                   prompt_text: str = "", response_text: str = ""):
+
+    def log_success(
+        self,
+        prompt_id: str,
+        success_details: Dict[str, Any],
+        prompt_text: str = "",
+        response_text: str = "",
+    ):
         """Log a successful evaluation for a specific prompt"""
         if prompt_id not in self.error_logs:
             self.error_logs[prompt_id] = {
@@ -95,74 +107,87 @@ class ErrorTracker:
                 "errors": [],
                 "success": True,
                 "batch_id": self.batch_counter,
-                "success_details": success_details
+                "success_details": success_details,
             }
         else:
             self.error_logs[prompt_id]["success"] = True
             self.error_logs[prompt_id]["success_details"] = success_details
-            
+
     def increment_batch(self):
         """Increment the batch counter"""
         self.batch_counter += 1
-        
+
     def get_error_summary(self) -> Dict[str, Any]:
         """Get a summary of all errors"""
         total_prompts = len(self.error_logs)
-        successful_prompts = sum(1 for log in self.error_logs.values() if log["success"])
+        successful_prompts = sum(
+            1 for log in self.error_logs.values() if log["success"]
+        )
         failed_prompts = total_prompts - successful_prompts
-        
+
         return {
             "total_prompts": total_prompts,
             "successful_prompts": successful_prompts,
             "failed_prompts": failed_prompts,
-            "success_rate": successful_prompts / total_prompts if total_prompts > 0 else 0.0,
+            "success_rate": (
+                successful_prompts / total_prompts if total_prompts > 0 else 0.0
+            ),
             "error_counts": dict(self.error_counts),
-            "epoch_duration": time.time() - self.epoch_start_time if self.epoch_start_time else 0,
-            "epoch": self.current_epoch
+            "epoch_duration": (
+                time.time() - self.epoch_start_time if self.epoch_start_time else 0
+            ),
+            "epoch": self.current_epoch,
         }
-        
+
     def get_wandb_metrics(self) -> Dict[str, Any]:
         """Get metrics formatted for wandb logging"""
         summary = self.get_error_summary()
-        
+
         # Create wandb-friendly metrics
         wandb_metrics = {
             "code_eval/total_prompts": summary["total_prompts"],
             "code_eval/successful_prompts": summary["successful_prompts"],
             "code_eval/failed_prompts": summary["failed_prompts"],
             "code_eval/success_rate": summary["success_rate"],
-            "code_eval/epoch_duration": summary["epoch_duration"]
+            "code_eval/epoch_duration": summary["epoch_duration"],
         }
-        
+
         # Add individual error type counts
         for error_type, count in summary["error_counts"].items():
             wandb_metrics[f"code_eval/errors/{error_type}"] = count
-            
+
         return wandb_metrics
-        
+
     def save_metadata(self, output_dir: str, epoch: int):
         """Save detailed metadata to files"""
         os.makedirs(output_dir, exist_ok=True)
-        
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+
         # Save detailed error logs
-        detailed_file = os.path.join(output_dir, f"epoch_{epoch}_detailed_logs_{timestamp}.json")
-        with open(detailed_file, 'w') as f:
+        detailed_file = os.path.join(
+            output_dir, f"epoch_{epoch}_detailed_logs_{timestamp}.json"
+        )
+        with open(detailed_file, "w") as f:
             json.dump(self.error_logs, f, indent=2)
-            
+
         # Save error summary
-        summary_file = os.path.join(output_dir, f"epoch_{epoch}_error_summary_{timestamp}.json")
+        summary_file = os.path.join(
+            output_dir, f"epoch_{epoch}_error_summary_{timestamp}.json"
+        )
         summary = self.get_error_summary()
         summary["epoch"] = epoch
         summary["timestamp"] = timestamp
-        with open(summary_file, 'w') as f:
+        with open(summary_file, "w") as f:
             json.dump(summary, f, indent=2)
-            
+
         # Save CSV for easy analysis
-        csv_file = os.path.join(output_dir, f"epoch_{epoch}_prompt_results_{timestamp}.csv")
+        csv_file = os.path.join(
+            output_dir, f"epoch_{epoch}_prompt_results_{timestamp}.csv"
+        )
         try:
             import pandas as pd
+
             rows = []
             for prompt_id, log in self.error_logs.items():
                 row = {
@@ -172,17 +197,19 @@ class ErrorTracker:
                     "num_errors": len(log["errors"]),
                     "error_types": ",".join([e["error_type"] for e in log["errors"]]),
                     "prompt_text": log["prompt_text"],
-                    "response_text": log["response_text"]
+                    "response_text": log["response_text"],
                 }
                 if log["success"] and "success_details" in log:
-                    row.update({f"success_{k}": v for k, v in log["success_details"].items()})
+                    row.update(
+                        {f"success_{k}": v for k, v in log["success_details"].items()}
+                    )
                 rows.append(row)
-                
+
             df = pd.DataFrame(rows)
             df.to_csv(csv_file, index=False)
         except ImportError:
             logger.warning("pandas not available, skipping CSV export")
-            
+
         logger.info(f"Saved epoch {epoch} metadata to {output_dir}")
         print(f"Saved epoch {epoch} error tracking metadata:")
         print(f"  - Detailed logs: {detailed_file}")
@@ -217,7 +244,7 @@ class SafeResourceManagedExecutor:
                     "error_type": "empty_code",
                     "exit_code": 1,
                     "stdout": "",
-                    "stderr": "Empty code provided"
+                    "stderr": "Empty code provided",
                 }
 
             with self.acquire_resources():
@@ -229,11 +256,11 @@ class SafeResourceManagedExecutor:
                         "error_type": "no_session",
                         "exit_code": 1,
                         "stdout": "",
-                        "stderr": "No sandbox session available"
+                        "stderr": "No sandbox session available",
                     }
 
                 # Security check if available
-                if hasattr(session, 'is_safe'):
+                if hasattr(session, "is_safe"):
                     try:
                         is_safe, violations = session.is_safe(code)
                         if not is_safe:
@@ -241,15 +268,21 @@ class SafeResourceManagedExecutor:
                                 "error": "Security violation",
                                 "error_type": "security_violation",
                                 "violations": [
-                                    v.description if hasattr(v, 'description') else str(v) 
+                                    (
+                                        v.description
+                                        if hasattr(v, "description")
+                                        else str(v)
+                                    )
                                     for v in violations
                                 ],
                                 "exit_code": 1,
                                 "stdout": "",
-                                "stderr": "Security violation detected"
+                                "stderr": "Security violation detected",
                             }
                     except Exception as e:
-                        logger.warning(f"Security check failed: {e}, proceeding with execution")
+                        logger.warning(
+                            f"Security check failed: {e}, proceeding with execution"
+                        )
 
                 # Execute using the reused session
                 result = session.run(code, libraries=libraries)
@@ -265,17 +298,20 @@ class SafeResourceManagedExecutor:
                         error_type = "timeout_error"
                     elif "syntaxerror" in stderr_lower:
                         error_type = "syntax_error"
-                    elif "importerror" in stderr_lower or "modulenotfounderror" in stderr_lower:
+                    elif (
+                        "importerror" in stderr_lower
+                        or "modulenotfounderror" in stderr_lower
+                    ):
                         error_type = "import_error"
                     elif "assertionerror" in stderr_lower:
                         error_type = "assertion_error"
-                    
+
                     return {
                         "error": "Execution failed",
                         "error_type": error_type,
                         "stderr": result.stderr,
                         "stdout": result.stdout,
-                        "exit_code": result.exit_code
+                        "exit_code": result.exit_code,
                     }
 
                 return {
@@ -283,16 +319,16 @@ class SafeResourceManagedExecutor:
                     "output": result.stdout,
                     "stderr": result.stderr,
                     "stdout": result.stdout,
-                    "exit_code": result.exit_code
+                    "exit_code": result.exit_code,
                 }
 
         except TimeoutError:
             return {
-                "error": "Execution timeout", 
+                "error": "Execution timeout",
                 "error_type": "timeout_error",
                 "exit_code": 124,
                 "stdout": "",
-                "stderr": "Execution timeout"
+                "stderr": "Execution timeout",
             }
         except MemoryError:
             return {
@@ -300,7 +336,7 @@ class SafeResourceManagedExecutor:
                 "error_type": "memory_error",
                 "exit_code": 125,
                 "stdout": "",
-                "stderr": "Memory limit exceeded"
+                "stderr": "Memory limit exceeded",
             }
         except Exception as e:
             return {
@@ -308,7 +344,7 @@ class SafeResourceManagedExecutor:
                 "error_type": "unexpected_error",
                 "exit_code": 126,
                 "stdout": "",
-                "stderr": str(e)
+                "stderr": str(e),
             }
 
 
@@ -324,7 +360,7 @@ class CodeEvaluator:
         config: DictConfig,
         tokenizer: AutoTokenizer,
         autorater_service_url: Optional[str] = None,
-        template_type: Optional[str] = None,
+        template_type: Optional[str] = "default",
     ):
         """
         Initializes the CodeEvaluator.
@@ -342,45 +378,38 @@ class CodeEvaluator:
         )
         self.template_type = template_type
 
-        # Interleaved reasoning configuration
-        self.enable_interleaved_reasoning = self.config.get(
-            "enable_interleaved_reasoning", False
-        )
         self.interleaved_reward_weights = self.config.get(
             "interleaved_reward_weights",
             {"description": 0.5, "code": 1.0, "unit_tests": 0.5},
         )
-
         # Parallelism config
         self.num_workers = self.config.get("num_workers", 10)
 
         # Initialize robust execution components
         self.sandbox_session = None
         self.safe_executor = SafeResourceManagedExecutor(max_concurrent=10)
-        
+
         # Initialize error tracking
         self.error_tracker = ErrorTracker()
 
-        # Check if we're doing interleaved reasoning
-        is_interleaved = self.enable_interleaved_reasoning or (
+        self.is_interleaved = bool(
             self.template_type and "interleave" in self.template_type.lower()
         )
-        self.is_interleaved = is_interleaved
-        
+
         self._init_sandbox()
 
     def start_epoch(self, epoch: int):
         """Start tracking for a new epoch"""
         self.error_tracker.start_epoch(epoch)
-        
+
     def save_epoch_metadata(self, output_dir: str, epoch: int):
         """Save metadata for the completed epoch"""
         self.error_tracker.save_metadata(output_dir, epoch)
-        
+
     def get_error_summary(self) -> Dict[str, Any]:
         """Get current error summary"""
         return self.error_tracker.get_error_summary()
-    
+
     def get_wandb_metrics(self) -> Dict[str, Any]:
         """Get metrics formatted for wandb logging"""
         return self.error_tracker.get_wandb_metrics()
@@ -407,7 +436,6 @@ class CodeEvaluator:
             self.sandbox_session = None
             raise e
 
-
     def run_unit_tests_combined(
         self,
         predicted_answers: List[str],
@@ -432,7 +460,7 @@ class CodeEvaluator:
         """
         if timing_raw is None:
             timing_raw = {}
-            
+
         batch_size = len(predicted_answers)
 
         # Ensure sandbox session exists
@@ -457,12 +485,19 @@ class CodeEvaluator:
         error_list: List[str] = [""] * batch_size
 
         def run_single(idx, rm_info):
-            prompt_id = prompt_ids[idx] if prompt_ids and idx < len(prompt_ids) else f"batch_{self.error_tracker.batch_counter}_idx_{idx}"
+            prompt_id = (
+                prompt_ids[idx]
+                if prompt_ids and idx < len(prompt_ids)
+                else f"batch_{self.error_tracker.batch_counter}_idx_{idx}"
+            )
             prompt_text = prompts[idx] if prompts and idx < len(prompts) else ""
-            response_text = predicted_answers[idx] if idx < len(predicted_answers) else ""
+            response_text = (
+                predicted_answers[idx] if idx < len(predicted_answers) else ""
+            )
             tests_raw: List[str] = []
             libs: Optional[List[str]] = None
             import ast
+
             if isinstance(rm_info, dict):
                 raw_libs = rm_info.get("libs")
                 if isinstance(raw_libs, list):
@@ -484,9 +519,11 @@ class CodeEvaluator:
                         tests_raw = [tc]
             if not tests_raw:
                 self.error_tracker.log_error(
-                    prompt_id, "no_unit_tests", 
-                    {"message": "No unit tests provided"}, 
-                    prompt_text, response_text
+                    prompt_id,
+                    "no_unit_tests",
+                    {"message": "No unit tests provided"},
+                    prompt_text,
+                    response_text,
                 )
                 return (idx, 0.0, 0, 0, "", "", "No unit tests provided")
             code_match = re.search(
@@ -502,11 +539,13 @@ class CodeEvaluator:
             combined_test = f"""import unittest\nimport pandas as pd\nimport numpy as np\n\n{pred_code_block}\n\n{chr(10).join(all_test_blocks)}\n\nif __name__ == '__main__':\n    unittest.main(verbosity=2)\n"""
             try:
                 result = self.safe_executor.execute_safely(
-                    combined_test, 
-                    session=sess, 
-                    libraries=libs
+                    combined_test, session=sess, libraries=libs
                 )
-                is_unittest_failure = ("Ran " in result.get("stderr", "") or "FAILED" in result.get("stderr", "") or "PASSED" in result.get("stderr", ""))
+                is_unittest_failure = (
+                    "Ran " in result.get("stderr", "")
+                    or "FAILED" in result.get("stderr", "")
+                    or "PASSED" in result.get("stderr", "")
+                )
                 if result.get("success") or is_unittest_failure:
                     stdout = result.get("stdout", "")
                     stderr = result.get("stderr", "")
@@ -522,7 +561,8 @@ class CodeEvaluator:
                     failures = 0
                     errors = 0
                     failed_match = re.search(
-                        r"FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)", output
+                        r"FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)",
+                        output,
                     )
                     if failed_match:
                         if failed_match.group(1):
@@ -540,9 +580,10 @@ class CodeEvaluator:
                             "total_tests": total,
                             "code_score": code_score,
                             "success_rate": passed / total if total > 0 else 0.0,
-                            "libraries": libs or []
+                            "libraries": libs or [],
                         },
-                        prompt_text, response_text
+                        prompt_text,
+                        response_text,
                     )
                     return (idx, code_score, passed, total, stdout, stderr, "")
                 else:
@@ -550,28 +591,31 @@ class CodeEvaluator:
                     stderr = result.get("stderr", result.get("error", ""))
                     error = result.get("error", "Unknown error")
                     self.error_tracker.log_error(
-                        prompt_id, 
+                        prompt_id,
                         result.get("error_type", "execution_error"),
                         {
                             "error_message": result.get("error", "Unknown error"),
                             "exit_code": result.get("exit_code", -1),
                             "stdout": result.get("stdout", ""),
                             "stderr": result.get("stderr", ""),
-                            "libraries": libs or []
+                            "libraries": libs or [],
                         },
-                        prompt_text, response_text
+                        prompt_text,
+                        response_text,
                     )
                     return (idx, 0.0, 0, 0, stdout, stderr, error)
             except Exception as exec_e:
                 error = str(exec_e)
                 self.error_tracker.log_error(
-                    prompt_id, "unexpected_exception",
+                    prompt_id,
+                    "unexpected_exception",
                     {
                         "exception_type": type(exec_e).__name__,
                         "exception_message": str(exec_e),
-                        "libraries": libs or []
+                        "libraries": libs or [],
                     },
-                    prompt_text, response_text
+                    prompt_text,
+                    response_text,
                 )
                 test_count = 0
                 for block in all_test_blocks:
@@ -580,7 +624,10 @@ class CodeEvaluator:
 
         # Parallel execution
         with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [executor.submit(run_single, idx, rm_info) for idx, rm_info in enumerate(reward_model_info)]
+            futures = [
+                executor.submit(run_single, idx, rm_info)
+                for idx, rm_info in enumerate(reward_model_info)
+            ]
             for future in as_completed(futures):
                 idx, code_score, passed, total, stdout, stderr, error = future.result()
                 code_scores[idx] = code_score
@@ -631,13 +678,22 @@ class CodeEvaluator:
             print("Using interleaved reasoning evaluation")
             with _timer("interleaved_reasoning_evaluation", timing_raw):
                 return self._evaluate_interleaved_reasoning(
-                    decoded_pred_answers, original_prompts, ground_truth_infos, batch_size, batch_indices, timing_raw
+                    decoded_pred_answers,
+                    original_prompts,
+                    ground_truth_infos,
+                    batch_size,
+                    batch_indices,
+                    timing_raw,
                 )
         else:
             print("Using standard code evaluation")
             with _timer("standard_code_evaluation", timing_raw):
                 return self._evaluate_code(
-                    decoded_pred_answers, ground_truth_infos, batch_size, batch_indices, timing_raw
+                    decoded_pred_answers,
+                    ground_truth_infos,
+                    batch_size,
+                    batch_indices,
+                    timing_raw,
                 )
 
     def extract_code_snippet(self, predicted_answer: str) -> str:
@@ -690,16 +746,16 @@ class CodeEvaluator:
     def _check_generated_unit_tests(self, unit_test_text: str) -> Tuple[float, str]:
         """
         Check if generated unit tests look reasonable.
-        
+
         Args:
             unit_test_text: The generated unit test text
-            
+
         Returns:
             Tuple of (score, explanation)
         """
         if not unit_test_text or not unit_test_text.strip():
             return 0.0, "Unit Tests: No unit tests found"
-            
+
         # Check if unit tests look reasonable (same logic as in interleaved reasoning)
         if (
             "assert" in unit_test_text
@@ -778,7 +834,7 @@ class CodeEvaluator:
                     code_stderr,
                     code_error,
                 ) = self.run_unit_tests_combined(
-                    extracted_code_answers, 
+                    extracted_code_answers,
                     ground_truth_infos,
                     prompt_ids=[f"prompt_{i}" for i in batch_indices],
                     prompts=decoded_pred_answers,
@@ -786,55 +842,64 @@ class CodeEvaluator:
                 )
 
             # Create decisions and normalized scores based on test results
-            with _timer("create_decisions", timing_raw):
-                decisions = []
-                explanations = []
-                total_scores = []
-                code_scores = []
-                pass_at_1 = []
-                unit_test_scores = []
-                
-                for i in range(batch_size):
-                    if i in failed_extraction_indices:
-                        # Default values for failed code extraction
-                        total_scores.append(0.0)
-                        decisions.append(0)
-                        explanations.append("failed code extraction")
-                        pass_at_1.append(0)
-                        unit_test_scores.append(0.0)
-                        code_scores.append(0.0)
+            decisions = []
+            explanations = []
+            total_scores = []
+            code_scores = []
+            pass_at_1 = []
+            unit_test_scores = []
+
+            for i in range(batch_size):
+                if i in failed_extraction_indices:
+                    # Default values for failed code extraction
+                    total_scores.append(0.0)
+                    decisions.append(0)
+                    explanations.append("failed code extraction")
+                    pass_at_1.append(0)
+                    unit_test_scores.append(0.0)
+                    code_scores.append(0.0)
+                else:
+                    # Normalize score as passed_tests / total_tests
+                    if code_total_tests[i] > 0:
+                        normalized_score = (
+                            code_tests_passed[i] / code_total_tests[i]
+                        )
                     else:
-                        # Normalize score as passed_tests / total_tests
-                        if code_total_tests[i] > 0:
-                            normalized_score = code_tests_passed[i] / code_total_tests[i]
-                        else:
-                            normalized_score = 0.0
+                        normalized_score = 0.0
 
-                        # Check for generated unit tests in the original response
-                        unit_test_score, unit_test_explanation = self._check_generated_unit_tests(decoded_pred_answers[i])
+                    # Check for generated unit tests in the original response
+                    unit_test_score, unit_test_explanation = (
+                        self._check_generated_unit_tests(decoded_pred_answers[i])
+                    )
 
-                        weights = self.interleaved_reward_weights
-                        total_score = (
-                            normalized_score * weights["code"]
-                            + unit_test_score * weights["unit_tests"]
-                        )
-                        code_scores.append(normalized_score)
-                        total_scores.append(total_score)
-                        decisions.append(1 if normalized_score > 0 else 0)
-                        explanations.append(
-                            f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests | {unit_test_explanation} \\nstdout: {code_stdout[i]} \\nstderr: {code_stderr[i]} \\nerror: {code_error[i]}"
-                        )
-                        pass_at_1.append(1 if normalized_score == 1.0 else 0)
-                        unit_test_scores.append(unit_test_score)
+                    weights = self.interleaved_reward_weights
+                    total_score = (
+                        normalized_score * weights["code"]
+                        + unit_test_score * weights["unit_tests"]
+                    )
+                    code_scores.append(normalized_score)
+                    total_scores.append(total_score)
+                    decisions.append(1 if normalized_score > 0 else 0)
+                    explanations.append(
+                        f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests | {unit_test_explanation} \\nstdout: {code_stdout[i]} \\nstderr: {code_stderr[i]} \\nerror: {code_error[i]}"
+                    )
+                    pass_at_1.append(1 if normalized_score == 1.0 else 0)
+                    unit_test_scores.append(unit_test_score)
 
                 raw_responses = [""] * batch_size
 
-            return total_scores, decisions, explanations, raw_responses, {
-                "pass@1": pass_at_1, 
-                "code_scores": code_scores,
-                "unit_test_scores": unit_test_scores,
-                "total_scores": total_scores,
-            }
+            return (
+                total_scores,
+                decisions,
+                explanations,
+                raw_responses,
+                {
+                    "pass@1": pass_at_1,
+                    "code_scores": code_scores,
+                    "unit_test_scores": unit_test_scores,
+                    "total_scores": total_scores,
+                },
+            )
         else:
             raise ValueError(
                 "No unit tests available, using simple heuristic evaluation"
@@ -870,7 +935,7 @@ class CodeEvaluator:
         """
         if timing_raw is None:
             timing_raw = {}
-            
+
         total_scores = [0.0] * batch_size
         decisions = [0] * batch_size
         explanations = [""] * batch_size
@@ -888,8 +953,12 @@ class CodeEvaluator:
         all_extracted_code = []
         all_unit_test_info = []
         code_eval_indices = []  # Indices where we have code/unit-tests to evaluate
-        for i, (pred_answer, gt_info) in enumerate(zip(decoded_pred_answers, ground_truth_infos)):
-            all_answers = extract_solution(pred_answer, extract_all=True)
+        for i, (pred_answer, gt_info) in enumerate(
+            zip(decoded_pred_answers, ground_truth_infos)
+        ):
+            all_answers = extract_solution(
+                pred_answer, template_type=self.template_type
+            )
             if isinstance(all_answers, list):
                 answer_parts = [part.strip() for part in all_answers]
             else:
@@ -902,12 +971,16 @@ class CodeEvaluator:
             code_text = answer_parts[1]
             extracted_code = self.extract_code_snippet(code_text)
             all_extracted_code.append(extracted_code)
-            if isinstance(gt_info, dict) and (gt_info.get("unit_tests") or gt_info.get("tests")):
-                all_unit_test_info.append({
-                    "ground_truth": "code",
-                    "unit_tests": gt_info.get("unit_tests") or gt_info.get("tests"),
-                    "libs": gt_info.get("libs", []),
-                })
+            if isinstance(gt_info, dict) and (
+                gt_info.get("unit_tests") or gt_info.get("tests")
+            ):
+                all_unit_test_info.append(
+                    {
+                        "ground_truth": "code",
+                        "unit_tests": gt_info.get("unit_tests") or gt_info.get("tests"),
+                        "libs": gt_info.get("libs", []),
+                    }
+                )
                 code_eval_indices.append(i)
             else:
                 all_unit_test_info.append({})
@@ -919,17 +992,14 @@ class CodeEvaluator:
         code_total_tests = [0] * batch_size
         print(f"Running unit tests for {len(code_eval_indices)} samples")
         if any(all_unit_test_info[i] for i in code_eval_indices):
-            (
-                batch_code_scores,
-                batch_tests_passed,
-                batch_total_tests,
-                _, _, _
-            ) = self.run_unit_tests_combined(
-                all_extracted_code,
-                all_unit_test_info,
-                prompt_ids=[f"interleaved_prompt_{i}" for i in batch_indices],
-                prompts=decoded_pred_answers,
-                timing_raw=timing_raw,
+            (batch_code_scores, batch_tests_passed, batch_total_tests, _, _, _) = (
+                self.run_unit_tests_combined(
+                    all_extracted_code,
+                    all_unit_test_info,
+                    prompt_ids=[f"interleaved_prompt_{i}" for i in batch_indices],
+                    prompts=decoded_pred_answers,
+                    timing_raw=timing_raw,
+                )
             )
             for idx in code_eval_indices:
                 code_scores_list[idx] = batch_code_scores[idx]
@@ -942,11 +1012,15 @@ class CodeEvaluator:
             for i, (pred_answer, gt_info) in enumerate(
                 zip(decoded_pred_answers, ground_truth_infos)
             ):
-                all_answers = extract_solution(pred_answer, extract_all=True)
+                all_answers = extract_solution(
+                    pred_answer, template_type=self.template_type
+                )
                 if isinstance(all_answers, list):
                     answer_parts = [part.strip() for part in all_answers]
                 else:
-                    answer_parts = [part.strip() for part in str(all_answers).split(",")]
+                    answer_parts = [
+                        part.strip() for part in str(all_answers).split(",")
+                    ]
                 if len(answer_parts) < 3:
                     explanations[i] = "Not enough answer parts"
                     continue
@@ -957,16 +1031,24 @@ class CodeEvaluator:
                 component_explanations = []
                 # Evaluate first answer (description/explanation)
                 description_score = description_scores_map.get(i, 0.0)
-                component_explanations.append(f"Description Score: {description_score:.2f}")
+                component_explanations.append(
+                    f"Description Score: {description_score:.2f}"
+                )
                 # Evaluate second answer (code implementation)
                 if code_total_tests[i] > 0:
                     code_score = code_tests_passed[i] / code_total_tests[i]
-                    component_explanations.append(f"Code: passed {code_tests_passed[i]}/{code_total_tests[i]} tests")
+                    component_explanations.append(
+                        f"Code: passed {code_tests_passed[i]}/{code_total_tests[i]} tests"
+                    )
                 else:
-                    component_explanations.append("Code: No gt unit tests provided or failed extraction")
+                    component_explanations.append(
+                        "Code: No gt unit tests provided or failed extraction"
+                    )
                 # Evaluate third answer (self-generated unit tests) - optional
                 unit_test_text = answer_parts[2]
-                unit_test_score, unit_test_explanation = self._check_generated_unit_tests(unit_test_text)
+                unit_test_score, unit_test_explanation = (
+                    self._check_generated_unit_tests(unit_test_text)
+                )
                 component_explanations.append(unit_test_explanation)
                 # Combine scores with weights
                 weights = self.interleaved_reward_weights
@@ -978,7 +1060,9 @@ class CodeEvaluator:
                 total_scores[i] = total_score
                 decisions[i] = 1 if total_score > 1.0 else 0  # Threshold for success
                 explanations[i] = " | ".join(component_explanations)
-                raw_responses[i] = f"Interleaved evaluation: {len(answer_parts)} answers found"
+                raw_responses[i] = (
+                    f"Interleaved evaluation: {len(answer_parts)} answers found"
+                )
                 component_rewards["description_scores"].append(description_score)
                 component_rewards["code_scores"].append(code_score)
                 component_rewards["unit_test_scores"].append(unit_test_score)
@@ -986,26 +1070,30 @@ class CodeEvaluator:
         return total_scores, decisions, explanations, raw_responses, component_rewards
 
     def _evaluate_all_descriptions(
-        self, decoded_pred_answers: List[str], original_prompts: List[str], timing_raw: Optional[Dict[str, float]] = None
+        self,
+        decoded_pred_answers: List[str],
+        original_prompts: List[str],
+        timing_raw: Optional[Dict[str, float]] = None,
     ) -> Dict[int, float]:
         """
         Evaluate all description parts of interleaved answers in a single batch.
         """
         if timing_raw is None:
             timing_raw = {}
-            
+
         if not self.autorater_base_url:
             logger.warning(
                 "AutoRater service URL not configured in CodeEvaluator; skipping description evaluation."
             )
             return {}
 
-        with _timer("extract_descriptions", timing_raw):
-            descriptions_to_eval: List[Tuple[int, str, str]] = []
-            for i, pred_answer in enumerate(decoded_pred_answers):
-                first_answer = extract_solution(pred_answer, extract_all=False)
-                if first_answer and isinstance(first_answer, str):
-                    descriptions_to_eval.append((i, original_prompts[i], first_answer))
+        descriptions_to_eval: List[Tuple[int, str, str]] = []
+        for i, pred_answer in enumerate(decoded_pred_answers):
+            first_answer = extract_solution(
+                pred_answer, template_type=self.template_type
+            )
+            if first_answer and isinstance(first_answer, str):
+                descriptions_to_eval.append((i, original_prompts[i], first_answer))
 
         if not descriptions_to_eval:
             return {}
@@ -1031,29 +1119,28 @@ class CodeEvaluator:
 
         # We need to construct a valid-looking payload even if some parts are dummy
         batch_size = len(batch_indices)
-        with _timer("prepare_autorater_payload_descriptions", timing_raw):
-            payload = {
-                "prompts": tokenized_prompts,
-                "responses": tokenized_responses,
-                # Dummy values for fields that are not used by outline evaluation but required by schema
-                "attention_mask": [[1] * len(r) for r in tokenized_responses],
-                "position_ids": [list(range(len(r))) for r in tokenized_responses],
-                "reward_model_info": [
-                    {"template": "outline", "ground_truth": ""} for _ in range(batch_size)
-                ],
-            }
+        payload = {
+            "prompts": tokenized_prompts,
+            "responses": tokenized_responses,
+            # Dummy values for fields that are not used by outline evaluation but required by schema
+            "attention_mask": [[1] * len(r) for r in tokenized_responses],
+            "position_ids": [list(range(len(r))) for r in tokenized_responses],
+            "reward_model_info": [
+                {"template": "outline", "ground_truth": ""}
+                for _ in range(batch_size)
+            ],
+        }
 
         try:
             logger.info(
                 f"Calling AutoRater to evaluate {batch_size} description outlines."
             )
-            with _timer("call_autorater_descriptions", timing_raw):
-                scores, decisions, _, _ = call_autorater_service(
-                    self.autorater_base_url,
-                    payload,
-                    batch_size=batch_size,
-                    endpoint="/evaluate_autorater",  # Use the main endpoint
-                )
+            scores, decisions, _, _ = call_autorater_service(
+                self.autorater_base_url,
+                payload,
+                batch_size=batch_size,
+                endpoint="/evaluate_autorater",  # Use the main endpoint
+            )
 
             # The decision is what matters: 1 for TRUE, 0 for FALSE. Score is shaped, so use decision.
             final_scores = [1.0 if d == 1 else 0.0 for d in decisions]
