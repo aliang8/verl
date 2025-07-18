@@ -733,23 +733,18 @@ class RayPPOTrainer:
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
-            # accumulate reward_extra_infos_dict
-            cumulative_dict = reward_extra_infos_dict  # alias for clarity
-            if "reward" not in cumulative_dict:
-                cumulative_dict["reward"] = []
-            cumulative_dict["reward"].extend(scores)
-
             for key, val_list in batch_extra_infos.items():
-                if key not in cumulative_dict:
-                    cumulative_dict[key] = []
-                cumulative_dict[key].extend(val_list)
+                if key not in reward_extra_infos_dict:
+                    reward_extra_infos_dict[key] = []
+                reward_extra_infos_dict[key].extend(val_list)
 
             data_source_lst.append(
                 test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0])
             )
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
-
+        
+        # import ipdb; ipdb.set_trace()
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         val_data_dir = os.path.join(val_data_dir, self.config.trainer.experiment_name)
@@ -778,6 +773,7 @@ class RayPPOTrainer:
             )
 
         for key_info, lst in reward_extra_infos_dict.items():
+            print(f"key_info: {key_info}, lst: {len(lst)}, sample_scores: {len(sample_scores)}")
             assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
 
         if len(data_source_lst) > 0:

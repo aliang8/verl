@@ -397,8 +397,8 @@ class RewardManager:
                 extracted_gt_answers.append(str(gt_info["ground_truth"]))
             else:
                 extracted_gt_answers.append(str(gt_info))
-            reward_extra_info["extracted_pred"].extend(extracted_pred_answers)
-            reward_extra_info["extracted_gt"].extend(extracted_gt_answers)
+            reward_extra_info["extracted_pred"].append(extracted_pred_answers)
+            reward_extra_info["extracted_gt"].append(extracted_gt_answers)
         if return_dict:
             return reward_tensor, reward_extra_info
         return reward_tensor
