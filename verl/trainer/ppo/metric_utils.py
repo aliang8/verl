@@ -192,27 +192,21 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True, tokenizer=No
         all_answer_lengths = [d['answer_lengths'] for d in ta_lengths]
 
         if template_type == "default":
-            metrics.update({    
-                'thought_length/mean': float(np.mean(all_thought_lengths)) if all_thought_lengths else 0.0,
-                'thought_length/max': float(np.max(all_thought_lengths)) if all_thought_lengths else 0.0,
-                'thought_length/min': float(np.min(all_thought_lengths)) if all_thought_lengths else 0.0,
-                'answer_length/mean': float(np.mean(all_answer_lengths)) if all_answer_lengths else 0.0,
-                'answer_length/max': float(np.max(all_answer_lengths)) if all_answer_lengths else 0.0,
-                'answer_length/min': float(np.min(all_answer_lengths)) if all_answer_lengths else 0.0,
-            })
+            pass 
         elif template_type == "interleave":
             # Add subthought/subanswer metrics
             metrics.update(compute_subthought_subanswer_metrics(all_thought_lengths, all_answer_lengths))
-            metrics.update({
-                'thought_length/mean': np.mean([sum(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
-                'thought_length/max': np.max([sum(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
-                'thought_length/min': np.min([sum(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
-                'answer_length/mean': np.mean([sum(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
-                'answer_length/max': np.max([sum(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
-                'answer_length/min': np.min([sum(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
-                "thought_length/num_subthoughts": np.mean([len(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
-                "answer_length/num_subanswers": np.mean([len(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
-            })
+        
+        metrics.update({
+            'thought_length/mean': np.mean([sum(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
+            'thought_length/max': np.max([sum(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
+            'thought_length/min': np.min([sum(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
+            'answer_length/mean': np.mean([sum(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
+            'answer_length/max': np.max([sum(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
+            'answer_length/min': np.min([sum(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
+            "thought_length/num_subthoughts": np.mean([len(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
+            "answer_length/num_subanswers": np.mean([len(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
+        })
     return metrics
 
 
