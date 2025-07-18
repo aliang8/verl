@@ -237,7 +237,8 @@ class RewardManager:
 
             # Calculate combined score
             base_score = autorater_scores[i]
-            format_score = self.format_reward_weight * format_scores[i]
+            # format_score = self.format_reward_weight * format_scores[i]
+            format_score = 0.0
             current_final_score = base_score + format_score
 
             # Ensure we have a valid position to place the reward
