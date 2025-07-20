@@ -1089,10 +1089,15 @@ class CodeEvaluator:
             return {}
 
         descriptions_to_eval: List[Tuple[int, str, str]] = []
+
         for i, pred_answer in enumerate(decoded_pred_answers):
-            first_answer = extract_solution(
+            answers = extract_solution(
                 pred_answer, template_type=self.template_type
             )
+            if isinstance(answers, list):
+                first_answer = answers[0]
+            else:
+                first_answer = answers
             if first_answer and isinstance(first_answer, str):
                 descriptions_to_eval.append((i, original_prompts[i], first_answer))
 
@@ -1132,24 +1137,19 @@ class CodeEvaluator:
             ],
         }
 
-        try:
-            logger.info(
-                f"Calling AutoRater to evaluate {batch_size} description outlines."
-            )
-            scores, decisions, _, _ = call_autorater_service(
-                self.autorater_base_url,
-                payload,
-                batch_size=batch_size,
-                endpoint="/evaluate_autorater",  # Use the main endpoint
-            )
+        logger.info(
+            f"Calling AutoRater to evaluate {batch_size} description outlines."
+        )
+        scores, decisions, _, _ = call_autorater_service(
+            self.autorater_base_url,
+            payload,
+            batch_size=batch_size,
+            endpoint="/evaluate_autorater",  # Use the main endpoint
+        )
 
-            # The decision is what matters: 1 for TRUE, 0 for FALSE. Score is shaped, so use decision.
-            final_scores = [1.0 if d == 1 else 0.0 for d in decisions]
-            return dict(zip(batch_indices, final_scores))
-
-        except Exception as e:
-            logger.error(f"Failed to evaluate descriptions via AutoRater: {e}")
-            return {}
+        # The decision is what matters: 1 for TRUE, 0 for FALSE. Score is shaped, so use decision.
+        final_scores = [1.0 if d == 1 else 0.0 for d in decisions]
+        return dict(zip(batch_indices, final_scores))
 
     def close(self):
         """Clean up resources."""

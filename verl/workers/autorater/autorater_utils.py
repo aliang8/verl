@@ -5,6 +5,7 @@ Shared utilities for AutoRater workers in VERL framework.
 
 import re
 from typing import Union, List, Optional
+from helpfulness_prompt import HELPFULNESS_RATER_TEMPLATE
 
 
 # AutoRater template for evaluation
@@ -56,39 +57,39 @@ Please proceed with the evaluation.
 Decision:  """
 
 
-# AutoRater template for evaluating helpfulness of a response
-# explain what intermediate response is  
-# meta eval set for the autorater prompt, maybe as in-context examples too
-HELPFULNESS_RATER_TEMPLATE = """===Task===
-You are given a user question, previous context and a new intermediate response from an AI assistant.
-In the context of interleaved reasoning, an 'intermediate response' refers to a partial output or a visible step presented by an AI assistant during its reasoning process. 
-A good partial answer should directly address some part of a user query. 
-For example, in a trip planning prompt an intermediate answer should concretely mention hotel options, or flight options rather than provide half-baked information.
-Importantly, a good partial response goes beyond reasoning and gives actual relevant and actionable output to the user.
-Your job is to judge whether the intermediate response is a good intermediate response.
+# # AutoRater template for evaluating helpfulness of a response
+# # explain what intermediate response is  
+# # meta eval set for the autorater prompt, maybe as in-context examples too
+# HELPFULNESS_RATER_TEMPLATE = """===Task===
+# You are given a user question, previous context and a new intermediate response from an AI assistant.
+# In the context of interleaved reasoning, an 'intermediate response' refers to a partial output or a visible step presented by an AI assistant during its reasoning process. 
+# A good partial answer should directly address some part of a user query. 
+# For example, in a trip planning prompt an intermediate answer should concretely mention hotel options, or flight options rather than provide half-baked information.
+# Importantly, a good partial response goes beyond reasoning and gives actual relevant and actionable output to the user.
+# Your job is to judge whether the intermediate response is a good intermediate response.
 
-===User Question===
-{question}
+# ===User Question===
+# {question}
 
-===Previous Context===
-{context}
+# ===Previous Context===
+# {context}
 
-===AI Response===
-{predicted_answer}
+# ===AI Response===
+# {predicted_answer}
 
-===Evaluation Instructions===
-1. Consider if the response provides information that is useful, relevant and actionable to the user's question.
-2. Determine if the information presented is novel and not merely a rephrasing or repetition of what's already known or implied by the user's question.
-3. Consider the context of previous responses - if this response builds upon or adds to previous helpful information.
+# ===Evaluation Instructions===
+# 1. Consider if the response provides information that is useful, relevant and actionable to the user's question.
+# 2. Determine if the information presented is novel and not merely a rephrasing or repetition of what's already known or implied by the user's question.
+# 3. Consider the context of previous responses - if this response builds upon or adds to previous helpful information.
 
-===Output Format===
-Respond with exactly one line in this format:
-"Decision: TRUE"  (if the response is a good intermediate response)
-or
-"Decision: FALSE" (if the response is not a good intermediate response).
+# ===Output Format===
+# Respond with exactly one line in this format:
+# "Decision: TRUE"  (if the response is a good intermediate response)
+# or
+# "Decision: FALSE" (if the response is not a good intermediate response).
 
-Please proceed with the evaluation.
-Decision: """
+# Please proceed with the evaluation.
+# Decision: """
 
 HELPFULNESS_RATER_TEMPLATE_RATING = """
 ===Task===
