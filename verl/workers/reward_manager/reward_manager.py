@@ -129,6 +129,7 @@ class RewardManager:
             self.config.autorater_base_url, autorater_payload, batch_size=len(prompts)
         )
 
+        import ipdb; ipdb.set_trace()
         return autorater_decisions, autorater_explanations, autorater_raw_responses
 
     def compute_reward_text_interleave(self, prompts: List[str], answers: List[List[str]], gt_answers: List[List[str]]) -> Tuple[torch.Tensor, Dict[str, Any]]:

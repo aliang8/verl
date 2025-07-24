@@ -242,12 +242,12 @@ def parse_autorater_response(response: str) -> tuple[str, str]:
     Returns:
         Tuple of (explanation, score/decision as string)
     """
-    # Try to find a scalar score (float between 0 and 1)
-    score_pattern = r'Score:\s*([01](?:\.\d+)?)'
-    match = re.search(score_pattern, response)
-    if match:
-        score = match.group(1)
-        return response.strip(), score
+    # Try to find a scalar score (float between 0 and 1) on any line
+    score_pattern = r'^(0(\.\d+)?|1(\.0+)?)$'
+    for line in response.strip().splitlines():
+        line = line.strip()
+        if re.match(score_pattern, line):
+            return response.strip(), line
     # Fallback to TRUE/FALSE parsing
     decision_patterns = [
         r'Decision:\s*["\']?(TRUE|FALSE)["\']?',
