@@ -69,21 +69,30 @@ class RewardManager:
         code_prompts = [prompts[i] for i in code_indices]
         code_answers = [answers[i] for i in code_indices]
 
-        with _timer("code_evaluator", timing_raw):
-            code_rewards = self.code_evaluator.evaluate_code(
-                code_answers,
-                code_prompts,
-                code_rm_infos,
-                batch_indices=code_batch_indices,
-            )
+        if len(code_indices) > 0:
+            with _timer("code_evaluator", timing_raw):
+                code_rewards = self.code_evaluator.evaluate_code(
+                    code_answers,
+                    code_prompts,
+                    code_rm_infos,
+                    batch_indices=code_batch_indices,
+                )
+        else:
+            code_rewards = {}
 
-        text_rm_infos = [rm_infos[i] for i in text_indices]
+        text_gt_answers = [rm_infos[i]["ground_truth"] for i in text_indices]
         text_prompts = [prompts[i] for i in text_indices]
         text_answers = [answers[i] for i in text_indices]
 
-        text_decisions, text_explanations, text_raw_responses = self.compute_reward_text(
-            text_prompts, text_answers, text_rm_infos
-        )
+
+        if len(text_indices) > 0:
+            text_decisions, text_explanations, text_raw_responses = self.compute_reward_text(
+                text_prompts, text_answers, text_gt_answers
+            )
+            text_extras = {"autorater_scores": text_decisions}
+        else:
+            text_decisions = []
+            text_extras = {}
 
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         for i in range(len(answers)):
@@ -103,11 +112,10 @@ class RewardManager:
         
         extras = {}
         extras.update(code_rewards)
-
+        extras.update(text_extras)
         return reward_tensor, extras
 
     def compute_reward_text(self, prompts: List[str], answers: List[str], gt_answers: List[str]) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        import ipdb; ipdb.set_trace()
         template_types = ["standard"] * len(prompts)
         
         autorater_payload = {
@@ -137,7 +145,7 @@ class RewardManager:
                 all_prompts.append(prompts[i])
                 all_answers.append(answer)
                 all_gt_answers.append(gt_answers[i][j])
-                counts.append(len(interleave_answers))
+            counts.append(len(interleave_answers))
 
         autorater_payload = {
             "prompts": all_prompts,
@@ -168,10 +176,10 @@ class RewardManager:
 
         # First compute the interleave format reward
         interleave_answer_counts = [len(answer) for answer in answers]
-        interleave_format_rewards = [1.0 if count > 2 else 0.0 for count in interleave_answer_counts]
+        interleave_format_rewards = [1.0 if count >= 2 else 0.0 for count in interleave_answer_counts]
 
-        # Then compute the other rewards for the indices with answer counts > 2
-        valid_indices = [i for i, count in enumerate(interleave_answer_counts) if count > 2]
+        # Then compute the other rewards for the indices with answer counts >= 2
+        valid_indices = [i for i, count in enumerate(interleave_answer_counts) if count >= 2]
 
         print(f"number of valid_indices: {len(valid_indices)}")
 
@@ -187,7 +195,7 @@ class RewardManager:
                 code_indices.append(i)
             else:
                 text_indices.append(i)
-        
+
         # index of the example in the batch
         batch_indices = data.non_tensor_batch["index"] 
 
@@ -203,24 +211,32 @@ class RewardManager:
         code_prompts = [prompts[i] for i in code_indices]
         code_answers = [answers[i] for i in code_indices]
 
-        with _timer("code_evaluator", timing_raw):
-            code_rewards = self.code_evaluator.evaluate_interleaved_outline_code_test(
-                code_answers,
-                code_prompts,
-                code_rm_infos,
-                data_sources=code_data_sources, 
-                batch_indices=code_batch_indices
-            )
+        if len(code_indices) > 0:
+            with _timer("code_evaluator", timing_raw):
+                code_rewards = self.code_evaluator.evaluate_interleaved_outline_code_test(
+                    code_answers,
+                    code_prompts,
+                    code_rm_infos,
+                    data_sources=code_data_sources, 
+                    batch_indices=code_batch_indices
+                )
+        else:
+            code_rewards = {}
 
         # Run text evaluator on text indices
         text_batch_indices = [batch_indices[i] for i in text_indices]   
-        text_rm_infos = [rm_infos[i] for i in text_indices]
+        text_gt_answers = [rm_infos[i]["ground_truth"] for i in text_indices]
         text_prompts = [prompts[i] for i in text_indices]
         text_answers = [answers[i] for i in text_indices]
 
-        text_decisions, text_explanations, text_raw_responses = self.compute_reward_text(
-            text_prompts, text_answers, text_rm_infos
-        )
+        if len(text_indices) > 0:
+            text_decisions, text_explanations, text_raw_responses = self.compute_reward_text_interleave(
+                text_prompts, text_answers, text_gt_answers
+            )
+            text_extras = {"autorater_scores": text_decisions}
+        else:
+            text_decisions = []
+            text_extras = {}
 
         # construct reward_tensor
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
@@ -241,7 +257,8 @@ class RewardManager:
             if valid_response_length > 0:
                 reward_tensor[i, valid_response_length - 1] = current_final_score
 
-        extras = {}
+        extras = {}     
         extras.update(code_rewards)
+        extras.update(text_extras)
 
         return reward_tensor, extras

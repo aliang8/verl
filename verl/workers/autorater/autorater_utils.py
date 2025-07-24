@@ -59,17 +59,17 @@ Please analyze the provided data and make a decision.
 1. Carefully compare the "Predicted Answer" with the "Ground Truth Answer".
 2. Consider the substance of the answers – look for equivalent information or correct answers. Do
 not focus on exact wording unless the exact wording is crucial to the meaning.
-3. Your final decision should be based on whether the meaning and the vital facts of the "Ground
-Truth Answer" are present in the "Predicted Answer:"
+3. If there are multiple questions/answers, evaluate each one and return a scalar between 0 and 1 representing the fraction of correct answers. For example, if there are two questions, output 0, 0.5, or 1. If only one question, output 0 or 1.
+4. Your final decision should be based on whether the meaning and the vital facts of the "Ground
+Truth Answer" are present in the "Predicted Answer" for each question.
 ===Input Data===
 - Predicted Answer: {predicted_answer}
 - Ground Truth Answer: {ground_truth_answer}
 ===Output Format===
-Provide your final evaluation in the following format:
-"Decision:" ("TRUE" or "FALSE")
+Provide your final evaluation as a single scalar between 0 and 1, representing the fraction of correct answers. For example, output 1 if all are correct, 0.5 if half are correct, or 0 if none are correct.
 
 Please proceed with the evaluation.
-Decision: """
+Score: """
 
 
 # AutoRater template for evaluating a concise code-solution outline
@@ -200,6 +200,11 @@ def extract_solution(
             last = think_match[-1]
             after = solution_str[last.end():].strip()
             return after if after else ""
+        
+        # Also just try to get things between <answer> and </answer>
+        answer_match = list(re.finditer(r"<answer>(.*?)</answer>", solution_str, re.IGNORECASE))
+        if answer_match:
+            return answer_match[0].group(1).strip()
 
     return ""
 
@@ -229,15 +234,21 @@ def format_autorater_prompt(question: str, predicted_answer: str, ground_truth_a
 
 def parse_autorater_response(response: str) -> tuple[str, str]:
     """
-    Parse the model's response to extract explanation and decision.
+    Parse the model's response to extract explanation and decision/score.
     
     Args:
         response: The raw response from the autorater model
     
     Returns:
-        Tuple of (explanation, decision)
+        Tuple of (explanation, score/decision as string)
     """
-    # Multiple parsing patterns to catch TRUE/FALSE decisions
+    # Try to find a scalar score (float between 0 and 1)
+    score_pattern = r'Score:\s*([01](?:\.\d+)?)'
+    match = re.search(score_pattern, response)
+    if match:
+        score = match.group(1)
+        return response.strip(), score
+    # Fallback to TRUE/FALSE parsing
     decision_patterns = [
         r'Decision:\s*["\']?(TRUE|FALSE)["\']?',
         r'\b(TRUE|FALSE)\b',
@@ -245,17 +256,13 @@ def parse_autorater_response(response: str) -> tuple[str, str]:
         r'answer is\s+(TRUE|FALSE)',
         r'decision is\s+(TRUE|FALSE)',
     ]
-    
     explanation = response.strip()
     decision = "UNKNOWN"
-    
-    # Try to find decision
     for pattern in decision_patterns:
         match = re.search(pattern, response, re.IGNORECASE)
         if match:
             decision = match.group(1).upper()
             break
-    
     return explanation, decision
 
 

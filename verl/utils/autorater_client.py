@@ -7,7 +7,7 @@ def call_autorater_service(
     base_url: str,
     payload: Dict[str, Any],
     batch_size: int,
-    endpoint: str = "/evaluate_autorater",
+    endpoint: str = "/evaluate",
     timeout: int = 600,
 ) -> Tuple[List[int], List[str], List[str]]:
     """Call the remote AutoRater service and return shaped scores.
@@ -16,7 +16,7 @@ def call_autorater_service(
         base_url: Base URL of the AutoRater service (e.g. "http://127.0.0.1:8000").
         payload: JSON payload following the AutoRaterRequest schema.
         batch_size: Expected batch size – used for fallback defaults.
-        endpoint: Endpoint path to call (default: "/evaluate_autorater").
+        endpoint: Endpoint path to call (default: "/evaluate").
         timeout: Request timeout (seconds).
 
     Returns:
