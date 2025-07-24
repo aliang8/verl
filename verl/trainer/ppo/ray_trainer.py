@@ -352,26 +352,30 @@ class RayPPOTrainer:
         self._validate_config()
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
-        # AutoRater service related
-        self.use_autorater = hasattr(self.config.trainer, 'autorater_service_url') and self.config.trainer.autorater_service_url
-        self.autorater_config = OmegaConf.create(self.config.get("autorater", {})) # Ensure it's an OmegaConf object
+        # # AutoRater service related
+        # self.use_autorater = hasattr(self.config.trainer, 'autorater_service_url') and self.config.trainer.autorater_service_url
+        # self.autorater_config = OmegaConf.create(self.config.get("autorater", {})) # Ensure it's an OmegaConf object
 
-        # Initialize RewardManager
-        # Pass self.autorater_config if available, otherwise an empty DictConfig
-        reward_manager_config = self.config.trainer.get("reward_manager_config", {})
-        # Merge autorater config into reward_manager_config if it's not already there
-        if "autorater_config" not in reward_manager_config:
-            reward_manager_config["autorater_config"] = OmegaConf.to_container(self.autorater_config, resolve=True) if self.autorater_config else {}
+        # # Initialize RewardManager
+        # # Pass self.autorater_config if available, otherwise an empty DictConfig
+        # reward_manager_config = self.config.trainer.get("reward_manager_config", {})
+        # # Merge autorater config into reward_manager_config if it's not already there
+        # if "autorater_config" not in reward_manager_config:
+        #     reward_manager_config["autorater_config"] = OmegaConf.to_container(self.autorater_config, resolve=True) if self.autorater_config else {}
         
-        # Get template_type from rollout config
-        template_type = self.config.actor_rollout_ref.rollout.get("template_type", None)
+        # # Get template_type from rollout config
+        # template_type = self.config.actor_rollout_ref.rollout.get("template_type", None)
         
+        # self.reward_manager = RewardManager(
+        #     config=OmegaConf.create(reward_manager_config),
+        #     tokenizer=self.tokenizer,
+        #     autorater_service_url=self.config.trainer.autorater_service_url if self.use_autorater else None, # Pass URL if enabled
+        #     use_autorater=self.use_autorater, # Pass the flag
+        #     template_type=template_type # Pass template type for interleaved reasoning detection
+        # )
         self.reward_manager = RewardManager(
-            config=OmegaConf.create(reward_manager_config),
-            tokenizer=self.tokenizer,
-            autorater_service_url=self.config.trainer.autorater_service_url if self.use_autorater else None, # Pass URL if enabled
-            use_autorater=self.use_autorater, # Pass the flag
-            template_type=template_type # Pass template type for interleaved reasoning detection
+            config=config.reward_manager,
+            tokenizer=self.tokenizer
         )
 
     def _validate_config(self):
@@ -728,8 +732,9 @@ class RayPPOTrainer:
 
             # Evaluate rewards using RewardManager (which handles ground-truth extraction internally)
             reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(
-                test_batch, return_dict=True
+                test_batch
             )
+            import ipdb; ipdb.set_trace()
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
@@ -1109,6 +1114,7 @@ class RayPPOTrainer:
 
                             batch = batch.union(gen_baseline_output)
 
+                            import ipdb; ipdb.set_trace()
                             # Use remote AutoRater service for baseline reward computation
                             if hasattr(self.config.trainer, 'autorater_service_url') and self.config.trainer.autorater_service_url:
                                 print("Using remote AutoRater service for baseline reward computation")
@@ -1151,7 +1157,7 @@ class RayPPOTrainer:
                         # The RewardManager is now responsible for calling the remote AutoRater service
                         # if self.use_autorater is True and a URL is provided.
                         # This simplifies the logic here, as reward_manager.compute_rewards will handle the HTTP call.
-                        reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(batch, return_dict=True, timing_raw=timing_raw)
+                        reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(batch, timing_raw=timing_raw)
 
                     # Add data source breakdown for format/content rewards
                     if hasattr(batch, 'non_tensor_batch') and 'data_source' in batch.non_tensor_batch:

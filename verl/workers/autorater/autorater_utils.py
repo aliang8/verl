@@ -174,7 +174,7 @@ Decision: """
 def extract_solution(
     solution_str: str,
     template_type: str = "default",
-) -> Union[str, List[str], None]:
+) -> Union[str, List[str]]:
     """
     Extract answer(s) from a solution string based on template type.
 
@@ -190,7 +190,7 @@ def extract_solution(
         # Find all matches between <answer> and </answer> tags
         matches = re.findall(r"<answer>(.*?)</answer>", solution_str, re.IGNORECASE | re.DOTALL)
         if not matches:
-            return None
+            return ""
         extracted_items = [match.strip() for match in matches if match.strip()]
         return extracted_items
     else:
@@ -199,9 +199,9 @@ def extract_solution(
         if think_match:
             last = think_match[-1]
             after = solution_str[last.end():].strip()
-            return after if after else None
+            return after if after else ""
 
-        return None
+    return ""
 
 
 def format_autorater_prompt(question: str, predicted_answer: str, ground_truth_answer: str, template: Union[str, None] = None) -> str:

@@ -4,39 +4,6 @@
 # 3. Inline comments (after a field on the same line) are not allowed.
 # 4. Indentation level is respected for nested fields.
 
-# AutoRater configuration with separate vLLM instance for fixed base model evaluation
-autorater:
-  enable: true
-  
-  # Number of GPUs per node for AutoRater
-  # - Use 1.0 or higher for dedicated GPU(s) (separate resource pool)  
-  # - Use 0.0 to share existing GPU resources without additional allocation
-  # - Sharing reduces memory conflicts and works well since AutoRater is less resource-intensive
-  autorater_gpus_per_node: 0.0
-  
-  # Tensor parallel size for AutoRater's vLLM instance (can be smaller since it runs in separate process)
-  tensor_model_parallel_size: 1
-  
-  # GPU memory utilization for AutoRater's vLLM instance (very conservative for sharing)
-  gpu_memory_utilization: 0.2
-  
-  # Maximum model length for AutoRater (short context to save memory)
-  max_model_len: 2048
-  
-  # Method for extracting solutions from text: "flexible", "strict", "regex"
-  extraction_method: flexible
-  
-  # Answer formats to look for when extracting solutions
-  answer_formats: ["boxed", "hash", "conclusion"]
-  
-  # Maximum prompt length for AutoRater evaluation prompts
-  max_prompt_length: 2048
-  
-  # Weight of AutoRater score in final reward computation
-  autorater_weight: 1.0
-  
-  # Additional vLLM settings (set as main config parameters to avoid conflicts)
-  enable_prefix_caching: false
 
 # dataset config
 data:
@@ -386,9 +353,6 @@ actor_rollout_ref:
     
     # typically the same as data max response length
     response_length: ${data.max_response_length}
-
-    # template type
-    template_type: default
 
     # for vllm rollout
     # Rollout model parameters type. Align with actor model's FSDP/Megatron type.
@@ -890,9 +854,6 @@ trainer:
   # Timeout (in seconds) for Ray worker to wait for registration
   ray_wait_register_center_timeout: 300
 
-  # URL of remote AutoRater FastAPI service.
-  autorater_service_url: "http://10.128.0.30:80/evaluate"
-
   rollout_save_path: null
 
   # Device to run training on (e.g., "cuda", "cpu")
@@ -906,3 +867,12 @@ ray_init:
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null
+
+reward_manager:
+  code_evaluator:
+    max_concurrent: 10
+    execute_sequential: false
+
+  template_type: default
+
+  autorater_service_url: "http://10.128.0.30:81/evaluate"

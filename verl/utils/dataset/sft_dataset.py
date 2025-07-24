@@ -94,6 +94,8 @@ class SFTDataset(Dataset):
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
 
+        print(f"number of rows: {len(self.dataframe)}")
+
         self.prompts = self.dataframe[self.prompt_key]
 
         for key in self.prompt_dict_keys:

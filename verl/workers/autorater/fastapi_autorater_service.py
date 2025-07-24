@@ -116,11 +116,10 @@ class AutoRaterActor:
     
     def evaluate_batch(
         self,
-        questions: List[str],
-        predicted_answers: List[str],
-        ground_truth_answers: List[str],
+        prompts: List[str],
+        responses: List[str],
+        gt_answers: List[str],
         template_types: Optional[List[str]] = None,
-        reward_model_info: Optional[List[Dict[str, Any]]] = None,
     ):
         """Evaluate a batch of responses using AutoRater template"""
         if self.inference_engine is None:
@@ -129,36 +128,29 @@ class AutoRaterActor:
         # Format evaluation prompts
         evaluation_prompts = []
         if not template_types:
-            template_types = ["standard"] * len(questions)
-        if not reward_model_info:
-            reward_model_info = [{}] * len(questions)
+            template_types = ["standard"] * len(prompts)
 
-        for i, (question, predicted_answer, ground_truth, tmpl) in enumerate(
-            zip(questions, predicted_answers, ground_truth_answers, template_types)
+        for i, (prompt, response, gt_answer, tmpl) in enumerate(
+            zip(prompts, responses, gt_answers, template_types)
         ):
-            # Extract context from reward_model_info
-            context = None
-            if i < len(reward_model_info) and isinstance(reward_model_info[i], dict):
-                context = reward_model_info[i].get("context")
-            
             if tmpl == "outline":
-                prompt = format_code_outline_prompt(
-                    problem_description=question, outline_answer=predicted_answer
+                autorater_prompt = format_code_outline_prompt(
+                    problem_description=prompt, outline_answer=response
                 )
             elif "helpfulness" in tmpl:
-                prompt = format_helpfulness_prompt(
-                    question=question,
-                    predicted_answer=predicted_answer,
-                    context=context,
+                autorater_prompt = format_helpfulness_prompt(
+                    question=prompt,
+                    predicted_answer=response,
+                    context=gt_answer,
                     template=tmpl
                 )
             else:
-                prompt = format_autorater_prompt(
-                    question=question,
-                    predicted_answer=predicted_answer,
-                    ground_truth_answer=ground_truth,
+                autorater_prompt = format_autorater_prompt(
+                    question=prompt,
+                    predicted_answer=response,
+                    ground_truth_answer=gt_answer,
                 )
-            evaluation_prompts.append(prompt)
+            evaluation_prompts.append(autorater_prompt)
         
         # Generate responses using vLLM
         outputs = self.inference_engine.generate(
@@ -194,11 +186,10 @@ class AutoRaterActor:
 
 class AutoRaterRequest(BaseModel):
     """Request model for AutoRater evaluation"""
-    prompts: List[List[int]]  # List of tokenized prompts
-    responses: List[List[int]]  # List of tokenized responses
-    attention_mask: List[List[int]]  # Attention masks (needed for decoding)
-    position_ids: List[List[int]]  # Position IDs (might not be directly used for text decoding but part of the original DataProto)
-    reward_model_info: List[Dict[str, Any]]  # Ground truth and metadata
+    prompts: List[str]  # string prompts
+    responses: List[str]  # string responses
+    gt_answers: List[str]  # Ground truth answers
+    template_types: Optional[List[str]] = None
     
     class Config:
         arbitrary_types_allowed = True
@@ -345,14 +336,9 @@ async def evaluate_responses(request: AutoRaterRequest):
         f"Processing AutoRater request with {batch_size} samples using {len(app.state.autorater_actors)} actors"
     )
 
-    tokenizer = _get_tokenizer()
-
-    # --- Decode ---
-    questions, predicted_answers, ground_truth_answers = _decode_request(request, tokenizer)
-
     # --- LLM AutoRater ---
     autorater_decisions, autorater_explanations, autorater_raw = _run_llm_autorater(
-        questions, predicted_answers, ground_truth_answers, request.reward_model_info
+        request.prompts, request.responses, request.gt_answers, request.template_types
     )
 
     processing_time = time.time() - start_time
@@ -432,58 +418,14 @@ async def startup_event():
     else:
         logger.info("No config provided, skipping auto-initialization")
 
-
-# ================= Helper Functions =================
-
-
-def _get_tokenizer():
-    """Retrieve the tokenizer from the first AutoRater actor or fall back to a default."""
-    try:
-        tokenizer = ray.get(app.state.autorater_actors[0].get_tokenizer.remote())  # type: ignore
-    except Exception as e:
-        logger.warning(
-            f"Could not retrieve tokenizer from actor, using default Qwen/Qwen2.5-7B-Instruct. Error: {e}"
-        )
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct", trust_remote_code=False)  # type: ignore
-    return tokenizer
-
-
-def _decode_request(request: "AutoRaterRequest", tokenizer):
-    """Decode token IDs back to human-readable text lists."""
-    questions: List[str] = []
-    predicted_answers: List[str] = []
-    ground_truth_answers: List[str] = []
-
-    for p_ids, r_ids, rm_info in zip(request.prompts, request.responses, request.reward_model_info):
-        questions.append(tokenizer.decode(p_ids, skip_special_tokens=True))
-        predicted_answers.append(tokenizer.decode(r_ids, skip_special_tokens=True))
-
-        if isinstance(rm_info, dict) and "ground_truth" in rm_info:
-            gt = str(rm_info["ground_truth"])
-        else:
-            gt = str(rm_info)
-        ground_truth_answers.append(gt)
-
-    return questions, predicted_answers, ground_truth_answers
-
-
 def _run_llm_autorater(
-    questions: List[str],
-    predicted_answers: List[str],
-    ground_truth_answers: List[str],
-    reward_model_info: List[Dict[str, Any]],
+    prompts: List[str],
+    responses: List[str],
+    gt_answers: List[str],
+    template_types: Optional[List[str]] = None,
 ) -> Tuple[List[int], List[str], List[str]]:
     """Run LLM-based AutoRater on the full batch and return results (no autorater_scores)."""
-    batch_size = len(questions)
-
-    template_types = [
-        "outline" if isinstance(rm, dict) and rm.get("template") == "outline"
-        else "helpfulness" if isinstance(rm, dict) and rm.get("template") == "helpfulness"
-        else "standard"
-        for rm in reward_model_info
-    ]
-
-    # Prompts are now built inside the actor, so we just pass the data along
+    batch_size = len(prompts)
 
     # Dispatch to Ray actors
     num_actors = len(app.state.autorater_actors)
@@ -494,11 +436,10 @@ def _run_llm_autorater(
         actor_idx = (i // chunk_size) % num_actors
         actor = app.state.autorater_actors[actor_idx]
         fut = actor.evaluate_batch.remote(
-            questions[i : i + chunk_size],
-            predicted_answers[i : i + chunk_size],
-            ground_truth_answers[i : i + chunk_size],
-            template_types=template_types[i : i + chunk_size],
-            reward_model_info=reward_model_info[i : i + chunk_size],
+            prompts[i : i + chunk_size],
+            responses[i : i + chunk_size],
+            gt_answers[i : i + chunk_size],
+            template_types[i : i + chunk_size],
         )
         futures.append(fut)
 
@@ -521,36 +462,6 @@ def _run_llm_autorater(
         autorater_raw.extend(res["raw_responses"])
 
     return autorater_decisions, autorater_explanations, autorater_raw
-
-
-# -------------------- New Lightweight Endpoints --------------------
-
-
-@app.post("/evaluate_autorater", response_model=AutoRaterResponse)
-async def evaluate_autorater_only(request: AutoRaterRequest):
-    """Evaluate only using LLM AutoRater (no unit-test execution)."""
-    if len(app.state.autorater_actors) == 0:
-        raise HTTPException(status_code=400, detail="AutoRater not initialized. Call /initialize first.")
-
-    start_time = time.time()
-    tokenizer = _get_tokenizer()
-
-    questions, predicted_answers, ground_truth_answers = _decode_request(request, tokenizer)
-
-    autorater_decisions, autorater_explanations, autorater_raw = _run_llm_autorater(
-        questions, predicted_answers, ground_truth_answers, request.reward_model_info
-    )
-
-    processing_time = time.time() - start_time
-
-    return AutoRaterResponse(
-        autorater_decisions=autorater_decisions,
-        autorater_explanations=autorater_explanations,
-        autorater_raw_responses=autorater_raw,
-        processing_time=processing_time,
-        success=True,
-    )
-
 
 if __name__ == "__main__":
     import argparse
