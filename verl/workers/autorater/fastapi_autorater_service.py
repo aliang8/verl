@@ -197,7 +197,7 @@ class AutoRaterRequest(BaseModel):
 
 class AutoRaterResponse(BaseModel):
     """Response model for AutoRater evaluation (no autorater_scores)"""
-    autorater_decisions: List[int]
+    autorater_decisions: List[float]
     autorater_explanations: Optional[List[str]] = None
     autorater_raw_responses: Optional[List[str]] = None
     processing_time: float
