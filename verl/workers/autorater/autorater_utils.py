@@ -248,22 +248,7 @@ def parse_autorater_response(response: str) -> tuple[str, str]:
         line = line.strip()
         if re.match(score_pattern, line):
             return response.strip(), float(line)
-    # Fallback to TRUE/FALSE parsing
-    decision_patterns = [
-        r'Decision:\s*["\']?(TRUE|FALSE)["\']?',
-        r'\b(TRUE|FALSE)\b',
-        r'(true|false)',
-        r'answer is\s+(TRUE|FALSE)',
-        r'decision is\s+(TRUE|FALSE)',
-    ]
-    explanation = response.strip()
-    decision = "UNKNOWN"
-    for pattern in decision_patterns:
-        match = re.search(pattern, response, re.IGNORECASE)
-        if match:
-            decision = match.group(1).upper()
-            break
-    return explanation, decision
+    return response.strip(), 0
 
 
 def format_code_outline_prompt(
