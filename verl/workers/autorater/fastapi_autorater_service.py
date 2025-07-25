@@ -360,8 +360,6 @@ async def shutdown_service(background_tasks: BackgroundTasks):
         for actor in app.state.autorater_actors:
             ray.kill(actor)
         app.state.autorater_actors.clear()
-
-        # No additional cleanup needed for AutoRater-only service
         
         # Shutdown Ray if we initialized it
         if ray.is_initialized():
@@ -423,7 +421,7 @@ def _run_llm_autorater(
     responses: List[str],
     gt_answers: List[str],
     template_types: Optional[List[str]] = None,
-) -> Tuple[List[int], List[str], List[str]]:
+) -> Tuple[List[float], List[str], List[str]]:
     """Run LLM-based AutoRater on the full batch and return results (no autorater_scores)."""
     batch_size = len(prompts)
 
@@ -444,11 +442,6 @@ def _run_llm_autorater(
         futures.append(fut)
 
     results = ray.get(futures)
-
-    autorater_decisions: List[int] = []
-    autorater_explanations: List[str] = []
-    autorater_raw: List[str] = []
-
     autorater_decisions = [res["decisions"] for res in results]
     autorater_explanations = [res["explanations"] for res in results]
     autorater_raw = [res["raw_responses"] for res in results]

@@ -248,7 +248,7 @@ def parse_autorater_response(response: str) -> tuple[str, str]:
         line = line.strip()
         if re.match(score_pattern, line):
             return response.strip(), float(line)
-    return response.strip(), 0
+    return response.strip(), 0.0
 
 
 def format_code_outline_prompt(
