@@ -247,7 +247,7 @@ def parse_autorater_response(response: str) -> tuple[str, str]:
     for line in response.strip().splitlines():
         line = line.strip()
         if re.match(score_pattern, line):
-            return response.strip(), line
+            return response.strip(), float(line)
     # Fallback to TRUE/FALSE parsing
     decision_patterns = [
         r'Decision:\s*["\']?(TRUE|FALSE)["\']?',

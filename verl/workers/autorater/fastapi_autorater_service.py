@@ -449,17 +449,9 @@ def _run_llm_autorater(
     autorater_explanations: List[str] = []
     autorater_raw: List[str] = []
 
-    for res in results:
-        for decision in res["decisions"]:
-            if decision == "TRUE":
-                autorater_decisions.append(1)
-            elif decision == "FALSE":
-                autorater_decisions.append(0)
-            else:
-                autorater_decisions.append(0)
-
-        autorater_explanations.extend(res["explanations"])
-        autorater_raw.extend(res["raw_responses"])
+    autorater_decisions = [res["decisions"] for res in results]
+    autorater_explanations = [res["explanations"] for res in results]
+    autorater_raw = [res["raw_responses"] for res in results]
 
     return autorater_decisions, autorater_explanations, autorater_raw
 
