@@ -26,6 +26,9 @@ class RewardManager:
     def end_epoch(self):
         pass 
 
+    def save_epoch_metadata(self, epoch: int, log_to_wandb: bool = False):
+        pass
+
     def _decode_batch(self, data: DataProto) -> Tuple[List[str], List[str]]:
         prompts = [self.tokenizer.decode(p_ids, skip_special_tokens=True) for p_ids in data.batch["prompts"]]
         model_responses = [self.tokenizer.decode(r_ids, skip_special_tokens=True) for r_ids in data.batch["responses"]]
@@ -56,6 +59,7 @@ class RewardManager:
             else:
                 text_indices.append(i)
         
+        batch_size = len(data)
         # index of the example in the batch
         batch_indices = data.non_tensor_batch["index"] 
 
@@ -95,15 +99,28 @@ class RewardManager:
             text_extras = {}
 
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-        for i in range(len(answers)):
+
+        code_count = 0
+        text_count = 0
+
+        final_code_extras = {k: [0 for _ in range(batch_size)] for k in code_rewards.keys()}
+        final_text_extras = {k: [0 for _ in range(batch_size)] for k in text_extras.keys()}
+
+        for i in range(batch_size):
             data_item = data[i]
             prompt_length = data_item.batch["prompts"].shape[-1]
             valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
 
             if i in code_indices:
-                current_final_score = code_rewards["unit_test_pass_rate"][i]
+                current_final_score = code_rewards["unit_test_pass_rate"][code_count]
+                for k, v in code_rewards.items():
+                    final_code_extras[k][i] = v[code_count]
+                code_count += 1
             elif i in text_indices:
-                current_final_score = text_decisions[i]
+                current_final_score = text_decisions[text_count]
+                for k, v in text_extras.items():
+                    final_text_extras[k][i] = v[text_count]
+                text_count += 1
             else:
                 raise ValueError(f"Invalid index: {i}")
 
@@ -111,8 +128,8 @@ class RewardManager:
                 reward_tensor[i, valid_response_length - 1] = current_final_score
         
         extras = {}
-        extras.update(code_rewards)
-        extras.update(text_extras)
+        extras.update(final_code_extras)
+        extras.update(final_text_extras)
         return reward_tensor, extras
 
     def compute_reward_text(self, prompts: List[str], answers: List[str], gt_answers: List[str]) -> Tuple[torch.Tensor, Dict[str, Any]]:
@@ -126,7 +143,7 @@ class RewardManager:
         }
 
         autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(
-            self.config.autorater_base_url, autorater_payload, batch_size=len(prompts)
+            self.config.autorater_service_url, autorater_payload, batch_size=len(prompts)
         )
 
         return autorater_decisions, autorater_explanations, autorater_raw_responses
@@ -155,7 +172,7 @@ class RewardManager:
         }
         
         autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(
-            self.config.autorater_base_url, autorater_payload, batch_size=len(all_prompts)
+            self.config.autorater_service_url, autorater_payload, batch_size=len(all_prompts)
         )
         # convert to list of lists based on counts
         # but average the scores for the interleaved answers
@@ -241,6 +258,12 @@ class RewardManager:
         # construct reward_tensor
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
 
+        code_count = 0
+        text_count = 0
+
+        final_code_extras = {k: [0 for _ in range(batch_size)] for k in code_rewards.keys()}
+        final_text_extras = {k: [0 for _ in range(batch_size)] for k in text_extras.keys()}
+
         for i in range(batch_size):
             # Retrieve the correct length for storing the reward
             data_item = data[i]
@@ -248,9 +271,15 @@ class RewardManager:
             valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
 
             if i in code_indices:
-                current_final_score = interleave_format_rewards[i] + code_rewards["unit_test_pass_rate"][i]
+                current_final_score = interleave_format_rewards[code_count] + code_rewards["unit_test_pass_rate"][code_count]
+                for k, v in code_rewards.items():
+                    final_code_extras[k][i] = v[code_count]
+                code_count += 1
             elif i in text_indices:
-                current_final_score = interleave_format_rewards[i] + text_decisions[i]
+                current_final_score = interleave_format_rewards[text_count] + text_decisions[text_count]
+                for k, v in text_extras.items():
+                    final_text_extras[k][i] = v[text_count]
+                text_count += 1
             else:
                 raise ValueError(f"Invalid index: {i}")
 
@@ -258,7 +287,7 @@ class RewardManager:
                 reward_tensor[i, valid_response_length - 1] = current_final_score
 
         extras = {}     
-        extras.update(code_rewards)
-        extras.update(text_extras)
+        extras.update(final_code_extras)
+        extras.update(final_text_extras)
 
         return reward_tensor, extras

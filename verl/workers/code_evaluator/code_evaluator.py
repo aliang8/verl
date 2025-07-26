@@ -71,7 +71,10 @@ class CodeEvaluator:
 
         # convert required_libs to list
         if isinstance(required_libs, str):
-            required_libs = ast.literal_eval(required_libs)
+            if required_libs == "":
+                required_libs = []
+            else:
+                required_libs = ast.literal_eval(required_libs)
         elif isinstance(required_libs, list):
             pass # already a list
         
@@ -98,20 +101,20 @@ class CodeEvaluator:
             for i, code_snippet in enumerate(code_snippets):
                 code_snippet = code_snippets[i]
                 unit_tests = unit_tests[i]
-                required_libs = rm_infos[i]["libs"]
+                required_libs = rm_infos[i].get("libs", [])
                 result = self._test_code_snippet_single(code_snippet, unit_tests, required_libs)
                 sandbox_results.append(result)
         else:
             # run the code snippets in parallel
             with ThreadPoolExecutor(max_workers=self.config.max_concurrent) as executor:
                 futures = [
-                    executor.submit(self._test_code_snippet_single, code_snippets[i], unit_tests[i], rm_infos[i]["libs"])
+                    executor.submit(self._test_code_snippet_single, code_snippets[i], unit_tests[i], rm_infos[i].get("libs", []))
                     for i, code_snippet in enumerate(code_snippets)
                 ]
                 for future in as_completed(futures):
                     sandbox_results.append(future.result())
                 
-        print(sandbox_results)
+        # print(sandbox_results)
         # parse the results to compute success rate 
         unit_test_pass_rate = []
         

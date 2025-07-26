@@ -734,7 +734,6 @@ class RayPPOTrainer:
             reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(
                 test_batch
             )
-            import ipdb; ipdb.set_trace()
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
@@ -749,7 +748,6 @@ class RayPPOTrainer:
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
         
-        # import ipdb; ipdb.set_trace()
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         val_data_dir = os.path.join(val_data_dir, self.config.trainer.experiment_name)
@@ -1321,7 +1319,7 @@ class RayPPOTrainer:
                         print(f"Warning: Failed to compute TTFT metrics: {e}")
                         
                 # collect metrics
-                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic, tokenizer=self.tokenizer, template_type=self.config.actor_rollout_ref.rollout.template_type))
+                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic, tokenizer=self.tokenizer, template_type=self.config.reward_manager.template_type))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()

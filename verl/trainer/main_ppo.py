@@ -190,18 +190,23 @@ class TaskRunner:
         from verl.utils.dataset.rl_dataset import collate_fn
 
 
-        # Get template type from config (default to "tool" if not specified)
-        template_type = config.actor_rollout_ref.rollout.get("template_type", "tool")
+        # Get template type from config (default to "default" if not specified)
+        template_type = config.actor_rollout_ref.rollout.get("template_type", "default")
         print(f"\nUsing template type: {template_type}")
         
         # Get the system template content
         system_template = get_system_template(template_type)
 
         # Create training and validation datasets.
-        print(f"="*100)
         print("Creating training and validation datasets")
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, system_template)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, system_template)
+
+        print(f"Creating training dataset")
+        print(f"="*100)
+
+        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, system_template, debug=config.trainer.debug)
+        print(f"Creating validation dataset")
+        print(f"="*100)
+        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, system_template, debug=config.trainer.debug)
         train_sampler = create_rl_sampler(config.data, train_dataset)
         print(f"Done creating training and validation datasets")
         print(f"="*100)
@@ -229,7 +234,7 @@ class TaskRunner:
         trainer.fit()
 
 
-def create_rl_dataset(data_paths, data_config, tokenizer, processor, system_template):
+def create_rl_dataset(data_paths, data_config, tokenizer, processor, system_template, debug=False):
     """Create a dataset.
 
     Arguments:
@@ -267,6 +272,7 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, system_temp
         processor=processor,
         config=data_config,
         system_template=system_template,
+        debug=debug,
     )
 
     return dataset

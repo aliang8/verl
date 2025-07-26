@@ -442,9 +442,14 @@ def _run_llm_autorater(
         futures.append(fut)
 
     results = ray.get(futures)
-    autorater_decisions = [res["decisions"] for res in results]
-    autorater_explanations = [res["explanations"] for res in results]
-    autorater_raw = [res["raw_responses"] for res in results]
+    autorater_decisions = []
+    autorater_explanations = []
+    autorater_raw = []
+    
+    for res in results:
+        autorater_decisions.extend(res["decisions"])
+        autorater_explanations.extend(res["explanations"])
+        autorater_raw.extend(res["raw_responses"])
 
     return autorater_decisions, autorater_explanations, autorater_raw
 

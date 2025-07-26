@@ -92,6 +92,9 @@ class SFTDataset(Dataset):
             # read parquet files and cache
             dataframe = pd.read_parquet(parquet_file)
             dataframes.append(dataframe)
+            print(f"Loading parquet file: {parquet_file}")
+            print(f"number of rows: {len(dataframe)}")
+            print(f"columns: {dataframe.columns}")
         self.dataframe = pd.concat(dataframes)
 
         print(f"number of rows: {len(self.dataframe)}")

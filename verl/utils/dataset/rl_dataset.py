@@ -90,6 +90,7 @@ class RLHFDataset(Dataset):
         config: DictConfig,
         processor: Optional[ProcessorMixin] = None,
         system_template: Optional[str] = None,
+        debug: bool = False,
     ):
         if not isinstance(data_files, (List, ListConfig)):
             data_files = [data_files]
@@ -117,6 +118,7 @@ class RLHFDataset(Dataset):
         self.need_tools_kwargs = config.get("need_tools_kwargs", False)
         self.filter_prompts = config.get("filter_prompts", True)
         self.serialize_dataset = False
+        self.debug = debug
         self._download()
         self._read_files_and_tokenize()
 
@@ -132,6 +134,9 @@ class RLHFDataset(Dataset):
         for parquet_file in self.data_files:
             # read parquet files and cache
             dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
+            if self.debug:
+                max_num = min(50, len(dataframe))
+                dataframe = dataframe.select(range(max_num))
             dataframes.append(dataframe)
 
         all_columns = set()
@@ -213,8 +218,8 @@ class RLHFDataset(Dataset):
             dataframes[index] = df.map(
                 lambda example: harmonize_reward_model(example, all_rm_keys, target_reward_model_features),
             )
-            print(f"df{index}_harmonized features:", dataframes[index].features)
-            print(f"df{index}_harmonized example 0:", dataframes[index][0])
+            # print(f"df{index}_harmonized features:", dataframes[index].features)
+            # print(f"df{index}_harmonized example 0:", dataframes[index][0])
 
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
@@ -246,7 +251,8 @@ class RLHFDataset(Dataset):
 
     def _build_messages(self, example: dict):
         messages = [{"role": "system", "content": self.system_template}]
-        messages.extend(example.pop(self.prompt_key))
+        prompt = example.pop(self.prompt_key)
+        messages.extend([{"role": "user", "content": prompt}])
 
         if self.image_key in example or self.video_key in example:
             for message in messages:

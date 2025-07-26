@@ -18,10 +18,17 @@ data:
   # The program will read all files into memory, so it can't be too large (< 100GB).
   # The path can be either a local path or an HDFS path.
   # For HDFS path, we provide utils to download it to DRAM and convert it to a local path.
-  train_files: ~/data/rlhf/gsm8k/train.parquet
+  train_files: [
+    verl/data/bigcodebench/train_with_unit_tests.parquet, 
+    # bigcodebench_data/mbpp_interleaved_concat_combined.parquet,
+    # code_list_interleaved_data/code_list_interleaved_clean.parquet,
+    # math500_interleaved_data/math500_interleaved_concat.parquet,
+  ]
 
   # Validation parquet. Can be a list or a single file.
-  val_files: ~/data/rlhf/gsm8k/test.parquet
+  val_files: [
+    data/rl_eval/combined_datasets.parquet
+  ]
 
   # The field in the dataset where the prompt is located. Default is 'prompt'.
   prompt_key: prompt
@@ -779,6 +786,8 @@ algorithm:
 # config for the trainer
 trainer:
 
+  debug: False
+
   # Whether to balance batch sizes across distributed workers
   balance_batch: True
 
@@ -875,4 +884,4 @@ reward_manager:
 
   template_type: default
 
-  autorater_service_url: "http://10.128.0.30:81/evaluate"
+  autorater_service_url: "http://10.128.0.30:81"

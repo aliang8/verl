@@ -174,6 +174,7 @@ Decision: """
 def extract_solution(
     solution_str: str,
     template_type: str = "default",
+    data_source: str = "",
 ) -> Union[str, List[str]]:
     """
     Extract answer(s) from a solution string based on template type.
@@ -194,17 +195,29 @@ def extract_solution(
         extracted_items = [match.strip() for match in matches if match.strip()]
         return extracted_items
     else:
-        # Find the last </think> tag and return everything after it
-        think_match = list(re.finditer(r"</think>", solution_str, re.IGNORECASE))
-        if think_match:
-            last = think_match[-1]
-            after = solution_str[last.end():].strip()
-            return after if after else ""
-        
-        # Also just try to get things between <answer> and </answer>
-        answer_match = list(re.finditer(r"<answer>(.*?)</answer>", solution_str, re.IGNORECASE))
-        if answer_match:
-            return answer_match[0].group(1).strip()
+        # if data_source is code, we want to extract all the parts
+        # of the response that contains ```python def task_func(): ... ```
+        # and then return the code between the first and last ```python def task_func():
+        if "code" in data_source.lower():
+            code_matches = re.findall(r"```python\s*def\s*task_func\s*\(\s*\)\s*:\s*.*?```", solution_str, re.IGNORECASE | re.DOTALL)
+            if code_matches:
+                return code_matches
+            else:
+                return ""
+        else:
+            # this is for natural language responses
+
+            # Find the last </think> tag and return everything after it
+            think_match = list(re.finditer(r"</think>", solution_str, re.IGNORECASE))
+            if think_match:
+                last = think_match[-1]
+                after = solution_str[last.end():].strip()
+                return after if after else ""
+            
+            # Also just try to get things between <answer> and </answer>
+            answer_match = list(re.finditer(r"<answer>(.*?)</answer>", solution_str, re.IGNORECASE))
+            if answer_match:
+                return answer_match[0].group(1).strip()
 
     return ""
 
