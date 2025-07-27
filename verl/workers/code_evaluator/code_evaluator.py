@@ -230,5 +230,12 @@ class CodeEvaluator:
                 "unit_test_rewards": unit_test_rewards,
                 "pass@1": pass_1,
             }
+        else:
+            code_rewards = {
+                "unit_test_pass_rate": [0.0] * len(answers),
+                "code_outline_helpfulness": [0.0] * len(answers),
+                "unit_test_rewards": [0.0] * len(answers),
+                "pass@1": [0.0] * len(answers),
+            }
 
         return code_rewards
