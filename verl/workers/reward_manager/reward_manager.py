@@ -54,7 +54,7 @@ class RewardManager:
         code_indices = []
         text_indices = []
         for i, ds in enumerate(data_sources):
-            if ds and "code" in str(ds).lower():
+            if ds and ("code" in str(ds).lower() or "mbpp" in str(ds).lower()):
                 code_indices.append(i)
             else:
                 text_indices.append(i)

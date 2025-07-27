@@ -65,24 +65,34 @@ class CodeEvaluator:
 
         return unit_test_rewards
         
-    def _test_code_snippet_single(self, code_snippet: str, unit_tests: str, required_libs: str) -> Dict[str, Any]:
-        unit_tests = unit_tests.replace("\\n", "\n")
-        combined_test = f"""import unittest\nimport pandas as pd\nimport numpy as np\n\n{code_snippet}\n\n{unit_tests}\n\nif __name__ == '__main__':\n    unittest.main(verbosity=2)\n"""
-
-        # convert required_libs to list
-        if isinstance(required_libs, str):
-            if required_libs == "":
-                required_libs = []
-            else:
-                required_libs = ast.literal_eval(required_libs)
-        elif isinstance(required_libs, list):
-            pass # already a list
+    def _test_code_snippets(self, code_snippets: List[str], unit_tests: str, required_libs: str) -> Dict[str, Any]:
+        if len(code_snippets) > len(unit_tests):
+            # repeat the unit tests for each code snippet 
+            unit_tests = [unit_tests[0]] * len(code_snippets)
+        elif len(code_snippets) < len(unit_tests) and len(unit_tests) != 0:
+            # repeat the code snippets for each unit test 
+            code_snippets = [code_snippets[0]] * len(unit_tests)
         
-        result = self.executor.execute_safely(combined_test, libraries=required_libs)
-        return result
+        results = []
+        for code_snippet, unit_test in zip(code_snippets, unit_tests):
+            code_snippet = code_snippet.replace("\\n", "\n")
+            combined_test = f"""import unittest\nimport pandas as pd\nimport numpy as np\n\n{code_snippet}\n\n{unit_test}\n\nif __name__ == '__main__':\n    unittest.main(verbosity=2)\n"""
+
+            # convert required_libs to list
+            if isinstance(required_libs, str):
+                if required_libs == "":
+                    required_libs = []
+                else:
+                    required_libs = ast.literal_eval(required_libs)
+            elif isinstance(required_libs, list):
+                pass # already a list
+            
+            result = self.executor.execute_safely(combined_test, libraries=required_libs)
+            results.append(result)
+        return results
 
     def _evaluate_code_helper(self, code_snippets: List[str], rm_infos: List[Dict[str, Any]], batch_indices: List[int]) -> Tuple[List[float], List[Dict[str, Any]]]:
-        code_snippets = [self._extract_code_snippet(snippet) for snippet in code_snippets]
+        code_snippets = [self._extract_code_snippets(snippet) for snippet in code_snippets]
 
         # First extract the ground truth unit tests 
         unit_tests = []
@@ -99,16 +109,17 @@ class CodeEvaluator:
 
         if self.config.execute_sequential:
             for i, code_snippet in enumerate(code_snippets):
+                import ipdb; ipdb.set_trace()
                 code_snippet = code_snippets[i]
                 unit_tests = unit_tests[i]
                 required_libs = rm_infos[i].get("libs", [])
-                result = self._test_code_snippet_single(code_snippet, unit_tests, required_libs)
+                result = self._test_code_snippets(code_snippet, unit_tests, required_libs)
                 sandbox_results.append(result)
         else:
             # run the code snippets in parallel
             with ThreadPoolExecutor(max_workers=self.config.max_concurrent) as executor:
                 futures = [
-                    executor.submit(self._test_code_snippet_single, code_snippets[i], unit_tests[i], rm_infos[i].get("libs", []))
+                    executor.submit(self._test_code_snippets, code_snippets[i], unit_tests[i], rm_infos[i].get("libs", []))
                     for i, code_snippet in enumerate(code_snippets)
                 ]
                 for future in as_completed(futures):
@@ -119,46 +130,52 @@ class CodeEvaluator:
         unit_test_pass_rate = []
         
         for result in sandbox_results:
-            ran_successfully = "PASSED" in result["stderr"] or "FAILED" in result["stderr"] or "Ran" in result["stderr"]
-            if not ran_successfully:
+            if result is None:
                 unit_test_pass_rate.append(0)
-            else:
-                stdout = result.get("stdout", "")
-                stderr = result.get("stderr", "")
-                output = stdout + stderr
-                ran_match = re.search(r"Ran (\d+) tests? in", output)
-                total_unit_tests = int(ran_match.group(1)) if ran_match else 0
+                continue
+            
+            single_pass_rate = []
+            for r in result:
+                ran_successfully = "PASSED" in r["stderr"] or "FAILED" in r["stderr"] or "Ran" in r["stderr"]
+                if not ran_successfully:
+                    unit_test_pass_rate.append(0)
+                else:
+                    stdout = r.get("stdout", "")
+                    stderr = r.get("stderr", "")
+                    output = stdout + stderr
+                    ran_match = re.search(r"Ran (\d+) tests? in", output)
+                    total_unit_tests = int(ran_match.group(1)) if ran_match else 0
 
-                failed_match = re.search(r"FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)", output)
-                
-                failures = 0
-                errors = 0
-                if failed_match:
-                    if failed_match.group(1):
-                        failures = int(failed_match.group(1))
-                    if failed_match.group(2):
-                        errors = int(failed_match.group(2))
+                    failed_match = re.search(r"FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)", output)
+                    
+                    failures = 0
+                    errors = 0
+                    if failed_match:
+                        if failed_match.group(1):
+                            failures = int(failed_match.group(1))
+                        if failed_match.group(2):
+                            errors = int(failed_match.group(2))
 
-                passed = total_unit_tests - failures - errors 
-                unit_test_pass_rate.append(passed / total_unit_tests if total_unit_tests > 0 else 0.0)
+                    passed = total_unit_tests - failures - errors 
+                    single_pass_rate.append(passed / total_unit_tests if total_unit_tests > 0 else 0.0)
+            
+            unit_test_pass_rate.append(sum(single_pass_rate) / len(single_pass_rate))
 
         return unit_test_pass_rate, sandbox_results
 
-    def _extract_code_snippet(self, answer: str) -> str:
-        """Extract code snippet from predicted answer."""
+    def _extract_code_snippets(self, answer: str) -> List[str]:
+        """Extract a list of code snippets from predicted answer."""
         if not answer.strip():
-            return ""
+            return []
 
-        # Method 1: Try to extract code between triple backticks
-        code_block_pattern = r"```(?:python)?\s*(.*?)```"
+        # Try to extract code between triple backticks and has def or class 
+        code_block_pattern = r"```python\s*(.*?)\s*```"
         code_matches = re.findall(code_block_pattern, answer, re.DOTALL)
 
         if code_matches:
-            # Return the first code block found
-            code_snippet = code_matches[0].strip()
-            return code_snippet
+            return code_matches
 
-        return answer
+        return [answer]
 
     def evaluate_code(self, answers: List[str], prompts: List[str], rm_infos: List[Dict[str, Any]], batch_indices: List[int]) -> Dict[str, List[float]]:
         unit_test_pass_rate, sandbox_results = self._evaluate_code_helper(answers, rm_infos, batch_indices)
