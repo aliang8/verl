@@ -542,7 +542,6 @@ def compute_thought_and_answer_lengths(batch: DataProto, tokenizer, template_typ
             else:
                 answer_spans = []
         else:
-            import ipdb; ipdb.set_trace()
             answer_spans = [m.group(1) for m in re.finditer(r'<answer>(.*?)</answer>', response_str, re.DOTALL | re.IGNORECASE)]
 
         # Compute token lengths for each span
