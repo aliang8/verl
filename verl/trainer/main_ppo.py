@@ -189,9 +189,7 @@ class TaskRunner:
 
         from verl.utils.dataset.rl_dataset import collate_fn
 
-
-        # Get template type from config (default to "default" if not specified)
-        template_type = config.actor_rollout_ref.rollout.get("template_type", "default")
+        template_type = config.reward_manager.template_type
         print(f"\nUsing template type: {template_type}")
         
         # Get the system template content

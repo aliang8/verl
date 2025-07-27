@@ -489,7 +489,7 @@ def process_training_reward_metrics(data_sources: list[str], reward_extra_infos_
     metrics = {}
     
     # Process format_score and content_score for each data source
-    for metric_name in ["format_scores", "content_scores", "autorater_scores", "interleaved_format_scores", "final_scores", "description_scores", "code_scores", "unit_test_scores", "pass@1"]:
+    for metric_name in ["unit_test_pass_rate", "pass@1", "autorater_scores", "format_rewards"]:
         if metric_name in reward_extra_infos_dict:
             metric_values = reward_extra_infos_dict[metric_name]
             
@@ -529,6 +529,10 @@ def compute_thought_and_answer_lengths(batch: DataProto, tokenizer, template_typ
         # Find all <think>...</think> and <answer>...</answer> spans
         think_spans = [m.group(1) for m in re.finditer(r'<think>(.*?)</think>', response_str, re.DOTALL | re.IGNORECASE)]
         
+        # if there are no think spans, then the think is the entire response
+        if len(think_spans) == 0:
+            think_spans = [response_str]
+
         if template_type == "default":
             # The answer is everything after the first </think>
             think_end = re.search(r'</think>', response_str, re.IGNORECASE)
@@ -538,6 +542,7 @@ def compute_thought_and_answer_lengths(batch: DataProto, tokenizer, template_typ
             else:
                 answer_spans = []
         else:
+            import ipdb; ipdb.set_trace()
             answer_spans = [m.group(1) for m in re.finditer(r'<answer>(.*?)</answer>', response_str, re.DOTALL | re.IGNORECASE)]
 
         # Compute token lengths for each span

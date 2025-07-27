@@ -707,6 +707,8 @@ class RayPPOTrainer:
                 "recompute_log_prob": False,
                 "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
                 "validate": True,
+                "temperature": self.config.actor_rollout_ref.rollout.val_kwargs.temperature,
+                "top_p": self.config.actor_rollout_ref.rollout.val_kwargs.top_p,
             }
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 

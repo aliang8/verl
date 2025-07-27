@@ -69,7 +69,7 @@ class CodeEvaluator:
         if len(code_snippets) > len(unit_tests):
             # repeat the unit tests for each code snippet 
             unit_tests = [unit_tests[0]] * len(code_snippets)
-        elif len(code_snippets) < len(unit_tests) and len(unit_tests) != 0:
+        elif len(code_snippets) < len(unit_tests) and len(code_snippets) > 0:
             # repeat the code snippets for each unit test 
             code_snippets = [code_snippets[0]] * len(unit_tests)
         
@@ -159,7 +159,10 @@ class CodeEvaluator:
                     passed = total_unit_tests - failures - errors 
                     single_pass_rate.append(passed / total_unit_tests if total_unit_tests > 0 else 0.0)
             
-            unit_test_pass_rate.append(sum(single_pass_rate) / len(single_pass_rate))
+            if len(single_pass_rate) > 0:
+                unit_test_pass_rate.append(sum(single_pass_rate) / len(single_pass_rate))
+            else:
+                unit_test_pass_rate.append(0)
 
         return unit_test_pass_rate, sandbox_results
 
@@ -179,8 +182,11 @@ class CodeEvaluator:
 
     def evaluate_code(self, answers: List[str], prompts: List[str], rm_infos: List[Dict[str, Any]], batch_indices: List[int]) -> Dict[str, List[float]]:
         unit_test_pass_rate, sandbox_results = self._evaluate_code_helper(answers, rm_infos, batch_indices)
+        pass_1 = [1 if r == 1.0 else 0 for r in unit_test_pass_rate]
+
         code_rewards = {
-            "unit_test_pass_rate": unit_test_pass_rate
+            "unit_test_pass_rate": unit_test_pass_rate,
+            "pass@1": pass_1,
         }
 
         return code_rewards
@@ -207,6 +213,8 @@ class CodeEvaluator:
                 [batch_indices[i] for i in code_outline_indices]
             )
 
+            pass_1 = [1 if r == 1.0 else 0 for r in unit_test_pass_rate]
+
             # evaluate the outlines with llm autorater
             code_outline_helpfulness = self.evaluate_code_outlines(
                 code_outlines, 
@@ -220,6 +228,7 @@ class CodeEvaluator:
                 "unit_test_pass_rate": unit_test_pass_rate,
                 "code_outline_helpfulness": code_outline_helpfulness,
                 "unit_test_rewards": unit_test_rewards,
+                "pass@1": pass_1,
             }
 
         return code_rewards

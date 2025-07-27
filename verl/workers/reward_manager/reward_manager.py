@@ -84,7 +84,7 @@ class RewardManager:
         else:
             code_rewards = {}
 
-        text_gt_answers = [rm_infos[i]["ground_truth"] for i in text_indices]
+        text_gt_answers = [rm_infos[i]["ground_truth"][0] for i in text_indices]
         text_prompts = [prompts[i] for i in text_indices]
         text_answers = [answers[i] for i in text_indices]
 
@@ -158,12 +158,17 @@ class RewardManager:
         counts = []
 
         for i, interleave_answers in enumerate(answers):
+            
+            gt_answer = gt_answers[i]
+
             for j, answer in enumerate(interleave_answers):
                 all_prompts.append(prompts[i])
                 all_answers.append(answer)
-                all_gt_answers.append(gt_answers[i][j])
+                all_gt_answers.append(gt_answer[j])
+
             counts.append(len(interleave_answers))
 
+        import ipdb; ipdb.set_trace()
         autorater_payload = {
             "prompts": all_prompts,
             "responses": all_answers,
@@ -198,6 +203,9 @@ class RewardManager:
         # Then compute the other rewards for the indices with answer counts >= 2
         valid_indices = [i for i, count in enumerate(interleave_answer_counts) if count >= 2]
 
+        if len(valid_indices) == 0:
+            return torch.zeros_like(data.batch["responses"], dtype=torch.float32), {"unit_test_pass_rate": [0.0] * batch_size, "autorater_scores": [0.0] * batch_size}
+
         print(f"number of valid_indices: {len(valid_indices)}")
 
         # figure out which evaluator to use base on data source
@@ -208,7 +216,7 @@ class RewardManager:
         for i, ds in enumerate(data_sources):
             if i not in valid_indices:
                 continue
-            if ds and "code" in str(ds).lower():
+            if ds and ("code" in str(ds).lower() or "mbpp" in str(ds).lower()):
                 code_indices.append(i)
             else:
                 text_indices.append(i)
@@ -241,12 +249,19 @@ class RewardManager:
             code_rewards = {}
 
         # Run text evaluator on text indices
-        text_batch_indices = [batch_indices[i] for i in text_indices]   
-        text_gt_answers = [rm_infos[i]["ground_truth"] for i in text_indices]
-        text_prompts = [prompts[i] for i in text_indices]
-        text_answers = [answers[i] for i in text_indices]
 
-        if len(text_indices) > 0:
+        # filter only indices where answers and gt_answers have the same length
+        valid_text_indices = []
+        for i in text_indices:
+            if len(answers[i]) == len(rm_infos[i]["ground_truth"]):
+                valid_text_indices.append(i)
+
+        text_batch_indices = [batch_indices[i] for i in valid_text_indices]   
+        text_gt_answers = [rm_infos[i]["ground_truth"] for i in valid_text_indices]
+        text_prompts = [prompts[i] for i in valid_text_indices]
+        text_answers = [answers[i] for i in valid_text_indices]
+
+        if len(valid_text_indices) > 0:
             text_decisions, text_explanations, text_raw_responses = self.compute_reward_text_interleave(
                 text_prompts, text_answers, text_gt_answers
             )
@@ -275,18 +290,18 @@ class RewardManager:
                 for k, v in code_rewards.items():
                     final_code_extras[k][i] = v[code_count]
                 code_count += 1
-            elif i in text_indices:
+            elif i in valid_text_indices:
                 current_final_score = interleave_format_rewards[text_count] + text_decisions[text_count]
                 for k, v in text_extras.items():
                     final_text_extras[k][i] = v[text_count]
                 text_count += 1
             else:
-                raise ValueError(f"Invalid index: {i}")
+                current_final_score = 0.0
 
             if valid_response_length > 0:
                 reward_tensor[i, valid_response_length - 1] = current_final_score
 
-        extras = {}     
+        extras = {"format_rewards": interleave_format_rewards}     
         extras.update(final_code_extras)
         extras.update(final_text_extras)
 
