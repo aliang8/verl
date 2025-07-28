@@ -221,7 +221,6 @@ class RewardManager:
         if len(valid_indices) == 0:
             return torch.zeros_like(data.batch["responses"], dtype=torch.float32), {"unit_test_pass_rate": [0.0] * batch_size, "autorater_scores": [0.0] * batch_size}
 
-        valid_outline_code_test_indices = [i for i, count in enumerate(interleave_answer_counts) if count == 3]
         print(f"number of valid_indices: {len(valid_indices)}")
 
         # figure out which evaluator to use base on data source
@@ -244,13 +243,14 @@ class RewardManager:
         # index of the example in the batch
         batch_indices = data.non_tensor_batch["index"] 
 
-        print(f"number of outline_code_test_indices: {len(outline_code_test_indices)}")
+        valid_outline_code_test_indices = [i for i, count in enumerate(interleave_answer_counts) if count == 3]
+        outline_code_test_indices = set(outline_code_test_indices) & set(valid_outline_code_test_indices)
+        print(f"number of outline_code_test_indices: {len(valid_outline_code_test_indices)}")
         print(f"number of code_indices: {len(code_indices)}")
         print(f"number of text_indices: {len(text_indices)}")
 
         # Run outline code test evaluator on outline code test indices
         rm_infos = data.non_tensor_batch["reward_model"]
-        outline_code_test_indices = set(outline_code_test_indices) & set(valid_indices)
         outline_code_test_rm_infos = [rm_infos[i] for i in outline_code_test_indices]
         outline_code_test_batch_indices = [batch_indices[i] for i in outline_code_test_indices]
         outline_code_test_prompts = [prompts[i] for i in outline_code_test_indices]
@@ -260,7 +260,7 @@ class RewardManager:
             with _timer("outline_code_test_evaluator", timing_raw):
                 outline_code_test_rewards = self.code_evaluator.evaluate_interleaved_outline_code_test(
                     outline_code_test_answers,
-                    outline_code_test_prompts,
+                    outline_code_test_prompts, 
                     outline_code_test_rm_infos,
                     outline_code_test_batch_indices,
                 )
@@ -316,7 +316,7 @@ class RewardManager:
         outline_code_test_count = 0
         final_code_extras = {k: [0 for _ in range(batch_size)] for k in ["unit_test_pass_rate", "pass@1"]}
         final_text_extras = {k: [0 for _ in range(batch_size)] for k in ["autorater_scores"]}
-        final_outline_code_test_extras = {k: [0 for _ in range(batch_size)] for k in outline_code_test_rewards.keys()}
+        final_outline_code_test_extras = {k: [0 for _ in range(batch_size)] for k in ["unit_test_pass_rate", "code_outline_helpfulness", "unit_test_rewards", "pass@1"]}
 
         for i in range(batch_size):
             # Retrieve the correct length for storing the reward

@@ -45,7 +45,7 @@ class CodeEvaluator:
         }
 
         decisions, explanations, raw_responses = call_autorater_service(
-            self.config.autorater_base_url,
+            self.config.autorater_service_url,
             autorater_payload,
             batch_size=len(code_outlines),
             endpoint="/evaluate_autorater",
@@ -203,51 +203,40 @@ class CodeEvaluator:
 
         return code_rewards
 
-    def evaluate_interleaved_outline_code_test(self, answers: List[List[str]], prompts: List[str], rm_infos: List[Dict[str, Any]], data_sources: List[str], batch_indices: List[int]) -> Dict[str, List[float]]:
+    def evaluate_interleaved_outline_code_test(self, answers: List[List[str]], prompts: List[str], rm_infos: List[Dict[str, Any]], batch_indices: List[int]) -> Dict[str, List[float]]:
         # answers are already extracted and should be a list of lists of answers
-        
-        # if the data_source is code_outline 
-        code_outline_indices = [i for i, ds in enumerate(data_sources) if ds and "code" in str(ds).lower()]
 
-        if len(code_outline_indices) > 0:
-            # these ones have 3 answers,
-            # the first answer is the code outline,
-            # the second answer is the code,
-            # the third answer is the unit tests
-            code_outlines = [answers[i][0] for i in code_outline_indices]
-            code_snippets = [answers[i][1] for i in code_outline_indices]
-            unit_tests = [answers[i][2] for i in code_outline_indices]
+        # these ones have 3 answers,
+        # the first answer is the code outline,
+        # the second answer is the code,
+        # the third answer is the unit tests
+        code_outlines = [answers[i][0] for i in range(len(answers))]
+        code_snippets = [answers[i][1] for i in range(len(answers))]
+        unit_tests = [answers[i][2] for i in range(len(answers))]
 
-            # run the code snippets 
-            unit_test_pass_rate, sandbox_results = self._evaluate_code_helper(
-                code_snippets, 
-                [rm_infos[i] for i in code_outline_indices], 
-                [batch_indices[i] for i in code_outline_indices]
-            )
+        # run the code snippets 
+        unit_test_pass_rate, sandbox_results = self._evaluate_code_helper(
+            code_snippets, 
+            [rm_infos[i] for i in range(len(answers))], 
+            [batch_indices[i] for i in range(len(answers))]
+        )
 
-            pass_1 = [1 if r == 1.0 else 0 for r in unit_test_pass_rate]
+        pass_1 = [1 if r == 1.0 else 0 for r in unit_test_pass_rate]
 
-            # evaluate the outlines with llm autorater
-            code_outline_helpfulness = self.evaluate_code_outlines(
-                code_outlines, 
-                prompts
-            )
+        # evaluate the outlines with llm autorater
+        code_outline_helpfulness = self.evaluate_code_outlines(
+            code_outlines, 
+            prompts
+        )
 
-            # evaluate the generated unit tests  
-            unit_test_rewards = self.evaluate_unit_tests(unit_tests)
+        # evaluate the generated unit tests  
+        unit_test_rewards = self.evaluate_unit_tests(unit_tests)
 
-            code_rewards = {
-                "unit_test_pass_rate": unit_test_pass_rate,
-                "code_outline_helpfulness": code_outline_helpfulness,
-                "unit_test_rewards": unit_test_rewards,
-                "pass@1": pass_1,
-            }
-        else:
-            code_rewards = {
-                "unit_test_pass_rate": [0.0] * len(answers),
-                "code_outline_helpfulness": [0.0] * len(answers),
-                "unit_test_rewards": [0.0] * len(answers),
-                "pass@1": [0.0] * len(answers),
-            }
+        code_rewards = {
+            "unit_test_pass_rate": unit_test_pass_rate,
+            "code_outline_helpfulness": code_outline_helpfulness,
+            "unit_test_rewards": unit_test_rewards,
+            "pass@1": pass_1,
+        }
 
         return code_rewards
