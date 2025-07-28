@@ -136,14 +136,16 @@ class RewardManager:
         template_types = ["standard"] * len(prompts)
 
         # if gt rewards is a list of lists, then we combine the answers with
-        # 1) and 2) into one string with the label "1) and 2) ... and n)"
+        # 1) ..., 2) ... , n)"
         if isinstance(gt_answers[0], list):
             updated_gt_answers = []
             for i in range(len(gt_answers)):
+                merged_answer = ""
                 for j in range(len(gt_answers[i])):
-                    updated_gt_answers.append(f"{i+1}) " + gt_answers[i][j])
-            gt_answers = " and ".join(updated_gt_answers)
-
+                    merged_answer += f"{i+1}) " + gt_answers[i][j] + ", "
+                updated_gt_answers.append(merged_answer[:-2])
+            gt_answers = updated_gt_answers
+            
         autorater_payload = {
             "prompts": prompts,
             "responses": answers,

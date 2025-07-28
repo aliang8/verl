@@ -157,6 +157,7 @@ class CodeEvaluator:
                             errors = int(failed_match.group(2))
 
                     passed = total_unit_tests - failures - errors 
+                    passed = max(passed, 0)
                     single_pass_rate.append(passed / total_unit_tests if total_unit_tests > 0 else 0.0)
             
             if len(single_pass_rate) > 0:
