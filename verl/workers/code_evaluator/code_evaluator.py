@@ -73,22 +73,21 @@ class CodeEvaluator:
             # repeat the code snippets for each unit test 
             code_snippets = [code_snippets[0]] * len(unit_tests)
         
-        import ipdb; ipdb.set_trace()
         results = []
-        for code_snippet, unit_test in zip(code_snippets, unit_tests):
+        for code_snippet, unit_test, libs in zip(code_snippets, unit_tests, required_libs):
             code_snippet = code_snippet.replace("\\n", "\n")
             combined_test = f"""import unittest\nimport pandas as pd\nimport numpy as np\n\n{code_snippet}\n\n{unit_test}\n\nif __name__ == '__main__':\n    unittest.main(verbosity=2)\n"""
 
             # convert required_libs to list
-            if isinstance(required_libs, str):
-                if required_libs == "":
-                    required_libs = []
+            if isinstance(libs, str):
+                if libs == "":
+                    libs = []
                 else:
-                    required_libs = ast.literal_eval(required_libs)
-            elif isinstance(required_libs, list):
-                required_libs = [ast.literal_eval(lib) for lib in required_libs]
+                    libs = ast.literal_eval(libs)
+            elif isinstance(libs, list):
+                libs = [ast.literal_eval(lib) for lib in libs]
             
-            result = self.executor.execute_safely(combined_test, libraries=required_libs)
+            result = self.executor.execute_safely(combined_test, libraries=libs)
             results.append(result)
         return results
 
