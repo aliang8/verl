@@ -103,8 +103,8 @@ class RewardManager:
         code_count = 0
         text_count = 0
 
-        final_code_extras = {k: [0 for _ in range(batch_size)] for k in code_rewards.keys()}
-        final_text_extras = {k: [0 for _ in range(batch_size)] for k in text_extras.keys()}
+        final_code_extras = {k: [0 for _ in range(batch_size)] for k in ["unit_test_pass_rate", "pass@1"]}
+        final_text_extras = {k: [0 for _ in range(batch_size)] for k in ["autorater_scores"]}
 
         for i in range(batch_size):
             data_item = data[i]
@@ -314,8 +314,8 @@ class RewardManager:
         code_count = 0
         text_count = 0
         outline_code_test_count = 0
-        final_code_extras = {k: [0 for _ in range(batch_size)] for k in code_rewards.keys()}
-        final_text_extras = {k: [0 for _ in range(batch_size)] for k in text_extras.keys()}
+        final_code_extras = {k: [0 for _ in range(batch_size)] for k in ["unit_test_pass_rate", "pass@1"]}
+        final_text_extras = {k: [0 for _ in range(batch_size)] for k in ["autorater_scores"]}
         final_outline_code_test_extras = {k: [0 for _ in range(batch_size)] for k in outline_code_test_rewards.keys()}
 
         for i in range(batch_size):
