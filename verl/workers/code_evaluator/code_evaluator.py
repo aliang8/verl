@@ -47,8 +47,7 @@ class CodeEvaluator:
         decisions, explanations, raw_responses = call_autorater_service(
             self.config.autorater_service_url,
             autorater_payload,
-            batch_size=len(code_outlines),
-            endpoint="/evaluate_autorater",
+            batch_size=len(code_outlines)
         )
 
         return decisions
