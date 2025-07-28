@@ -73,6 +73,7 @@ class CodeEvaluator:
             # repeat the code snippets for each unit test 
             code_snippets = [code_snippets[0]] * len(unit_tests)
         
+        import ipdb; ipdb.set_trace()
         results = []
         for code_snippet, unit_test in zip(code_snippets, unit_tests):
             code_snippet = code_snippet.replace("\\n", "\n")
@@ -85,7 +86,7 @@ class CodeEvaluator:
                 else:
                     required_libs = ast.literal_eval(required_libs)
             elif isinstance(required_libs, list):
-                pass # already a list
+                required_libs = [ast.literal_eval(lib) for lib in required_libs]
             
             result = self.executor.execute_safely(combined_test, libraries=required_libs)
             results.append(result)

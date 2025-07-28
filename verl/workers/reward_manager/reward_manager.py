@@ -84,7 +84,7 @@ class RewardManager:
         else:
             code_rewards = {}
 
-        text_gt_answers = [rm_infos[i]["ground_truth"][0] for i in text_indices]
+        text_gt_answers = [rm_infos[i]["ground_truth"] for i in text_indices]
         text_prompts = [prompts[i] for i in text_indices]
         text_answers = [answers[i] for i in text_indices]
 
@@ -134,7 +134,16 @@ class RewardManager:
 
     def compute_reward_text(self, prompts: List[str], answers: List[str], gt_answers: List[str]) -> Tuple[torch.Tensor, Dict[str, Any]]:
         template_types = ["standard"] * len(prompts)
-        
+
+        # if gt rewards is a list of lists, then we combine the answers with
+        # 1) and 2) into one string with the label "1) and 2) ... and n)"
+        if isinstance(gt_answers[0], list):
+            updated_gt_answers = []
+            for i in range(len(gt_answers)):
+                for j in range(len(gt_answers[i])):
+                    updated_gt_answers.append(f"{i+1}) " + gt_answers[i][j])
+            gt_answers = " and ".join(updated_gt_answers)
+
         autorater_payload = {
             "prompts": prompts,
             "responses": answers,

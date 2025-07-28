@@ -22,10 +22,10 @@ data:
     # verl/data/bigcodebench/train_with_unit_tests.parquet,
     # data/combined_sft_data.parquet,
     # data/sft/multiple_solutions_interleave.parquet,
-    # data/sft/math500_concat_interleaved.parquet,
+    data/sft/math500_concat_interleaved.parquet,
     # data/sft/mbpp_concat_interleaved.parquet
-    data/rl_eval/mbpp_test.parquet,
-    data/rl_eval/math500_test.parquet
+    # data/rl_eval/mbpp_test.parquet,
+    # data/rl_eval/math500_test.parquet
   ]
 
   # Validation parquet. Can be a list or a single file.
