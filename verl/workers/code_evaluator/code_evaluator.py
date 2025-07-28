@@ -5,7 +5,7 @@ import logging
 from verl.workers.code_evaluator.llm_sandbox import SafeResourceManagedExecutor
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 import ast
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
@@ -166,19 +166,30 @@ class CodeEvaluator:
 
         return unit_test_pass_rate, sandbox_results
 
-    def _extract_code_snippets(self, answer: str) -> List[str]:
+    def _extract_code_snippets(self, answer: Union[str, List[str]]) -> List[str]:
         """Extract a list of code snippets from predicted answer."""
-        if not answer.strip():
-            return []
-
-        # Try to extract code between triple backticks and has def or class 
         code_block_pattern = r"```python\s*(.*?)\s*```"
-        code_matches = re.findall(code_block_pattern, answer, re.DOTALL)
+        
+        if isinstance(answer, str):
+            # Try to extract code between triple backticks and has def or class 
+            code_matches = re.findall(code_block_pattern, answer, re.DOTALL)
 
-        if code_matches:
+            if code_matches:
+                return code_matches
+
+            return [answer]
+            
+        elif isinstance(answer, list):
+            code_matches = []
+            for a in answer:
+                matches = re.findall(code_block_pattern, a, re.DOTALL)
+                if matches:
+                    code_matches.extend(matches)
+                else:
+                    code_matches.append(a)
             return code_matches
-
-        return [answer]
+        
+        return [answer] 
 
     def evaluate_code(self, answers: List[str], prompts: List[str], rm_infos: List[Dict[str, Any]], batch_indices: List[int]) -> Dict[str, List[float]]:
         unit_test_pass_rate, sandbox_results = self._evaluate_code_helper(answers, rm_infos, batch_indices)

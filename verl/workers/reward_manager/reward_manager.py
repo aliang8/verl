@@ -157,6 +157,11 @@ class RewardManager:
         all_gt_answers = []
         counts = []
 
+        # if we have more answers than gt answers only take the first len(gt_answers) answers
+        for i, interleave_answers in enumerate(answers):
+            if len(interleave_answers) > len(gt_answers[i]):
+                answers[i] = interleave_answers[:len(gt_answers[i])]
+
         for i, interleave_answers in enumerate(answers):
             
             gt_answer = gt_answers[i]
@@ -168,7 +173,6 @@ class RewardManager:
 
             counts.append(len(interleave_answers))
 
-        import ipdb; ipdb.set_trace()
         autorater_payload = {
             "prompts": all_prompts,
             "responses": all_answers,
@@ -206,6 +210,7 @@ class RewardManager:
         if len(valid_indices) == 0:
             return torch.zeros_like(data.batch["responses"], dtype=torch.float32), {"unit_test_pass_rate": [0.0] * batch_size, "autorater_scores": [0.0] * batch_size}
 
+        valid_outline_code_test_indices = [i for i, count in enumerate(interleave_answer_counts) if count == 3]
         print(f"number of valid_indices: {len(valid_indices)}")
 
         # figure out which evaluator to use base on data source
@@ -213,10 +218,14 @@ class RewardManager:
 
         code_indices = []
         text_indices = []
+        outline_code_test_indices = []
+
         for i, ds in enumerate(data_sources):
             if i not in valid_indices:
                 continue
-            if ds and ("code" in str(ds).lower() or "mbpp" in str(ds).lower()):
+            if ds and ds == "bcb_outline_code_test_interleave":
+                outline_code_test_indices.append(i)
+            elif ds and ("code" in str(ds).lower() or "mbpp" in str(ds).lower()):
                 code_indices.append(i)
             else:
                 text_indices.append(i)
@@ -224,25 +233,42 @@ class RewardManager:
         # index of the example in the batch
         batch_indices = data.non_tensor_batch["index"] 
 
+        print(f"number of outline_code_test_indices: {len(outline_code_test_indices)}")
         print(f"number of code_indices: {len(code_indices)}")
         print(f"number of text_indices: {len(text_indices)}")
 
-        # Run code evaluator on code indices
+        # Run outline code test evaluator on outline code test indices
         rm_infos = data.non_tensor_batch["reward_model"]
+        outline_code_test_indices = set(outline_code_test_indices) & set(valid_indices)
+        outline_code_test_rm_infos = [rm_infos[i] for i in outline_code_test_indices]
+        outline_code_test_batch_indices = [batch_indices[i] for i in outline_code_test_indices]
+        outline_code_test_prompts = [prompts[i] for i in outline_code_test_indices]
+        outline_code_test_answers = [answers[i] for i in outline_code_test_indices]
+
+        if len(outline_code_test_indices) > 0:
+            with _timer("outline_code_test_evaluator", timing_raw):
+                outline_code_test_rewards = self.code_evaluator.evaluate_interleaved_outline_code_test(
+                    outline_code_test_answers,
+                    outline_code_test_prompts,
+                    outline_code_test_rm_infos,
+                    outline_code_test_batch_indices,
+                )
+        else:
+            outline_code_test_rewards = {}
+
+        # Run regular code evaluator on code indices
         code_rm_infos = [rm_infos[i] for i in code_indices]
         code_batch_indices = [batch_indices[i] for i in code_indices]
-        code_data_sources = [data_sources[i] for i in code_indices]
 
         code_prompts = [prompts[i] for i in code_indices]
         code_answers = [answers[i] for i in code_indices]
 
         if len(code_indices) > 0:
             with _timer("code_evaluator", timing_raw):
-                code_rewards = self.code_evaluator.evaluate_interleaved_outline_code_test(
+                code_rewards = self.code_evaluator.evaluate_code(
                     code_answers,
                     code_prompts,
                     code_rm_infos,
-                    data_sources=code_data_sources, 
                     batch_indices=code_batch_indices
                 )
         else:
@@ -252,11 +278,12 @@ class RewardManager:
 
         # filter only indices where answers and gt_answers have the same length
         valid_text_indices = []
-        for i in text_indices:
-            if len(answers[i]) == len(rm_infos[i]["ground_truth"]):
-                valid_text_indices.append(i)
+        for indx in text_indices:
+            # if we are interleaving, sometimes we might have more answers than gt_answers
+            if len(answers[indx]) >= len(rm_infos[indx]["ground_truth"]):
+                valid_text_indices.append(indx)
 
-        text_batch_indices = [batch_indices[i] for i in valid_text_indices]   
+        print(f"number of valid_text_indices: {len(valid_text_indices)}")
         text_gt_answers = [rm_infos[i]["ground_truth"] for i in valid_text_indices]
         text_prompts = [prompts[i] for i in valid_text_indices]
         text_answers = [answers[i] for i in valid_text_indices]
@@ -275,9 +302,10 @@ class RewardManager:
 
         code_count = 0
         text_count = 0
-
+        outline_code_test_count = 0
         final_code_extras = {k: [0 for _ in range(batch_size)] for k in code_rewards.keys()}
         final_text_extras = {k: [0 for _ in range(batch_size)] for k in text_extras.keys()}
+        final_outline_code_test_extras = {k: [0 for _ in range(batch_size)] for k in outline_code_test_rewards.keys()}
 
         for i in range(batch_size):
             # Retrieve the correct length for storing the reward
@@ -295,6 +323,11 @@ class RewardManager:
                 for k, v in text_extras.items():
                     final_text_extras[k][i] = v[text_count]
                 text_count += 1
+            elif i in outline_code_test_indices:
+                current_final_score = interleave_format_rewards[outline_code_test_count] + outline_code_test_rewards["unit_test_pass_rate"][outline_code_test_count]
+                for k, v in outline_code_test_rewards.items():
+                    final_outline_code_test_extras[k][i] = v[outline_code_test_count]
+                outline_code_test_count += 1
             else:
                 current_final_score = 0.0
 
@@ -304,5 +337,6 @@ class RewardManager:
         extras = {"format_rewards": interleave_format_rewards}     
         extras.update(final_code_extras)
         extras.update(final_text_extras)
+        extras.update(final_outline_code_test_extras)
 
         return reward_tensor, extras
