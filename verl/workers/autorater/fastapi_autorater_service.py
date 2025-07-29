@@ -13,7 +13,7 @@ import time
 import traceback
 import json
 from datetime import datetime
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Union
 
 # Libraries from standard python or installed via pip (assumed to be installed)
 import ray  # type: ignore
@@ -201,7 +201,7 @@ class AutoRaterRequest(BaseModel):
 
 class AutoRaterResponse(BaseModel):
     """Response model for AutoRater evaluation (no autorater_scores)"""
-    autorater_decisions: List[float]
+    autorater_decisions: List[Union[float, str]]
     autorater_explanations: Optional[List[str]] = None
     autorater_raw_responses: Optional[List[str]] = None
     processing_time: float
