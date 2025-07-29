@@ -34,6 +34,9 @@ class CodeEvaluator:
             batch_size=len(code_outlines)
         )
 
+        # convert from TRUE/FALSE to 1/0
+        decisions = [1 if d == "TRUE" else 0 for d in decisions]
+
         return decisions
 
     def evaluate_unit_tests(self, unit_tests: List[str]) -> List[int]:

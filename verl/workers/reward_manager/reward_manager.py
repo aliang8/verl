@@ -122,6 +122,7 @@ class RewardManager:
                     final_text_extras[k][i] = v[text_count]
                 text_count += 1
             else:
+                current_final_score = 0.0
                 raise ValueError(f"Invalid index: {i}")
 
             if valid_response_length > 0:
@@ -228,13 +229,14 @@ class RewardManager:
 
         code_indices = []
         text_indices = []
-        outline_code_test_indices = []
+        outline_code_test_indices = []  
 
         for i, ds in enumerate(data_sources):
             if i not in valid_indices:
                 continue
             if ds and ds == "bcb_outline_code_test_interleave":
                 outline_code_test_indices.append(i)
+                interleave_format_rewards[i] = 1.0 if interleave_answer_counts[i] == 3 else 0.0
             elif ds and ("code" in str(ds).lower() or "mbpp" in str(ds).lower()):
                 code_indices.append(i)
             else:
