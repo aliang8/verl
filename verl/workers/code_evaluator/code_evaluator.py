@@ -48,7 +48,7 @@ class CodeEvaluator:
 
         return unit_test_rewards
         
-    def _test_code_snippets(self, code_snippets: List[str], unit_tests: str, required_libs: str) -> Dict[str, Any]:
+    def _test_code_snippets(self, code_snippets: List[str], unit_tests: List[str], required_libs: List[str]) -> Dict[str, Any]:
         if len(code_snippets) > len(unit_tests):
             # repeat the unit tests for each code snippet 
             unit_tests = [unit_tests[0]] * len(code_snippets)
@@ -75,7 +75,7 @@ class CodeEvaluator:
         return results
 
     def _evaluate_code_helper(self, code_snippets: List[str], rm_infos: List[Dict[str, Any]], batch_indices: List[int]) -> Tuple[List[float], List[Dict[str, Any]]]:
-        code_snippets = [self._extract_code_snippets(snippet) for snippet in code_snippets]
+        code_snippets_extracted = [self._extract_code_snippets(snippet) for snippet in code_snippets]
 
         # First extract the ground truth unit tests 
         unit_tests = []
@@ -91,19 +91,18 @@ class CodeEvaluator:
         sandbox_results = []
 
         if self.config.execute_sequential:
-            for i, code_snippet in enumerate(code_snippets):
-                import ipdb; ipdb.set_trace()
-                code_snippet = code_snippets[i]
-                unit_tests = unit_tests[i]
-                required_libs = rm_infos[i].get("libs", [])
-                result = self._test_code_snippets(code_snippet, unit_tests, required_libs)
+            for i, code_snippet in enumerate(code_snippets_extracted):
+                code_snippet = code_snippets_extracted[i]
+                unit_test = unit_tests[i]
+                libs = rm_infos[i].get("libs", [])
+                result = self._test_code_snippets(code_snippet, unit_test, libs)
                 sandbox_results.append(result)
         else:
             # run the code snippets in parallel
             with ThreadPoolExecutor(max_workers=self.config.max_concurrent) as executor:
                 futures = [
-                    executor.submit(self._test_code_snippets, code_snippets[i], unit_tests[i], rm_infos[i].get("libs", []))
-                    for i, code_snippet in enumerate(code_snippets)
+                    executor.submit(self._test_code_snippets, code_snippets_extracted[i], unit_tests[i], rm_infos[i].get("libs", []))
+                    for i, code_snippet in enumerate(code_snippets_extracted)
                 ]
                 for future in as_completed(futures):
                     sandbox_results.append(future.result())
@@ -150,30 +149,17 @@ class CodeEvaluator:
 
         return unit_test_pass_rate, sandbox_results
 
-    def _extract_code_snippets(self, answer: Union[str, List[str]]) -> List[str]:
+    def _extract_code_snippets(self, answer: str) -> List[str]:
         """Extract a list of code snippets from predicted answer."""
         code_block_pattern = r"```python\s*(.*?)\s*```"
-        
-        if isinstance(answer, str):
-            # Try to extract code between triple backticks and has def or class 
-            code_matches = re.findall(code_block_pattern, answer, re.DOTALL)
 
-            if code_matches:
-                return code_matches
+        # Try to extract code between triple backticks and has def or class 
+        code_matches = re.findall(code_block_pattern, answer, re.DOTALL)
 
-            return [answer]
-            
-        elif isinstance(answer, list):
-            code_matches = []
-            for a in answer:
-                matches = re.findall(code_block_pattern, a, re.DOTALL)
-                if matches:
-                    code_matches.extend(matches)
-                else:
-                    code_matches.append(a)
+        if code_matches:
             return code_matches
-        
-        return [answer] 
+
+        return [""]
 
     def evaluate_code(self, answers: List[str], prompts: List[str], rm_infos: List[Dict[str, Any]], batch_indices: List[int]) -> Dict[str, List[float]]:
         unit_test_pass_rate, sandbox_results = self._evaluate_code_helper(answers, rm_infos, batch_indices)

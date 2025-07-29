@@ -27,7 +27,8 @@ from transformers import AutoTokenizer  # type: ignore
 from vllm import LLM, SamplingParams  # type: ignore
 from verl.workers.autorater.autorater_utils import (
     format_autorater_prompt,
-    parse_autorater_response,
+    parse_autorater_response_scalar,
+    parse_autorater_response_boolean,
     format_code_outline_prompt,
     format_helpfulness_prompt, 
 )
@@ -164,12 +165,15 @@ class AutoRaterActor:
         explanations = []
         raw_responses = []
         
-        for output in outputs:
+        for i, output in enumerate(outputs):
             response = output.outputs[0].text
             raw_responses.append(response)
-            
-            # Parse response for decision
-            explanation, decision = parse_autorater_response(response)
+
+            if template_types[i] == "outline" or template_types[i] == "standard":
+                explanation, decision = parse_autorater_response_boolean(response)
+            else:
+                explanation, decision = parse_autorater_response_scalar(response)
+
             explanations.append(explanation)
             decisions.append(decision)
         
