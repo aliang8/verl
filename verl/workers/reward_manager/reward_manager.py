@@ -318,6 +318,12 @@ class RewardManager:
         final_text_extras = {k: [0 for _ in range(batch_size)] for k in ["autorater_scores"]}
         final_outline_code_test_extras = {k: [0 for _ in range(batch_size)] for k in ["unit_test_pass_rate", "code_outline_helpfulness", "unit_test_rewards", "pass@1"]}
 
+        weights = {
+            "unit_test_pass_rate": 1.0,
+            "code_outline_helpfulness": 0.5,
+            "unit_test_rewards": 0.5,
+        }
+
         for i in range(batch_size):
             # Retrieve the correct length for storing the reward
             data_item = data[i]
@@ -335,8 +341,10 @@ class RewardManager:
                     final_text_extras[k][i] = v[text_count]
                 text_count += 1
             elif i in outline_code_test_indices:
-                current_final_score = interleave_format_rewards[outline_code_test_count] + outline_code_test_rewards["unit_test_pass_rate"][outline_code_test_count]
+                current_final_score = interleave_format_rewards[outline_code_test_count]
                 for k, v in outline_code_test_rewards.items():
+                    if k in weights:
+                        current_final_score += weights[k] * v[outline_code_test_count]
                     final_outline_code_test_extras[k][i] = v[outline_code_test_count]
                 outline_code_test_count += 1
             else:

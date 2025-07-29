@@ -105,6 +105,14 @@ class SafeResourceManagedExecutor:
                     "stdout": "",
                     "stderr": str(e),
                 }
+            except Exception as e:
+                return {
+                    "error": "Execution failed",
+                    "error_type": "execution_failed",
+                    "exit_code": 1,
+                    "stdout": "",
+                    "stderr": str(e),
+                }
 
             # Post-execution validation
             if result.exit_code != 0:

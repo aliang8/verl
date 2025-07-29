@@ -30,6 +30,8 @@ from verl.utils.torch_functional import pad_2d_list_to_length, get_response_mask
 from tensordict import TensorDict
 from vllm import SamplingParams
 from verl.utils.autorater_client import call_autorater_service
+from verl.single_controller.base.decorator import Dispatch, register
+from verl.third_party.vllm import vllm_version
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -53,7 +55,7 @@ class vLLMAutoraterRollout(vLLMRollout):
         
         # Autorater configuration
         self.n_candidates = config.get("n_candidates", 4)  # Number of candidates to generate
-        self.autorater_service_url = config.get("autorater_service_url", "http://localhost:8000")
+        self.autorater_service_url = config.get("autorater_service_url", "http://10.128.0.30:81")
         self.answer_stop_token = "</answer>"
         self.answer_start_token = "<answer>"
         
@@ -61,7 +63,7 @@ class vLLMAutoraterRollout(vLLMRollout):
         self.answer_stop_token_ids = self.tokenizer.encode(self.answer_stop_token)
         self.answer_start_token_ids = self.tokenizer.encode(self.answer_start_token)
         
-        logger.info(f"Initialized vLLMAutoraterRollout with n_candidates={self.n_candidates}")
+        print(f"Initialized vLLMAutoraterRollout with n_candidates={self.n_candidates}")
     
     
     def extract_answer_chunks(self, text: str) -> List[str]:
@@ -108,7 +110,8 @@ class vLLMAutoraterRollout(vLLMRollout):
             # Fallback: return first candidate with default score
             return 0, 5.0
     
-    def generate_best_of_n(self, prompts: DataProto, **kwargs) -> DataProto:
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
         """
         Generate sequences using best-of-n with autorater.
         
@@ -157,29 +160,50 @@ class vLLMAutoraterRollout(vLLMRollout):
             if not active_indices:
                 break
                 
-            logger.info(f"Turn {turn + 1}: Processing {len(active_indices)} active samples")
-            
-            # Prepare all inputs for parallel candidate generation
+            print(f"Turn {turn + 1}: Processing {len(active_indices)} active samples")
+
+            # Prepare all inputs for parallel generation
             all_vllm_inputs = []
             input_to_sample_idx = []
             
+            # Create n_candidates inputs for each active sample
             for sample_idx in active_indices:
                 for candidate_idx in range(self.n_candidates):
                     all_vllm_inputs.append({"prompt_token_ids": curr_inputs[sample_idx]})
                     input_to_sample_idx.append(sample_idx)
             
-            # Generate all candidates in parallel
-            with self.update_sampling_params(
-                max_tokens=min(512, max(curr_max_tokens)),
-                temperature=0.7,
-                top_p=0.9,
-                stop_token_ids=[self.answer_stop_token_ids[-1]] if self.answer_stop_token_ids else None
-            ):
-                outputs = self.inference_engine.generate(
-                    prompts=all_vllm_inputs,
-                    sampling_params=self.sampling_params,
-                    use_tqdm=False
-                )
+            # Generate all candidates in parallel with different seeds
+            all_outputs = []
+            
+            # Generate candidates with different seeds for diversity
+            for candidate_idx in range(self.n_candidates):
+                # Get inputs for this candidate
+                candidate_inputs = []
+                candidate_sample_indices = []
+                
+                for i, sample_idx in enumerate(input_to_sample_idx):
+                    if i % self.n_candidates == candidate_idx:
+                        candidate_inputs.append(all_vllm_inputs[i])
+                        candidate_sample_indices.append(sample_idx)
+                
+                if not candidate_inputs:
+                    continue
+                
+                with self.update_sampling_params(
+                    max_tokens=min(512, max(curr_max_tokens)),
+                    temperature=0.7,
+                    top_p=0.9,
+                    stop_token_ids=[self.answer_stop_token_ids[-1]] if self.answer_stop_token_ids else None,
+                    seed=candidate_idx  # Different seed for each candidate
+                ):
+                    candidate_outputs = self.inference_engine.generate(
+                        prompts=candidate_inputs,
+                        sampling_params=self.sampling_params,
+                        use_tqdm=False
+                    )
+                    all_outputs.extend(candidate_outputs)
+            
+            outputs = all_outputs
             
             # Organize candidates by sample
             all_candidates = []
@@ -187,6 +211,7 @@ class vLLMAutoraterRollout(vLLMRollout):
             
             for sample_idx in active_indices:
                 candidates_for_sample = []
+                # Find all outputs for this sample
                 for i, output in enumerate(outputs):
                     if input_to_sample_idx[i] == sample_idx:
                         candidate_ids = output.outputs[0].token_ids
@@ -196,6 +221,7 @@ class vLLMAutoraterRollout(vLLMRollout):
                 all_candidates.append(candidates_for_sample)
                 candidate_indices.append(sample_idx)
             
+            import ipdb; ipdb.set_trace()
             # Use autorater to select best answers
             new_active_indices = []
             

@@ -20,28 +20,12 @@ class CodeEvaluator:
         self.executor = SafeResourceManagedExecutor(max_concurrent=config.max_concurrent)
     
     def evaluate_code_outlines(self, code_outlines: List[str], prompts: List[str]) -> List[int]:
-        tokenized_prompts = self.tokenizer(
-            prompts,
-            add_special_tokens=True,
-            padding=True,
-            truncation=True,
-            return_tensors="pt",
-        ).input_ids.tolist()
-
-        tokenized_outlines = self.tokenizer(
-            code_outlines,
-            add_special_tokens=False,
-            padding=True,
-            truncation=True,
-            return_tensors="pt",
-        ).input_ids.tolist()
 
         autorater_payload = {
-            "prompts": tokenized_prompts,
-            "responses": tokenized_outlines,
-            "attention_mask": [[1] * len(r) for r in tokenized_outlines],
-            "position_ids": [list(range(len(r))) for r in tokenized_outlines],
-            "reward_model_info": [{"template": "outline", "ground_truth": ""} for _ in range(len(code_outlines))],
+            "prompts": prompts,
+            "responses": code_outlines,
+            "template_types": ["outline"] * len(code_outlines),
+            "gt_answers": [""] * len(code_outlines),
         }
 
         decisions, explanations, raw_responses = call_autorater_service(

@@ -51,3 +51,4 @@ if Version(vllm_package_version) <= Version("0.6.3"):
 else:
     vllm_mode = "spmd"
     from .vllm_rollout_spmd import vLLMAsyncRollout, vLLMRollout, vLLMRolloutWithTool, vLLMRolloutWithMCP # noqa: F401
+    from .vllm_autorater_rollout import vLLMAutoraterRollout # noqa: F401
