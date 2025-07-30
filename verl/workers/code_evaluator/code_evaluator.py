@@ -160,7 +160,8 @@ class CodeEvaluator:
         code_matches = re.findall(code_block_pattern, answer, re.DOTALL)
 
         if code_matches:
-            return code_matches
+            # TODO: fix this, but we just want the first code snippet 
+            return [code_matches[0]]
 
         return [""]
 
