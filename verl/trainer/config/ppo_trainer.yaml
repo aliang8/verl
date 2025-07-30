@@ -19,27 +19,18 @@ data:
   # The path can be either a local path or an HDFS path.
   # For HDFS path, we provide utils to download it to DRAM and convert it to a local path.
   train_files: [
-    # verl/data/bigcodebench/train_with_unit_tests.parquet,
-    # data/combined_sft_data.parquet,
     data/rl_eval/bcb_train.parquet,
     data/sft/multiple_solutions_interleave.parquet,
-    # data/sft/math500_concat_interleaved.parquet,
-    # data/sft/mbpp_concat_interleaved.parquet
     data/rl_eval/mbpp_combined_and_2_test.parquet
-    # data/rl_eval/mbpp_test.parquet,
-    # data/rl_eval/math500_test.parquet
   ]
 
   # Validation parquet. Can be a list or a single file.
   val_files: [
-    # data/rl_eval/combined_datasets.parquet
-    # data/sft/mbpp_concat_interleaved.parquet,
     data/rl_eval/bcb_test.parquet,
     data/rl_eval/mbpp_combined_and_2_test.parquet,
     data/rl_eval/simpleqa_combined_and_2_test.parquet,
     data/rl_eval/knights_and_knaves_test.parquet,
     data/rl_eval/math500_test.parquet,
-    # data/sft/math500_concat_interleaved.parquet
   ]
 
   # The field in the dataset where the prompt is located. Default is 'prompt'.
@@ -891,7 +882,7 @@ ray_init:
 
 reward_manager:
   code_evaluator:
-    max_concurrent: 10
+    max_concurrent: 20
     execute_sequential: false
     autorater_service_url: "http://10.128.0.30:81"
 

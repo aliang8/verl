@@ -58,9 +58,16 @@ class CodeEvaluator:
         elif len(code_snippets) < len(unit_tests) and len(code_snippets) > 0:
             # repeat the code snippets for each unit test 
             code_snippets = [code_snippets[0]] * len(unit_tests)
-        
+    
         results = []
-        for code_snippet, unit_test, libs in zip(code_snippets, unit_tests, required_libs):
+        for i, (code_snippet, unit_test) in enumerate(zip(code_snippets, unit_tests)):
+            if len(required_libs) == 0:
+                libs = []
+            elif i >= len(required_libs):
+                libs = required_libs[-1]
+            else:
+                libs = required_libs[i]
+            
             code_snippet = code_snippet.replace("\\n", "\n")
             combined_test = f"""import unittest\nimport pandas as pd\nimport numpy as np\n\n{code_snippet}\n\n{unit_test}\n\nif __name__ == '__main__':\n    unittest.main(verbosity=2)\n"""
 
@@ -109,7 +116,7 @@ class CodeEvaluator:
                 ]
                 for future in as_completed(futures):
                     sandbox_results.append(future.result())
-                
+        
         # print(sandbox_results)
         # parse the results to compute success rate 
         unit_test_pass_rate = []
@@ -152,16 +159,29 @@ class CodeEvaluator:
 
         return unit_test_pass_rate, sandbox_results
 
-    def _extract_code_snippets(self, answer: str) -> List[str]:
-        """Extract a list of code snippets from predicted answer."""
+    def _extract_code_snippets(self, answer: Union[str, List[str]]) -> List[str]:
+        """Extract a list of code snippets from predicted answer.
+        
+        If answer is a list extract the first code snippet from each answer.
+        If answer is a string, extract the first code snippet from the answer.
+        """
         code_block_pattern = r"```python\s*(.*?)\s*```"
+        task_func_pattern = r"def task_func\s*\([^)]*\)\s*:.*?(?=\n\n|\n(?:def |class |import |from |#|$)|\Z)"
 
-        # Try to extract code between triple backticks and has def or class 
+        if isinstance(answer, list):
+            return [self._extract_code_snippets(a)[0] for a in answer]
+
+        # Try to extract code between triple backticks first
         code_matches = re.findall(code_block_pattern, answer, re.DOTALL)
 
         if code_matches:
             # TODO: fix this, but we just want the first code snippet 
             return [code_matches[0]]
+
+        # If no code blocks found, try to extract task_func function
+        task_func_match = re.search(task_func_pattern, answer, re.DOTALL)
+        if task_func_match:
+            return [task_func_match.group(0)]
 
         return [""]
 
