@@ -134,7 +134,7 @@ class RewardManager:
         return reward_tensor, extras
 
     def compute_reward_text(self, prompts: List[str], answers: List[str], gt_answers: List[str]) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        template_types = ["standard"] * len(prompts)
+        template_types = ["scores"] * len(prompts)
 
         # if gt rewards is a list of lists, then we combine the answers with
         # 1) ..., 2) ... , n)"
@@ -318,7 +318,7 @@ class RewardManager:
         outline_code_test_count = 0
         final_code_extras = {k: [0 for _ in range(batch_size)] for k in ["unit_test_pass_rate", "pass@1"]}
         final_text_extras = {k: [0 for _ in range(batch_size)] for k in ["autorater_scores"]}
-        final_outline_code_test_extras = {k: [0 for _ in range(batch_size)] for k in ["unit_test_pass_rate", "code_outline_helpfulness", "unit_test_rewards", "pass@1"]}
+        final_outline_code_test_extras = {k: [0 for _ in range(batch_size)] for k in ["code_outline_helpfulness", "unit_test_rewards"]}
 
         weights = {
             "unit_test_pass_rate": 1.0,
@@ -347,7 +347,11 @@ class RewardManager:
                 for k, v in outline_code_test_rewards.items():
                     if k in weights:
                         current_final_score += weights[k] * v[outline_code_test_count]
-                    final_outline_code_test_extras[k][i] = v[outline_code_test_count]
+
+                    if k == "unit_test_rewards" or k =="pass@1":
+                        final_code_extras[k][i] = v[outline_code_test_count]
+                    else:
+                        final_outline_code_test_extras[k][i] = v[outline_code_test_count]
                 outline_code_test_count += 1
             else:
                 current_final_score = 0.0
