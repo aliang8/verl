@@ -882,7 +882,7 @@ ray_init:
 
 reward_manager:
   code_evaluator:
-    max_concurrent: 20
+    max_concurrent: 10
     execute_sequential: false
     autorater_service_url: "http://10.128.0.30:81"
 

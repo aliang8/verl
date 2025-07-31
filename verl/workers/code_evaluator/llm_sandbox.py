@@ -22,7 +22,7 @@ class SafeResourceManagedExecutor:
         """Initialize SandboxSession with proper error handling."""
         session = SandboxSession(
             lang="python",
-            execution_timeout=5,
+            execution_timeout=10,
             verbose=False,
             runtime_configs={"cpu_count": 50, "mem_limit": "4096m"},
         )
