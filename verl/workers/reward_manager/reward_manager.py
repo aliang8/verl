@@ -160,9 +160,7 @@ class RewardManager:
 
         return autorater_decisions, autorater_explanations, autorater_raw_responses
 
-    def compute_reward_text_interleave(self, prompts: List[str], answers: List[List[str]], gt_answers: List[List[str]]) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        template_types = ["standard"] * len(prompts)
-        
+    def compute_reward_text_interleave(self, prompts: List[str], answers: List[List[str]], gt_answers: List[List[str]]) -> Tuple[torch.Tensor, Dict[str, Any]]:        
         # make flat list of answers and prompts
         all_prompts = []
         all_answers = []
@@ -184,6 +182,8 @@ class RewardManager:
                 all_gt_answers.append(gt_answer[j])
 
             counts.append(len(interleave_answers))
+
+        template_types = ["scores"] * len(all_prompts)
 
         autorater_payload = {
             "prompts": all_prompts,
@@ -348,7 +348,7 @@ class RewardManager:
                     if k in weights:
                         current_final_score += weights[k] * v[outline_code_test_count]
 
-                    if k == "unit_test_rewards" or k =="pass@1":
+                    if k == "unit_test_pass_rate" or k =="pass@1":
                         final_code_extras[k][i] = v[outline_code_test_count]
                     else:
                         final_outline_code_test_extras[k][i] = v[outline_code_test_count]
