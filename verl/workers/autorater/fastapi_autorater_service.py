@@ -195,7 +195,7 @@ class AutoRaterRequest(BaseModel):
 
     prompts: List[str]  # string prompts
     responses: List[str]  # string responses
-    gt_answers: List[str]  # Ground truth answers
+    gt_answers: Optional[List[str]] = None  # Ground truth answers
     template_types: Optional[List[str]] = None
     context: Optional[List[str]] = None
 
@@ -365,9 +365,9 @@ async def evaluate_responses(request: AutoRaterRequest):
 
     # --- LLM AutoRater ---
     autorater_decisions, autorater_explanations, autorater_raw = _run_llm_autorater(
-        request.prompts,
-        request.responses,
-        request.gt_answers,
+        prompts=request.prompts,
+        responses=request.responses,
+        gt_answers=request.gt_answers,
         template_types=request.template_types,
         context=request.context,
     )
@@ -453,8 +453,8 @@ def _run_llm_autorater(
     prompts: List[str],
     responses: List[str],
     gt_answers: List[str],
-    context: Optional[List[str]] = None,
     template_types: Optional[List[str]] = None,
+    context: Optional[List[str]] = None,
 ) -> Tuple[List[float], List[str], List[str]]:
     """Run LLM-based AutoRater on the full batch and return results (no autorater_scores)."""
     batch_size = len(prompts)
