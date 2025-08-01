@@ -247,7 +247,7 @@ class RewardManager:
 
         valid_outline_code_test_indices = [i for i, count in enumerate(interleave_answer_counts) if count == 3]
         outline_code_test_indices = set(outline_code_test_indices) & set(valid_outline_code_test_indices)
-        print(f"number of outline_code_test_indices: {len(valid_outline_code_test_indices)}")
+        print(f"number of outline_code_test_indices: {len(outline_code_test_indices)}")
         print(f"number of code_indices: {len(code_indices)}")
         print(f"number of text_indices: {len(text_indices)}")
 
