@@ -474,7 +474,7 @@ def _run_llm_autorater(
         fut = actor.evaluate_batch.remote(
             prompts[i : i + chunk_size],
             responses[i : i + chunk_size],
-            gt_answers[i : i + chunk_size],
+            gt_answers[i : i + chunk_size] if gt_answers else None,
             context=context[i : i + chunk_size] if context else None,
             template_types=template_types[i : i + chunk_size] if template_types else None,
         )
