@@ -132,8 +132,12 @@ class AutoRaterActor:
         evaluation_prompts = []
         if not template_types:
             template_types = ["standard"] * len(prompts)
+        
+        # Handle None context by creating a list of None values
+        if context is None:
+            context = [None] * len(prompts)
 
-        for i, (prompt, response, gt_answer, tmpl, context) in enumerate(
+        for i, (prompt, response, gt_answer, tmpl, ctx) in enumerate(
             zip(prompts, responses, gt_answers, template_types, context)
         ):
             if tmpl == "outline":
@@ -144,7 +148,7 @@ class AutoRaterActor:
                 autorater_prompt = format_helpfulness_prompt(
                     question=prompt,
                     predicted_answer=response,
-                    context=context,
+                    context=ctx,
                     template=tmpl,
                 )
             else:
