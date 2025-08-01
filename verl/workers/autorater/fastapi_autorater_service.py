@@ -95,7 +95,7 @@ class AutoRaterActor:
             "tensor_parallel_size": 1,  # Single GPU per actor
             "dtype": self.config.get("dtype", "bfloat16"),
             "gpu_memory_utilization": self.config.get("gpu_memory_utilization", 0.95),
-            "max_model_len": self.config.get("max_model_len", 4096),
+            "max_model_len": self.config.get("max_model_len", 8192),
             "max_num_batched_tokens": self.config.get("max_num_batched_tokens", 8192),
             "enforce_eager": self.config.get("enforce_eager", True),
             "disable_log_stats": self.config.get("disable_log_stats", True),
@@ -198,10 +198,10 @@ class AutoRaterRequest(BaseModel):
     """Request model for AutoRater evaluation"""
 
     prompts: List[str]  # string prompts
-    responses: List[str]  # string responses
-    gt_answers: Optional[List[str]] = None  # Ground truth answers
-    template_types: Optional[List[str]] = None
-    context: Optional[List[str]] = None
+    responses: Union[List[str], List[List[str]]]  # string responses
+    gt_answers: Optional[Union[List[str], List[List[str]]]] = None  # Ground truth answers
+    template_types: Optional[List[str]] = None  # template types
+    context: Optional[Union[List[str], List[List[str]]]] = None
 
     class Config:
         arbitrary_types_allowed = True
