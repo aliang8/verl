@@ -120,7 +120,7 @@ class AutoRaterActor:
         self,
         prompts: List[str],
         responses: List[str],
-        gt_answers: List[str],
+        gt_answers: Optional[List[str]] = None,
         context: Optional[List[str]] = None,
         template_types: Optional[List[str]] = None,
     ):
@@ -134,6 +134,8 @@ class AutoRaterActor:
             template_types = ["standard"] * len(prompts)
         
         # Handle None context by creating a list of None values
+        if gt_answers is None:
+            gt_answers = [None] * len(prompts)
         if context is None:
             context = [None] * len(prompts)
 
