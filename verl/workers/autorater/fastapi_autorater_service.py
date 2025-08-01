@@ -177,7 +177,7 @@ class AutoRaterActor:
             response = output.outputs[0].text
             raw_responses.append(response)
 
-            if template_types[i] == "outline" or template_types[i] == "standard":
+            if template_types[i] == "outline" or template_types[i] == "standard" or template_types[i] == "helpfulness":
                 explanation, decision = parse_autorater_response_boolean(response)
             else:
                 explanation, decision = parse_autorater_response_scalar(response)
