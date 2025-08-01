@@ -160,6 +160,32 @@ class RewardManager:
 
         return autorater_decisions, autorater_explanations, autorater_raw_responses
 
+    def compute_helpfulness_scores(self, prompts: List[str], answers: List[List[str]]) -> List[List[float]]:
+        # create a list of prompts, answers and contexts
+        all_prompts = []
+        all_answers = []
+        all_context = []
+        for i, answer in enumerate(answers):
+            all_prompts.append(prompts[i])
+            all_answers.append(answer)
+            context = answer[:i]
+            all_context.append(context)
+
+        template_types = ["helpfulness"] * len(all_prompts)
+        autorater_payload = {
+            "prompts": all_prompts,
+            "responses": all_answers,
+            "context": all_context,
+            "template_types": template_types,
+        }
+
+        autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(
+            self.config.autorater_service_url, autorater_payload, batch_size=len(all_prompts)
+        )
+
+        return autorater_decisions, autorater_explanations, autorater_raw_responses
+
+
     def compute_reward_text_interleave(self, prompts: List[str], answers: List[List[str]], gt_answers: List[List[str]]) -> Tuple[torch.Tensor, Dict[str, Any]]:        
         # make flat list of answers and prompts
         all_prompts = []
@@ -167,12 +193,14 @@ class RewardManager:
         all_gt_answers = []
         counts = []
 
+        answer_copy = answers.copy()
+
         # if we have more answers than gt answers only take the first len(gt_answers) answers
         for i, interleave_answers in enumerate(answers):
             if len(interleave_answers) > len(gt_answers[i]):
-                answers[i] = interleave_answers[:len(gt_answers[i])]
+                answer_copy[i] = interleave_answers[:len(gt_answers[i])]
 
-        for i, interleave_answers in enumerate(answers):
+        for i, interleave_answers in enumerate(answer_copy):
             
             gt_answer = gt_answers[i]
 
@@ -195,6 +223,7 @@ class RewardManager:
         autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(
             self.config.autorater_service_url, autorater_payload, batch_size=len(all_prompts)
         )
+
         # convert to list of lists based on counts
         # but average the scores for the interleaved answers
         final_decisions = []
@@ -301,11 +330,29 @@ class RewardManager:
         text_prompts = [prompts[i] for i in valid_text_indices]
         text_answers = [answers[i] for i in valid_text_indices]
 
+        import ipdb; ipdb.set_trace()
         if len(valid_text_indices) > 0:
-            text_decisions, text_explanations, text_raw_responses = self.compute_reward_text_interleave(
-                text_prompts, text_answers, text_gt_answers
-            )
-            text_extras = {"autorater_scores": text_decisions}
+            text_extras = {"autorater_scores": [0.0] * len(valid_text_indices)}
+
+            # these are the text answers that are verifiable 
+            has_gt_text_indices = [i for i, gt_answers in enumerate(text_gt_answers) if len(gt_answers) > 0]
+            print(f"\tnumber of has_gt_text_indices: {len(has_gt_text_indices)}")
+            if len(has_gt_text_indices) > 0:
+                text_decisions, text_explanations, text_raw_responses = self.compute_reward_text_interleave(
+                    text_prompts, text_answers, text_gt_answers
+                )
+                for i, indx in enumerate(has_gt_text_indices):
+                    text_extras["autorater_scores"][indx] = text_decisions[i]
+
+            # these are the text answers that are not verifiable and we will just rate using helpfulness scores
+            no_gt_text_indices = [i for i in valid_text_indices if i not in has_gt_text_indices]
+            print(f"\tnumber of no_gt_text_indices and running helpfulness scores: {len(no_gt_text_indices)}")
+            if len(no_gt_text_indices) > 0:
+                text_decisions, text_explanations, text_raw_responses = self.compute_helpfulness_scores(
+                    text_prompts, text_answers
+                )
+                for i, indx in enumerate(no_gt_text_indices):
+                    text_extras["autorater_scores"][indx] = text_decisions[i]
         else:
             text_decisions = []
             text_extras = {}

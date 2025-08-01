@@ -20,7 +20,7 @@ data:
   # For HDFS path, we provide utils to download it to DRAM and convert it to a local path.
   train_files: [
     data/rl_eval/bcb_train.parquet,
-    data/sft/multiple_solutions_interleave.parquet,
+    # data/sft/multiple_solutions_interleave.parquet,
     data/rl_eval/mbpp_combined_and_2_test.parquet
   ]
 
@@ -31,6 +31,7 @@ data:
     data/rl_eval/simpleqa_combined_and_2_test.parquet,
     data/rl_eval/knights_and_knaves_test.parquet,
     data/rl_eval/math500_test.parquet,
+    data/rl_eval/math500_combined_and_2_test.parquet
   ]
 
   # The field in the dataset where the prompt is located. Default is 'prompt'.
