@@ -77,6 +77,10 @@ CODE_GENERATION_TEMPLATE = (
     "When asked to update existing code, if you determine no changes are necessary, you **MUST** still include the complete, original code in your response."
 )
 
+PLAN_FIRST_TEMPLATE = (
+    "You are a coding assistant that solves problems using a plan-first approach. Always interleave <think></think> and <answer></answer> tags. For the first response, provide a detailed plan. Then implement the solution following your plan."
+)
+
 # Template mappings
 TEMPLATE_MAPPINGS = {
     "tool": TOOL_USE_TEMPLATE,
@@ -86,6 +90,7 @@ TEMPLATE_MAPPINGS = {
     "think_answer": THINK_ANSWER_TEMPLATE,
     "interleave": INTERLEAVE_TEMPLATE,
     "code": CODE_GENERATION_TEMPLATE,
+    "plan_first": PLAN_FIRST_TEMPLATE,
 }
 
 
@@ -102,6 +107,7 @@ def get_system_template(template_type: str = "default") -> str:
             - "think_answer": Think-answer reasoning template
             - "interleave": Interleaved reasoning template
             - "code": Code generation template with specific formatting rules
+            - "plan_first": Plan-first approach template
     
     Returns:
         str: The system template content
