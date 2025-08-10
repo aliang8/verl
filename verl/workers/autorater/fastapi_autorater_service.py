@@ -31,6 +31,8 @@ from verl.workers.autorater.autorater_utils import (
     parse_autorater_response_boolean,
     format_code_outline_prompt,
     format_helpfulness_prompt,
+    format_plan_evaluation_prompt,
+    parse_plan_evaluation_response,
 )
 
 # Configure logging
@@ -153,6 +155,17 @@ class AutoRaterActor:
                     context=ctx,
                     template=tmpl,
                 )
+            elif tmpl == "plan_evaluation":
+                # For plan evaluation, we need to format the prompt using the plans
+                # The prompt should contain the original question, and response should contain the plans
+                if isinstance(response, list):
+                    # If response is a list of plans, use them directly
+                    plans = response
+                else:
+                    # If response is a string, try to parse it as a single plan
+                    plans = [response] if response else []
+                
+                autorater_prompt = format_plan_evaluation_prompt(prompt, plans)
             else:
                 autorater_prompt = format_autorater_prompt(
                     question=prompt,
@@ -179,6 +192,27 @@ class AutoRaterActor:
 
             if template_types[i] == "outline" or template_types[i] == "standard" or template_types[i] == "helpfulness":
                 explanation, decision = parse_autorater_response_boolean(response)
+            elif template_types[i] == "plan_evaluation":
+                # For plan evaluation, we need to parse the response to get the selected plan number
+                # We'll use a dummy explanation and return the parsed plan number as the decision
+                explanation = "Plan evaluation completed"
+                # Parse the plan number from the response
+                # We can get the number of plans from the original response parameter
+                try:
+                    # Get the number of plans from the original response
+                    if isinstance(responses[i], list):
+                        num_plans = len(responses[i])
+                    else:
+                        # If it's a string, count it as 1 plan
+                        num_plans = 1 if responses[i] else 0
+                    
+                    logger.info(f"Plan evaluation: {num_plans} plans, response: '{response}'")
+                    selected_plan = parse_plan_evaluation_response(response, num_plans)
+                    decision = selected_plan  # Return the plan number as the decision
+                    logger.info(f"Plan evaluation: selected plan {selected_plan}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse plan evaluation response: {e}")
+                    decision = 1  # Fallback to first plan
             else:
                 explanation, decision = parse_autorater_response_scalar(response)
 

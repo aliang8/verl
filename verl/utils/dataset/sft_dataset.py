@@ -30,6 +30,21 @@ from verl.utils.fs import copy_to_local
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.templates import format_system_message
 
+ADDITIONAL_INSTRUCTION = """
+First, outline the solution in a markdown format.
+Then, write the code to implement the solution.
+Finally, generate unit tests to test the code. Format the unit tests as a python function with a docstring. Use this exact format:
+```python
+import unittest
+from task_func import task_func
+
+class Test(unittest.TestCase):
+    def test_case_1(self):
+        # Test case 1 description
+        result = task_func(...)
+        self.assertEqual(result, expected_value)
+```
+"""
 
 class SFTDataset(Dataset):
     """
@@ -140,6 +155,7 @@ class SFTDataset(Dataset):
         tokenizer = self.tokenizer
 
         prompt = self.prompts[item]
+        prompt = prompt.replace(ADDITIONAL_INSTRUCTION, "").strip()
         response = self.responses[item]
 
         # apply chat template with optional system message

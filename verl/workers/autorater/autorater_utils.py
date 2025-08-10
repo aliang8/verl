@@ -334,3 +334,98 @@ def format_helpfulness_prompt(question: str, predicted_answer: str, context: Opt
         context=context_str
     ) 
 
+
+# Plan evaluation template for selecting best plan from N options
+PLAN_EVALUATION_TEMPLATE = """===Task===
+You are an expert plan evaluator. Given a prompt and N different plans, your task is to evaluate which plan is the best.
+
+===Evaluation Criteria===
+- **Completeness**: Does the plan address all aspects of the prompt?
+- **Feasibility**: Is the plan realistic and implementable?
+- **Efficiency**: Is the plan optimal in terms of time, resources, or complexity?
+- **Clarity**: Is the plan clear and well-structured?
+- **Robustness**: Does the plan account for potential issues or edge cases?
+
+===Input Data===
+- Prompt: {prompt}
+- Plans to evaluate:
+{plans_text}
+
+===Output Format===
+After evaluating all plans, output ONLY a single number (1 to {num_plans}) indicating which plan is the best.
+For example, if plan 3 is the best, output: 3
+
+===Important===
+- Do not provide explanations or reasoning in your final output
+- Do not include any text, just the number
+- If multiple plans are equally good, choose the one with the lowest number
+
+Please proceed with the evaluation.
+Score: """
+
+
+def format_plan_evaluation_prompt(prompt: str, plans: List[str]) -> str:
+    """
+    Format a prompt for plan evaluation with a prompt and list of plans.
+    
+    Args:
+        prompt: The original prompt/question
+        plans: List of plans to evaluate (each plan should be a string)
+    
+    Returns:
+        str: Formatted prompt string for plan evaluation
+    
+    Example:
+        >>> prompt = "How should I implement a web scraper?"
+        >>> plans = [
+        ...     "Use BeautifulSoup with requests library",
+        ...     "Use Selenium for dynamic content",
+        ...     "Use Scrapy framework"
+        ... ]
+        >>> formatted_prompt = format_plan_evaluation_prompt(prompt, plans)
+    """
+    if not plans:
+        raise ValueError("Plans list cannot be empty")
+    
+    # Format the plans as numbered list
+    plans_text = ""
+    for i, plan in enumerate(plans, 1):
+        plans_text += f"**Plan {i}:**\n{plan}\n\n"
+    
+    return PLAN_EVALUATION_TEMPLATE.format(
+        prompt=prompt,
+        plans_text=plans_text.strip(),
+        num_plans=len(plans)
+    )
+
+
+def parse_plan_evaluation_response(response: str, num_plans: int) -> int:
+    """
+    Parse the plan evaluation response to extract the selected plan number.
+    
+    Args:
+        response: The raw response from the plan evaluation model
+        num_plans: The total number of plans that were evaluated
+    
+    Returns:
+        int: The selected plan number (1-based index), or 1 if parsing fails
+    
+    Example:
+        >>> response = "3"
+        >>> selected_plan = parse_plan_evaluation_response(response, 5)
+        >>> print(selected_plan)  # Output: 3
+    """
+    # Look for numbers in the response
+    numbers = re.findall(r'\b(\d+)\b', response.strip())
+    
+    if numbers:
+        # Get the first number found
+        selected_plan = int(numbers[0])
+        
+        # Validate that the number is within the valid range
+        if 1 <= selected_plan <= num_plans:
+            return selected_plan
+    
+    # Fallback: return 1 if no valid number found
+    return 1
+

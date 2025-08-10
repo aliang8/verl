@@ -441,6 +441,9 @@ class ActorRolloutRefWorker(Worker):
             elif self.config.rollout.name == 'vllm_with_mcp':
                 from verl.workers.rollout.vllm_rollout import vLLMRolloutWithMCP, vllm_mode
                 rollout_class = vLLMRolloutWithMCP
+            elif self.config.rollout.name == 'vllm_autorater':
+                from verl.workers.rollout.vllm_rollout import vLLMAutoraterRollout, vllm_mode
+                rollout_class = vLLMAutoraterRollout
             else:
                 raise NotImplementedError(f'Rollout name {self.config.rollout.name} is not supported')
             from verl.workers.sharding_manager import FSDPVLLMShardingManager
