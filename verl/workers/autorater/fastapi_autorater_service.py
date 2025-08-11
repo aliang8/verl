@@ -206,12 +206,12 @@ class AutoRaterActor:
                         # If it's a string, count it as 1 plan
                         num_plans = 1 if responses[i] else 0
                     
-                    logger.info(f"Plan evaluation: {num_plans} plans, response: '{response}'")
+                    print(f"Plan evaluation: {num_plans} plans, response: '{response}'")
                     selected_plan = parse_plan_evaluation_response(response, num_plans)
                     decision = selected_plan  # Return the plan number as the decision
-                    logger.info(f"Plan evaluation: selected plan {selected_plan}")
+                    print(f"Plan evaluation: selected plan {selected_plan}")
                 except Exception as e:
-                    logger.warning(f"Failed to parse plan evaluation response: {e}")
+                    print(f"Failed to parse plan evaluation response: {e}")
                     decision = 1  # Fallback to first plan
             else:
                 explanation, decision = parse_autorater_response_scalar(response)

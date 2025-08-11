@@ -23,7 +23,7 @@ from typing import List, Dict, Any, Tuple, Optional
 import torch
 import numpy as np
 
-from .vllm_rollout_spmd import vLLMRollout, _pre_process_inputs, _repeat_interleave
+from .vllm_rollout_spmd import vLLMRollout, _pre_process_inputs
 from verl import DataProto
 from verl.utils.torch_functional import pad_2d_list_to_length, get_response_mask
 from tensordict import TensorDict
@@ -50,7 +50,7 @@ class vLLMAutoraterRollout(vLLMRollout):
         super().__init__(model_path, config, tokenizer, model_hf_config, **kwargs)
         
         # Autorater configuration
-        self.n_candidates = config.get("n_candidates", 2)  # Number of candidates to generate
+        self.n_candidates = config.get("n_candidates", 5)  # Number of candidates to generate
         self.autorater_service_url = config.get("autorater_service_url", "http://10.128.0.30:81")
         self.answer_stop_token = "</answer>"
         self.answer_start_token = "<answer>"
@@ -70,17 +70,29 @@ class vLLMAutoraterRollout(vLLMRollout):
         matches = re.findall(pattern, text, re.DOTALL)
         return [match.strip() for match in matches]
     
-    def extract_first_answer(self, text: str) -> Optional[str]:
-        """Extract the first <answer></answer> chunk from text."""
+    def extract_last_answer(self, text: str) -> Optional[str]:
+        """Extract the last <answer></answer> chunk from text."""
         chunks = self.extract_answer_chunks(text)
-        return chunks[0] if chunks else None
+        return chunks[-1] if chunks else None
     
-    def evaluate_candidate_plan(self, question: str, candidates: List[str]) -> Tuple[int, float]:
+    def evaluate_candidate_plan(self, question: str, candidates: List[str], prompt_idx: int = 0, meta_info: Dict = None) -> Tuple[int, float]:
         """Use the autorater service to select the best candidate plan."""
         try:
+            # Use explicit task if available, otherwise use original question
+            evaluation_question = question
+            if meta_info and "explicit_tasks" in meta_info:
+                explicit_tasks = meta_info["explicit_tasks"]
+                if prompt_idx < len(explicit_tasks) and explicit_tasks[prompt_idx]:
+                    evaluation_question = explicit_tasks[prompt_idx]
+                    print(f"Using explicit task for evaluation: {evaluation_question[:100]}...")
+                else:
+                    print(f"Using original question for evaluation: {question[:100]}...")
+            else:
+                print(f"Using original question for evaluation: {question[:100]}...")
+            
             # Prepare autorater payload for plan evaluation
             autorater_payload = {
-                "prompts": [question],  # The original question
+                "prompts": [evaluation_question],  # Use explicit task if available
                 "responses": [candidates],  # The list of plans to evaluate
                 "gt_answers": [""],  # Empty ground truth for plan evaluation
                 "template_types": ["plan_evaluation"],
@@ -123,8 +135,8 @@ class vLLMAutoraterRollout(vLLMRollout):
         Generate sequences using best-of-n with autorater.
         
         This method:
-        1. Generates N candidate responses for each prompt
-        2. Extracts the first <answer></answer> chunk from each response
+        1. Generates N candidate responses for each prompt using vLLM's n parameter
+        2. Extracts the last <answer></answer> chunk from each response
         3. Uses an autorater to select the best answer
         4. Continues generation with the best answer
         5. Repeats for each </answer> token encountered
@@ -143,6 +155,8 @@ class vLLMAutoraterRollout(vLLMRollout):
         if "raw_prompt_ids" not in non_tensor_batch:
             non_tensor_batch["raw_prompt_ids"] = np.array([_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object)
 
+        meta_info = prompts.meta_info
+
         if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
             raise RuntimeError("vllm sharding manager is not working properly.")
 
@@ -152,100 +166,91 @@ class vLLMAutoraterRollout(vLLMRollout):
             prompt_text = self.tokenizer.decode(non_tensor_batch["raw_prompt_ids"][i])
             original_prompts.append(prompt_text)
 
-        # Initialize generation state - start with N×K structure
-        # For each of the K prompts, we'll have N candidates
+        # Initialize generation state - one input per original prompt
         curr_inputs = []
         init_inputs = []
         active_indices = []
         curr_max_tokens = []
-        original_prompts_expanded = []
         
-        # Expand each sample to have n_candidates
+        # One input per original prompt (vLLM will generate n_candidates for each)
         for sample_idx in range(batch_size):
             base_input = non_tensor_batch["raw_prompt_ids"][sample_idx].copy()
-            base_prompt = original_prompts[sample_idx]
-            
-            for candidate_idx in range(self.n_candidates):
-                curr_inputs.append(base_input.copy())
-                init_inputs.append(base_input.copy())
-                active_indices.append(sample_idx * self.n_candidates + candidate_idx)
-                curr_max_tokens.append(self.config.response_length)
-                original_prompts_expanded.append(base_prompt)
+            curr_inputs.append(base_input.copy())
+            init_inputs.append(base_input.copy())
+            active_indices.append(sample_idx)
+            curr_max_tokens.append(self.config.response_length)
         
-        print(f"Initialized {batch_size} × {self.n_candidates} = {len(curr_inputs)} total candidates")
+        print(f"Initialized {batch_size} prompts, will generate {self.n_candidates} candidates per prompt")
         
         # Multi-turn generation with autorater
-        max_turns = self.config.get("max_turns", 5)
-        
+        max_turns = self.config.get("max_turns", 2)
+
+        print(f"Multi-turn generation: max_turns={max_turns}")
+
         for turn in range(max_turns):
             if not active_indices:
                 break
                 
-            print(f"Turn {turn + 1}: Processing {len(active_indices)} active candidates")
+            print(f"Turn {turn + 1}: Processing {len(active_indices)} active prompts")
+            print(f"  Expected answer count for this turn: {turn + 1}")
 
-            # Generate one step for each active candidate
+            # Generate one step for each active prompt with n_candidates
             all_candidates = []
-            candidate_indices = []
+            prompt_indices = []
             
-            for candidate_idx in active_indices:
-                # Generate one step for this candidate
-                candidate_input = {"prompt_token_ids": curr_inputs[candidate_idx]}
+            for prompt_idx in active_indices:
+                # Generate n_candidates for this prompt
+                prompt_input = {"prompt_token_ids": curr_inputs[prompt_idx]}
                 
                 with self.update_sampling_params(
-                    max_tokens=curr_max_tokens[candidate_idx],
-                    temperature=0.7,
+                    max_tokens=curr_max_tokens[prompt_idx],
+                    temperature=0.8,
                     top_p=0.9,
+                    n=self.n_candidates,  # Generate n_candidates per prompt
                     stop=[self.answer_stop_token] if self.answer_stop_token else None,
                     detokenize=True if self.answer_stop_token else None,
-                    seed=candidate_idx % self.n_candidates  # Different seed for each candidate
+                    seed=prompt_idx  # Different seed for each prompt
                 ):
-                    candidate_outputs = self.inference_engine.generate(
-                        prompts=[candidate_input],
+                    prompt_outputs = self.inference_engine.generate(
+                        prompts=[prompt_input],
                         sampling_params=self.sampling_params,
                         use_tqdm=False
                     )
                     
-                    if candidate_outputs:
-                        candidate_ids = candidate_outputs[0].outputs[0].token_ids
-                        candidate_text = self.tokenizer.decode(candidate_ids)
-                        all_candidates.append(candidate_text)
+                    if prompt_outputs:
+                        # Extract all n_candidates for this prompt
+                        prompt_candidates = []
+                        for output in prompt_outputs[0].outputs:
+                            candidate_ids = output.token_ids
+                            candidate_text = self.tokenizer.decode(candidate_ids)
+                            prompt_candidates.append(candidate_text)
+                        
+                        all_candidates.append(prompt_candidates)
                     else:
                         # Handle case where no output is generated
-                        all_candidates.append("")
+                        all_candidates.append([""] * self.n_candidates)
                 
-                candidate_indices.append(candidate_idx)
+                prompt_indices.append(prompt_idx)
             
-            print(f"Generated {len(active_indices)} candidate steps")
+            print(f"Generated {len(active_indices)} prompt sets, each with {self.n_candidates} candidates")
             
-            # Group candidates by original sample and use autorater to select best answers
+            # Process each prompt's candidates and use autorater to select best answers
             new_active_indices = []
             
-            # Group candidates by their original sample
-            sample_groups = {}
-            for i, candidate_idx in enumerate(candidate_indices):
-                original_sample_idx = candidate_idx // self.n_candidates
-                if original_sample_idx not in sample_groups:
-                    sample_groups[original_sample_idx] = []
-                sample_groups[original_sample_idx].append((candidate_idx, all_candidates[i]))
-            
-            # Process each sample group
-            for original_sample_idx, candidates_group in sample_groups.items():
-                candidates = [candidate_text for _, candidate_text in candidates_group]
-                candidate_indices_group = [idx for idx, _ in candidates_group]
-                question = original_prompts[original_sample_idx]
+            for i, prompt_idx in enumerate(prompt_indices):
+                candidates = all_candidates[i]
+                question = original_prompts[prompt_idx]
                 
-                print(f"Sample {original_sample_idx}: Processing {len(candidates)} candidates")
+                print(f"Prompt {prompt_idx}: Processing {len(candidates)} candidates")
                 
                 # Check if any candidate has reached </answer> and extract answers
                 candidates_with_answers = []
                 candidates_without_answers = []
                 
                 for candidate_idx, current_turn_generation in enumerate(candidates):
-                    candidate_idx_in_group = candidate_indices_group[candidate_idx]
-                    
                     # Combine previous turns' generation with current turn's generation
-                    input_len = len(init_inputs[candidate_idx_in_group])
-                    full_generation_ids = curr_inputs[candidate_idx_in_group][input_len:]
+                    input_len = len(init_inputs[prompt_idx])
+                    full_generation_ids = curr_inputs[prompt_idx][input_len:]
                     
                     # Add current turn's generation
                     if current_turn_generation:
@@ -257,174 +262,113 @@ class vLLMAutoraterRollout(vLLMRollout):
                     
                     # Check if this candidate has reached </answer>
                     if self.answer_stop_token in full_generation_text:
-                        # Extract the answer
-                        first_answer = self.extract_first_answer(full_generation_text)
-                        if first_answer:
+                        # Extract all answers and check if we have the right number for this turn
+                        all_answers = self.extract_answer_chunks(full_generation_text)
+                        expected_answer_count = turn + 1  # Turn 0 should have 1 answer, Turn 1 should have 2 answers, etc.
+                        
+                        if len(all_answers) == expected_answer_count:
+                            # Take the last answer since it's the most recent
+                            last_answer = all_answers[-1]
                             candidates_with_answers.append({
                                 'candidate_idx': candidate_idx,
-                                'candidate_idx_in_group': candidate_idx_in_group,
-                                'answer': first_answer,
+                                'answer': last_answer,
                                 'full_generation_text': full_generation_text,
                                 'full_generation_ids': full_generation_ids,
                                 'current_turn_generation': current_turn_generation
                             })
-                            print(f"  Candidate {candidate_idx + 1}: Found answer and reached </answer>")
+                            print(f"  Candidate {candidate_idx + 1}: Found {len(all_answers)} answers (expected {expected_answer_count}), using last answer")
                         else:
-                            print(f"  Candidate {candidate_idx + 1}: Reached </answer> but no valid answer found")
+                            print(f"  Candidate {candidate_idx + 1}: Found {len(all_answers)} answers but expected {expected_answer_count}, skipping")
                     else:
                         candidates_without_answers.append({
                             'candidate_idx': candidate_idx,
-                            'candidate_idx_in_group': candidate_idx_in_group,
                             'current_turn_generation': current_turn_generation
                         })
                         print(f"  Candidate {candidate_idx + 1}: No </answer> reached yet")
                 
                 # Evaluate and select the best candidate if any have reached </answer>
                 if len(candidates_with_answers) > 0:
-                    print(f"Sample {original_sample_idx}: {len(candidates_with_answers)}/{len(candidates_group)} candidates reached </answer>, evaluating and selecting best one")
+                    print(f"Prompt {prompt_idx}: {len(candidates_with_answers)}/{len(candidates)} candidates reached </answer>, evaluating and selecting best one")
                     
                     # Use autorater to select the best answer from candidates that have reached </answer>
                     try:
                         answers = [c['answer'] for c in candidates_with_answers]
-                        best_idx, score = self.evaluate_candidate_plan(question, answers)
+                        best_idx, score = self.evaluate_candidate_plan(question, answers, prompt_idx, meta_info)
                         
                         # Ensure best_idx is within bounds
                         best_idx = min(best_idx, len(candidates_with_answers) - 1)
                         best_candidate = candidates_with_answers[best_idx]
                         
-                        print(f"Sample {original_sample_idx}: Autorater selected candidate {best_candidate['candidate_idx'] + 1} with score {score}")
+                        print(f"Prompt {prompt_idx}: Autorater selected candidate {best_candidate['candidate_idx'] + 1} with score {score}")
                         
-                        # Copy the context from the best candidate to ALL other candidates
-                        # The best candidate has already reached </answer>, so we copy its full generation
+                        # Copy the context from the best candidate to continue generation
                         best_full_generation_ids = best_candidate['full_generation_ids']
                         
-                        # Update ALL candidates in this sample group to use the best candidate's context
-                        for candidate_data in candidates_group:
-                            candidate_idx_in_group = candidate_data[0]
-                            
-                            # Replace the current generation with the best candidate's generation
-                            # This ensures all candidates start from the same point after the best answer
-                            curr_inputs[candidate_idx_in_group] = init_inputs[candidate_idx_in_group].copy() + best_full_generation_ids
-                            
-                            # Check if we should continue generation for this candidate
-                            current_length = len(curr_inputs[candidate_idx_in_group]) - len(init_inputs[candidate_idx_in_group])
-                            if current_length < self.config.response_length:
-                                new_active_indices.append(candidate_idx_in_group)
-                                curr_max_tokens[candidate_idx_in_group] = self.config.response_length - current_length
+                        # Update the current input to use the best candidate's generation
+                        curr_inputs[prompt_idx] = init_inputs[prompt_idx].copy() + best_full_generation_ids
                         
-                        print(f"Sample {original_sample_idx}: Synced all {len(candidates_group)} candidates with best candidate's context (length: {len(best_full_generation_ids)} tokens)")
+                        # Check if we should continue generation for this prompt
+                        current_length = len(curr_inputs[prompt_idx]) - len(init_inputs[prompt_idx])
+                        if current_length < self.config.response_length:
+                            new_active_indices.append(prompt_idx)
+                            curr_max_tokens[prompt_idx] = self.config.response_length - current_length
+                        
+                        print(f"Prompt {prompt_idx}: Using best candidate's context (length: {len(best_full_generation_ids)} tokens)")
                         
                     except Exception as e:
-                        print(f"Error in autorater for sample {original_sample_idx}: {e}")
-                        # Fallback: continue all candidates from where they left off
-                        for candidate_data in candidates_group:
-                            candidate_idx_in_group = candidate_data[0]
-                            current_turn_generation = candidate_data[1]
+                        print(f"Error in autorater for prompt {prompt_idx}: {e}")
+                        # Fallback: continue from where the longest candidate left off
+                        longest_candidate = max(candidates, key=lambda x: len(x) if x else 0)
+                        if longest_candidate:
+                            candidate_ids = self.tokenizer.encode(longest_candidate)
+                            curr_inputs[prompt_idx].extend(candidate_ids)
                             
-                            if current_turn_generation:
-                                candidate_ids = self.tokenizer.encode(current_turn_generation)
-                                curr_inputs[candidate_idx_in_group].extend(candidate_ids)
-                                
-                                current_length = len(curr_inputs[candidate_idx_in_group]) - len(init_inputs[candidate_idx_in_group])
-                                if current_length < self.config.response_length:
-                                    new_active_indices.append(candidate_idx_in_group)
-                                    curr_max_tokens[candidate_idx_in_group] = self.config.response_length - current_length
+                            current_length = len(curr_inputs[prompt_idx]) - len(init_inputs[prompt_idx])
+                            if current_length < self.config.response_length:
+                                new_active_indices.append(prompt_idx)
+                                curr_max_tokens[prompt_idx] = self.config.response_length - current_length
                 
                 else:
-                    # No candidates have reached </answer> yet, continue all candidates from where they left off
-                    print(f"Sample {original_sample_idx}: No candidates reached </answer> yet, continuing all {len(candidates)} candidate trajectories")
+                    # No candidates have reached </answer> yet, continue from where the longest candidate left off
+                    print(f"Prompt {prompt_idx}: No candidates reached </answer> yet, continuing from longest candidate")
                     
-                    for candidate_data in candidates_group:
-                        candidate_idx_in_group = candidate_data[0]
-                        current_turn_generation = candidate_data[1]
+                    longest_candidate = max(candidates, key=lambda x: len(x) if x else 0)
+                    if longest_candidate:
+                        candidate_ids = self.tokenizer.encode(longest_candidate)
+                        curr_inputs[prompt_idx].extend(candidate_ids)
                         
-                        if current_turn_generation:
-                            candidate_ids = self.tokenizer.encode(current_turn_generation)
-                            curr_inputs[candidate_idx_in_group].extend(candidate_ids)
-                            
-                            current_length = len(curr_inputs[candidate_idx_in_group]) - len(init_inputs[candidate_idx_in_group])
-                            if current_length < self.config.response_length:
-                                new_active_indices.append(candidate_idx_in_group)
-                                curr_max_tokens[candidate_idx_in_group] = self.config.response_length - current_length
+                        current_length = len(curr_inputs[prompt_idx]) - len(init_inputs[prompt_idx])
+                        if current_length < self.config.response_length:
+                            new_active_indices.append(prompt_idx)
+                            curr_max_tokens[prompt_idx] = self.config.response_length - current_length
             
+                import ipdb; ipdb.set_trace()
             active_indices = new_active_indices
             
-            # Check if any samples have reached max length
+            # Check if any prompts have reached max length
             final_active_indices = []
-            for sample_idx in active_indices:
-                if len(curr_inputs[sample_idx]) - len(init_inputs[sample_idx]) >= self.config.response_length:
+            for prompt_idx in active_indices:
+                if len(curr_inputs[prompt_idx]) - len(init_inputs[prompt_idx]) >= self.config.response_length:
                     # Truncate to response length
-                    curr_inputs[sample_idx] = init_inputs[sample_idx] + \
-                        curr_inputs[sample_idx][len(init_inputs[sample_idx]):len(init_inputs[sample_idx])+self.config.response_length]
+                    curr_inputs[prompt_idx] = init_inputs[prompt_idx] + \
+                        curr_inputs[prompt_idx][len(init_inputs[prompt_idx]):len(init_inputs[prompt_idx])+self.config.response_length]
                 else:
-                    final_active_indices.append(sample_idx)
+                    final_active_indices.append(prompt_idx)
             
             active_indices = final_active_indices
         
-        # Collect final responses - need to get the best response for each original sample
+        # Collect final responses - use the accumulated generation from multi-turn process
+        # During each turn, we've already selected the best candidate and continued from there
+        # So the final curr_inputs[i] contains the best trajectory we've built up
         response_list = []
         for i in range(batch_size):
-            # Find all candidates for this original sample
-            sample_candidates = []
-            sample_candidate_indices = []
+            # Get the final accumulated generation for this prompt
+            input_len = len(init_inputs[i])
+            response_ids = curr_inputs[i][input_len:]
             
-            for candidate_idx in range(i * self.n_candidates, (i + 1) * self.n_candidates):
-                if candidate_idx < len(curr_inputs):
-                    input_len = len(init_inputs[candidate_idx])
-                    response_ids = curr_inputs[candidate_idx][input_len:]
-                    response_text = self.tokenizer.decode(response_ids)
-                    sample_candidates.append(response_text)
-                    sample_candidate_indices.append(candidate_idx)
-            
-            # If we have candidates for this sample, use autorater to select the best one
-            if sample_candidates:
-                question = original_prompts[i]
-                
-                # Extract answers from all candidates
-                first_answers = []
-                valid_candidates = []
-                valid_candidate_indices = []
-                
-                for candidate_idx, candidate_text in enumerate(sample_candidates):
-                    first_answer = self.extract_first_answer(candidate_text)
-                    if first_answer:
-                        first_answers.append(first_answer)
-                        valid_candidates.append(candidate_text)
-                        valid_candidate_indices.append(sample_candidate_indices[candidate_idx])
-                
-                if first_answers:
-                    # Use autorater to select the best answer
-                    try:
-                        best_idx, score = self.evaluate_candidate_plan(question, first_answers)
-                        best_idx = min(best_idx, len(valid_candidates) - 1)
-                        best_candidate_text = valid_candidates[best_idx]
-                        best_candidate_idx = valid_candidate_indices[best_idx]
-                        
-                        # Get the response IDs for the best candidate
-                        input_len = len(init_inputs[best_candidate_idx])
-                        response_ids = curr_inputs[best_candidate_idx][input_len:]
-                        print(f"Sample {i}: Using autorater-selected candidate {best_idx + 1} with score {score}")
-                    except Exception as e:
-                        print(f"Error in final autorater selection for sample {i}: {e}")
-                        # Fallback: use the longest response
-                        longest_idx = max(range(len(sample_candidates)), key=lambda idx: len(sample_candidates[idx]))
-                        longest_candidate_idx = sample_candidate_indices[longest_idx]
-                        input_len = len(init_inputs[longest_candidate_idx])
-                        response_ids = curr_inputs[longest_candidate_idx][input_len:]
-                        print(f"Sample {i}: Fallback to longest candidate {longest_idx + 1}")
-                else:
-                    # No answers found, use the longest response
-                    longest_idx = max(range(len(sample_candidates)), key=lambda idx: len(sample_candidates[idx]))
-                    longest_candidate_idx = sample_candidate_indices[longest_idx]
-                    input_len = len(init_inputs[longest_candidate_idx])
-                    response_ids = curr_inputs[longest_candidate_idx][input_len:]
-                    print(f"Sample {i}: No answers found, using longest candidate {longest_idx + 1}")
-            else:
-                # Fallback: empty response
-                response_ids = []
-                print(f"Sample {i}: No candidates found, using empty response")
-            
+            # Use the accumulated generation directly - no need to regenerate
             response_list.append(response_ids)
+            print(f"Prompt {i}: Using accumulated generation ({len(response_ids)} tokens)")
         
         # Pad responses to uniform length
         response = pad_2d_list_to_length(response_list, self.pad_token_id, max_length=self.config.response_length).to(idx.device)

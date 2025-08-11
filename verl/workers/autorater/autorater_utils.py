@@ -342,7 +342,6 @@ You are an expert plan evaluator. Given a prompt and N different plans, your tas
 ===Evaluation Criteria===
 - **Completeness**: Does the plan address all aspects of the prompt?
 - **Feasibility**: Is the plan realistic and implementable?
-- **Efficiency**: Is the plan optimal in terms of time, resources, or complexity?
 - **Clarity**: Is the plan clear and well-structured?
 - **Robustness**: Does the plan account for potential issues or edge cases?
 
