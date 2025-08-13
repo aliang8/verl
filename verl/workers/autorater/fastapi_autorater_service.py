@@ -156,16 +156,10 @@ class AutoRaterActor:
                     template=tmpl,
                 )
             elif tmpl == "plan_evaluation":
-                # For plan evaluation, we need to format the prompt using the plans
-                # The prompt should contain the original question, and response should contain the plans
-                if isinstance(response, list):
-                    # If response is a list of plans, use them directly
-                    plans = response
-                else:
-                    # If response is a string, try to parse it as a single plan
-                    plans = [response] if response else []
+                if not isinstance(response, list):
+                    raise ValueError("Plan evaluation requires a list of plans")
                 
-                autorater_prompt = format_plan_evaluation_prompt(prompt, plans)
+                autorater_prompt = format_plan_evaluation_prompt(prompt, response)
             else:
                 autorater_prompt = format_autorater_prompt(
                     question=prompt,
@@ -199,13 +193,7 @@ class AutoRaterActor:
                 # Parse the plan number from the response
                 # We can get the number of plans from the original response parameter
                 try:
-                    # Get the number of plans from the original response
-                    if isinstance(responses[i], list):
-                        num_plans = len(responses[i])
-                    else:
-                        # If it's a string, count it as 1 plan
-                        num_plans = 1 if responses[i] else 0
-                    
+                    num_plans = len(response)
                     print(f"Plan evaluation: {num_plans} plans, response: '{response}'")
                     selected_plan = parse_plan_evaluation_response(response, num_plans)
                     decision = selected_plan  # Return the plan number as the decision

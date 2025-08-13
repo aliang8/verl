@@ -344,6 +344,7 @@ You are an expert plan evaluator. Given a prompt and N different plans, your tas
 - **Feasibility**: Is the plan realistic and implementable?
 - **Clarity**: Is the plan clear and well-structured?
 - **Robustness**: Does the plan account for potential issues or edge cases?
+- **Alignment**: Does the plan align with the user's intent? 
 
 ===Input Data===
 - Prompt: {prompt}
@@ -351,7 +352,7 @@ You are an expert plan evaluator. Given a prompt and N different plans, your tas
 {plans_text}
 
 ===Output Format===
-After evaluating all plans, output ONLY a single number (1 to {num_plans}) indicating which plan is the best.
+After evaluating all plans, output ONLY a single number (1 to {num_plans}) indicating which plan is the best aligned with the user's intent.
 For example, if plan 3 is the best, output: 3
 
 ===Important===

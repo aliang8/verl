@@ -288,3 +288,98 @@ class vLLMRollout(BaseRollout):
             self.inference_engine.free_cache_engine()
 
         return DataProto(batch=batch)
+
+    def generate_diverse_plan(self, prompt: str, existing_plans: List[str], max_new_tokens: int = 256) -> str:
+        """
+        Generate a new plan that is different from existing plans.
+        
+        Args:
+            prompt: The original prompt
+            existing_plans: List of existing plans to avoid
+            max_new_tokens: Maximum tokens for the new plan
+            
+        Returns:
+            New diverse plan string
+        """
+        if not existing_plans:
+            # If no existing plans, just generate a normal plan
+            return self._generate_single_plan(prompt, max_new_tokens)
+        
+        # Create negative examples from existing plans
+        negative_examples = []
+        for i, plan in enumerate(existing_plans[:3]):  # Limit to 3 examples to avoid too long prompt
+            # Truncate long plans to keep prompt manageable
+            truncated_plan = plan[:200] + "..." if len(plan) > 200 else plan
+            negative_examples.append(f"but not like this: {truncated_plan}")
+        
+        # Construct the diverse generation prompt
+        diverse_prompt = f"""Given the following task, generate a plan that is DIFFERENT from the existing approaches shown below.
+
+Task: {prompt}
+
+Existing approaches to avoid:
+{chr(10).join(negative_examples)}
+
+Generate a new, different plan that solves the same task but uses a different approach, strategy, or methodology. Be creative and think outside the box.
+
+New plan:"""
+        
+        try:
+            # Generate using the inference engine
+            prompt_input = {"prompt_token_ids": self.tokenizer.encode(diverse_prompt)}
+            
+            with self.update_sampling_params(
+                max_tokens=max_new_tokens,
+                temperature=1.2,
+                top_p=0.9,
+                n=1,
+                stop=[self.answer_stop_token] if self.answer_stop_token else None,
+                detokenize=True if self.answer_stop_token else None,
+                seed=hash(diverse_prompt) % 10000  # Deterministic seed based on prompt
+            ):
+                outputs = self.inference_engine.generate(
+                    prompts=[prompt_input],
+                    sampling_params=self.sampling_params,
+                    use_tqdm=False
+                )
+                
+                if outputs and outputs[0].outputs:
+                    new_plan = self.tokenizer.decode(outputs[0].outputs[0].token_ids, skip_special_tokens=True)
+                    return new_plan.strip()
+                else:
+                    print("  Warning: No output generated for diverse plan")
+                    return ""
+                    
+        except Exception as e:
+            print(f"  Error generating diverse plan: {e}")
+            return ""
+    
+    def _generate_single_plan(self, prompt: str, max_new_tokens: int = 256) -> str:
+        """Generate a single plan for the given prompt."""
+        try:
+            prompt_input = {"prompt_token_ids": self.tokenizer.encode(prompt)}
+            
+            with self.update_sampling_params(
+                max_tokens=max_new_tokens,
+                temperature=0.8,
+                top_p=0.9,
+                n=1,
+                stop=[self.answer_stop_token] if self.answer_stop_token else None,
+                detokenize=True if self.answer_stop_token else None,
+                seed=hash(prompt) % 10000
+            ):
+                outputs = self.inference_engine.generate(
+                    prompts=[prompt_input],
+                    sampling_params=self.sampling_params,
+                    use_tqdm=False
+                )
+                
+                if outputs and outputs[0].outputs:
+                    plan = self.tokenizer.decode(outputs[0].outputs[0].token_ids, skip_special_tokens=True)
+                    return plan.strip()
+                else:
+                    return ""
+                    
+        except Exception as e:
+            print(f"  Error generating single plan: {e}")
+            return ""

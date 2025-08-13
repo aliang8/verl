@@ -81,6 +81,10 @@ PLAN_FIRST_TEMPLATE = (
     "You are a coding assistant that solves problems using a plan-first approach. Always interleave <think></think> and <answer></answer> tags. For the first response, provide a detailed plan. Then implement the solution following your plan."
 )
 
+UNDERSPECIFIED_HANDLING_TEMPLATE = (
+    "You are a helpful assistant. If the prompt is underspecified or ambiguous, you must choose a single, reasonable interpretation of the prompt and proceed with that interpretation. First, state your interpretation and in subsequent responses. Think about the assumptions and the respond and interleave <think></think> and <answer></answer> tags."
+)
+
 # Template mappings
 TEMPLATE_MAPPINGS = {
     "tool": TOOL_USE_TEMPLATE,
@@ -91,6 +95,7 @@ TEMPLATE_MAPPINGS = {
     "interleave": INTERLEAVE_TEMPLATE,
     "code": CODE_GENERATION_TEMPLATE,
     "plan_first": PLAN_FIRST_TEMPLATE,
+    "underspecified_handling": UNDERSPECIFIED_HANDLING_TEMPLATE,
 }
 
 
