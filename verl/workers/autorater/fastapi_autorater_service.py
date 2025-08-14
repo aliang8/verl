@@ -184,7 +184,7 @@ class AutoRaterActor:
             response = output.outputs[0].text
             raw_responses.append(response)
 
-            if template_types[i] == "outline" or template_types[i] == "standard" or template_types[i] == "helpfulness":
+            if template_types[i] == "outline" or template_types[i] == "standard" or template_types[i] == "helpfulness" or template_types[i] == "plan_quality_evaluation":
                 explanation, decision = parse_autorater_response_boolean(response)
             elif template_types[i] == "plan_evaluation":
                 # For plan evaluation, we need to parse the response to get the selected plan number

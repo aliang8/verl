@@ -363,6 +363,53 @@ For example, if plan 3 is the best, output: 3
 Please proceed with the evaluation.
 Score: """
 
+# Plan quality evaluation template for approving/rejecting a single plan
+PLAN_QUALITY_EVALUATION_TEMPLATE = """===Task===
+You are an expert plan evaluator. Given a prompt and a single plan, your task is to determine if the plan is good enough to proceed with.
+
+===Evaluation Criteria===
+- **Completeness**: Does the plan address all aspects of the prompt?
+- **Feasibility**: Is the plan realistic and implementable?
+- **Clarity**: Is the plan clear and well-structured?
+- **Robustness**: Does the plan account for potential issues or edge cases?
+- **Alignment**: Does the plan align with the user's intent?
+- **Actionability**: Can the user take concrete steps based on this plan?
+
+===Input Data===
+- Prompt: {prompt}
+- Plan to evaluate: {plan}
+
+===Evaluation Instructions===
+Carefully evaluate the plan based on the criteria above. Consider whether this plan provides a solid foundation for addressing the user's request.
+
+A plan is APPROVED (Decision: TRUE) if it:
+- Directly addresses the core question or request
+- Provides clear, actionable steps
+- Is realistic and implementable
+- Covers the essential aspects without being overly complex
+- Aligns with the user's apparent intent
+
+A plan is REJECTED (Decision: FALSE) if it:
+- Misses key aspects of the request
+- Is too vague or abstract to act on
+- Contains unrealistic or impractical elements
+- Doesn't align with the user's intent
+- Is incomplete or poorly structured
+
+===Output Format===
+Respond with exactly one line in this format:
+Decision: TRUE
+or
+Decision: FALSE
+
+===Important===
+- Do not provide explanations or reasoning in your final output
+- Do not include any additional text
+- Output only the decision line
+
+Please proceed with the evaluation.
+Decision: """
+
 
 def format_plan_evaluation_prompt(prompt: str, plans: List[str]) -> str:
     """
@@ -396,6 +443,31 @@ def format_plan_evaluation_prompt(prompt: str, plans: List[str]) -> str:
         prompt=prompt,
         plans_text=plans_text.strip(),
         num_plans=len(plans)
+    )
+
+
+def format_plan_quality_evaluation_prompt(prompt: str, plan: str) -> str:
+    """
+    Format a prompt for plan quality evaluation with a prompt and a single plan.
+    
+    Args:
+        prompt: The original prompt/question
+        plan: The single plan to evaluate
+    
+    Returns:
+        str: Formatted prompt string for plan quality evaluation
+    
+    Example:
+        >>> prompt = "How should I implement a web scraper?"
+        >>> plan = "Use BeautifulSoup with requests library to scrape static HTML content"
+        >>> formatted_prompt = format_plan_quality_evaluation_prompt(prompt, plan)
+    """
+    if not plan or not plan.strip():
+        raise ValueError("Plan cannot be empty")
+    
+    return PLAN_QUALITY_EVALUATION_TEMPLATE.format(
+        prompt=prompt.strip(),
+        plan=plan.strip()
     )
 
 

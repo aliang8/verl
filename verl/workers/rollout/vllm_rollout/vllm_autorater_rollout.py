@@ -18,6 +18,7 @@ to select the best answer, and continues generation w78
 ith the best answer.
 """
 
+from email.charset import add_alias
 import re
 import os
 from typing import List, Dict, Any, Tuple, Optional
@@ -52,7 +53,7 @@ class vLLMAutoraterRollout(vLLMRollout):
         super().__init__(model_path, config, tokenizer, model_hf_config, **kwargs)
         
         # Autorater configuration
-        self.n_candidates = config.get("n_candidates", 20)  # Number of candidates to generate
+        self.n_candidates = config.get("n_candidates", 1)  # Number of candidates to generate
         self.autorater_service_url = config.get("autorater_service_url", "http://10.128.0.30:81")
         self.answer_stop_token = "</answer>"
         self.answer_start_token = "<answer>"
@@ -141,11 +142,7 @@ class vLLMAutoraterRollout(vLLMRollout):
                 best_score = 1.0  # Default score for plan evaluation
                 
                 print(f"Plan evaluator selected candidate {selected_plan} (index {best_idx})")
-                return best_idx, best_score
-            else:
-                print("No response from autorater service, using first candidate")
-                return 0, 1.0
-            
+            return best_idx, best_score
         except Exception as e:
             print(f"Error calling autorater service for plan evaluation: {e}")
             # Fallback: return first candidate with default score
@@ -329,6 +326,83 @@ class vLLMAutoraterRollout(vLLMRollout):
             print(f"  Error generating text: {e}")
             return [""] * num_outputs
     
+    def generate_text_with_model_batch(self, prompts: List[str], num_outputs: int = 1, max_new_tokens_list: List[int] = None, 
+                                     temperature: float = 0.8, top_p: float = 0.9, seeds: List[int] = None) -> List[List[str]]:
+        """
+        Batch version of text generation for multiple prompts simultaneously.
+        
+        Args:
+            prompts: List of input prompt texts
+            num_outputs: Number of outputs to generate per prompt (n parameter)
+            max_new_tokens_list: List of maximum tokens to generate for each prompt
+            temperature: Generation temperature
+            top_p: Top-p sampling parameter
+            seeds: List of random seeds for generation (one per prompt)
+            
+        Returns:
+            List of lists of generated text strings (outer list = prompts, inner list = candidates)
+        """
+        if not prompts:
+            return []
+        
+        # Use default max_new_tokens if not provided
+        if max_new_tokens_list is None:
+            max_new_tokens_list = [256] * len(prompts)
+        
+        # Use default seeds if not provided
+        if seeds is None:
+            seeds = [hash(prompt) % 10000 for prompt in prompts]
+        
+        try:
+            # Encode all prompts
+            prompt_inputs = [{"prompt_token_ids": self.tokenizer.encode(prompt)} for prompt in prompts]
+            
+            # Use the maximum max_new_tokens for batch processing (vLLM requirement)
+            max_tokens = max(max_new_tokens_list)
+            
+            with self.update_sampling_params(
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                n=num_outputs,
+                stop=[self.answer_stop_token] if self.answer_stop_token else None,
+                detokenize=True if self.answer_stop_token else None,
+                seed=seeds[0] if seeds else None  # Use first seed for batch
+            ):
+                outputs = self.inference_engine.generate(
+                    prompts=prompt_inputs,
+                    sampling_params=self.sampling_params,
+                    use_tqdm=False
+                )
+                
+                if outputs:
+                    all_generated_texts = []
+                    for i, output in enumerate(outputs):
+                        if output.outputs:
+                            prompt_candidates = []
+                            for candidate_output in output.outputs:
+                                text = self.tokenizer.decode(candidate_output.token_ids, skip_special_tokens=True)
+                                if text.strip():
+                                    prompt_candidates.append(text.strip())
+                            
+                            # Ensure we have the right number of candidates
+                            while len(prompt_candidates) < num_outputs:
+                                prompt_candidates.append("")
+                            
+                            all_generated_texts.append(prompt_candidates[:num_outputs])
+                        else:
+                            # No outputs for this prompt
+                            all_generated_texts.append([""] * num_outputs)
+                    
+                    return all_generated_texts
+                else:
+                    print(f"  Warning: No outputs generated for batch")
+                    return [[""] * num_outputs for _ in prompts]
+                    
+        except Exception as e:
+            print(f"  Error generating text in batch: {e}")
+            return [[""] * num_outputs for _ in prompts]
+    
     def generate_candidates_for_prompt(self, prompt_idx: int, curr_inputs: List, curr_max_tokens: List) -> List[str]:
         """
         Generate candidates for a specific prompt using vLLM.
@@ -355,6 +429,45 @@ class vLLMAutoraterRollout(vLLMRollout):
         )
         
         return candidates
+    
+    def generate_candidates_for_all_prompts_batch(self, active_indices: List[int], curr_inputs: List, curr_max_tokens: List) -> List[List[str]]:
+        """
+        Generate candidates for all prompts simultaneously using vLLM batch processing.
+        
+        Args:
+            active_indices: List of active prompt indices
+            curr_inputs: Current input tokens for each prompt
+            curr_max_tokens: Maximum tokens to generate for each prompt
+            
+        Returns:
+            List of candidate lists for each prompt
+        """
+        if not active_indices:
+            return []
+        
+        # Prepare batch inputs
+        batch_prompts = []
+        batch_max_tokens = []
+        batch_seeds = []
+        
+        for prompt_idx in active_indices:
+            # Decode the current input to get the prompt text
+            prompt_text = self.tokenizer.decode(curr_inputs[prompt_idx])
+            batch_prompts.append(prompt_text)
+            batch_max_tokens.append(curr_max_tokens[prompt_idx])
+            batch_seeds.append(prompt_idx)  # Use prompt_idx as seed for reproducibility
+        
+        # Generate all candidates simultaneously using batch processing
+        all_candidates = self.generate_text_with_model_batch(
+            prompts=batch_prompts,
+            num_outputs=self.n_candidates,
+            max_new_tokens_list=batch_max_tokens,
+            temperature=1.2,
+            top_p=0.9,
+            seeds=batch_seeds
+        )
+        
+        return all_candidates
     
     def generate_diverse_answers_batch(self, prompt: str, existing_answers: List[str], num_to_generate: int, max_new_tokens: int = 256) -> List[str]:
         """
@@ -550,7 +663,7 @@ Existing approaches to avoid:
         max_turns = self.config.get("max_turns", 2)
 
         print(f"Multi-turn generation: max_turns={max_turns}")
-
+        
         for turn in range(max_turns):
             if not active_indices:
                 break
@@ -558,15 +671,11 @@ Existing approaches to avoid:
             print(f"Turn {turn + 1}: Processing {len(active_indices)} active prompts")
             print(f"  Expected answer count for this turn: {turn + 1}")
 
-            # Generate one step for each active prompt with n_candidates
-            all_candidates = []
-            prompt_indices = []
+            # Generate candidates for all prompts simultaneously using batch processing
+            print(f"Generating {self.n_candidates} candidates for {len(active_indices)} prompts simultaneously...")
             
-            for prompt_idx in active_indices:
-                # Generate n_candidates for this prompt using helper function
-                prompt_candidates = self.generate_candidates_for_prompt(prompt_idx, curr_inputs, curr_max_tokens)
-                all_candidates.append(prompt_candidates)
-                prompt_indices.append(prompt_idx)
+            all_candidates = self.generate_candidates_for_all_prompts_batch(active_indices, curr_inputs, curr_max_tokens)
+            prompt_indices = active_indices  # Keep original order
             
             print(f"Generated {len(active_indices)} prompt sets, each with {self.n_candidates} candidates")
             
@@ -627,6 +736,7 @@ Existing approaches to avoid:
                                 print(f"  Generated {len(new_responses)} new responses")
                                 
                                 if new_responses:
+                                    added_candidates = 0
                                     # Create synthetic candidates for the new responses and add them to candidates_with_answers
                                     for new_response in new_responses:
                                         # Extract the answer from the full response for the candidate structure
@@ -635,8 +745,8 @@ Existing approaches to avoid:
                                             new_candidate = self.create_synthetic_candidate(extracted_answer, len(candidates_with_answers), candidates, prompt_idx, curr_inputs, init_inputs, new_response)
                                             candidates_with_answers.append(new_candidate)
                                             candidates.append(new_candidate)
-                                    
-                                    print(f"    ✓ Added {len(new_responses)} new candidates to the pool")
+                                            added_candidates += 1
+                                    print(f"    ✓ Added {added_candidates} new candidates to the pool")
                                 else:
                                     print(f"    ✗ Failed to generate new responses")
 
@@ -699,8 +809,15 @@ Existing approaches to avoid:
                     
                     print(f"Prompt {prompt_idx}: Using best candidate's context (length: {len(best_full_generation_ids)} tokens)")
                 else:
-                    raise ValueError(f"No candidates reached </answer> for prompt {prompt_idx}")
-                
+                    print(f"Prompt {prompt_idx}: No candidates reached </answer>, using first candidate")
+                    best_idx = 0
+                    best_candidate = candidates[0]
+                    # best_full_generation_ids = best_candidate['full_generation_ids']
+                    best_candidate_id = self.tokenizer.encode(best_candidate)
+                    curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx].copy(), best_candidate_id])
+                    new_active_indices.append(prompt_idx)
+                    curr_max_tokens[prompt_idx] = self.config.response_length - current_length
+            
             active_indices = new_active_indices
             
             # Check if any prompts have reached max length
