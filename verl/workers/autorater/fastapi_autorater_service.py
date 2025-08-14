@@ -142,6 +142,8 @@ class AutoRaterActor:
         if context is None:
             context = [None] * len(prompts)
 
+        print(f"template_types: {template_types}")
+
         for i, (prompt, response, gt_answer, tmpl, ctx) in enumerate(
             zip(prompts, responses, gt_answers, template_types, context)
         ):
