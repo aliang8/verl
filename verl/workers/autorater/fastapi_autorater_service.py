@@ -32,6 +32,7 @@ from verl.workers.autorater.autorater_utils import (
     format_code_outline_prompt,
     format_helpfulness_prompt,
     format_plan_evaluation_prompt,
+    format_plan_quality_evaluation_prompt,
     parse_plan_evaluation_response,
 )
 
@@ -155,6 +156,8 @@ class AutoRaterActor:
                     context=ctx,
                     template=tmpl,
                 )
+            elif tmpl == "plan_quality_evaluation":
+                autorater_prompt = format_plan_quality_evaluation_prompt(prompt, response)
             elif tmpl == "plan_evaluation":
                 if not isinstance(response, list):
                     raise ValueError("Plan evaluation requires a list of plans")

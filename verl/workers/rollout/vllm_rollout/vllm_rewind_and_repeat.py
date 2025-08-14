@@ -83,6 +83,7 @@ class vLLMRewindAndRepeatRollout(vLLMAutoraterRollout):
         Returns:
             Tuple of (is_approved, confidence_score)
         """
+        import ipdb; ipdb.set_trace()
         try:
             # Use explicit task if available, otherwise use original question
             evaluation_question = question
