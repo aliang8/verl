@@ -371,7 +371,6 @@ You are an expert plan evaluator. Given a prompt and a single plan, your task is
 - **Completeness**: Does the plan address all aspects of the prompt?
 - **Feasibility**: Is the plan realistic and implementable?
 - **Clarity**: Is the plan clear and well-structured?
-- **Robustness**: Does the plan account for potential issues or edge cases?
 - **Alignment**: Does the plan align with the user's intent?
 - **Actionability**: Can the user take concrete steps based on this plan?
 

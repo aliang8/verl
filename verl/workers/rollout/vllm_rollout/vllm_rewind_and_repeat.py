@@ -35,6 +35,7 @@ from tensordict import TensorDict
 from verl.utils.autorater_client import call_autorater_service
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.third_party.vllm import vllm_version
+from verl.utils.templates import format_system_message
 
 
 class vLLMRewindAndRepeatRollout(vLLMAutoraterRollout):
@@ -83,7 +84,6 @@ class vLLMRewindAndRepeatRollout(vLLMAutoraterRollout):
         Returns:
             Tuple of (is_approved, confidence_score)
         """
-        import ipdb; ipdb.set_trace()
         try:
             # Use explicit task if available, otherwise use original question
             evaluation_question = question
@@ -104,7 +104,7 @@ class vLLMRewindAndRepeatRollout(vLLMAutoraterRollout):
                 "gt_answers": [""],  # Empty ground truth for plan evaluation
                 "template_types": ["plan_quality_evaluation"],  # Use the new template type
             }
-            
+
             # Call autorater service
             autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(
                 self.plan_evaluation_service_url, autorater_payload, batch_size=1
@@ -129,15 +129,15 @@ class vLLMRewindAndRepeatRollout(vLLMAutoraterRollout):
                     confidence_score = 0.0
                 
                 print(f"Plan evaluator decision: {decision} (approved: {is_approved})")
-                return is_approved, confidence_score
+                return is_approved, confidence_score, autorater_explanations[0]
             else:
                 print("Warning: No decision from plan evaluator, defaulting to rejection")
-                return False, 0.0
+                return False, 0.0, ""
                 
         except Exception as e:
             print(f"Error calling autorater service for plan evaluation: {e}")
             # Fallback: reject plan with low confidence
-            return False, 0.0
+            return False, 0.0, ""
     
     def create_rewind_prompt(self, original_question: str, rejected_plans: List[str], turn: int) -> str:
         """
@@ -151,50 +151,24 @@ class vLLMRewindAndRepeatRollout(vLLMAutoraterRollout):
         Returns:
             Augmented prompt for regeneration
         """
+
         if self.rewind_prompt_template == "default":
             # Default rewind prompt template
             rewind_prompt = f"""The following plan was rejected as not meeting the requirements. Please generate a better plan.
 
-Original Question: {original_question}
-
 Rejected Plan (Turn {turn}):
 {chr(10).join(f"- {plan}" for plan in rejected_plans)}
 
-Please provide a new, improved plan that addresses the original question more effectively. Output your response in <answer> tags.
-
-<answer>"""
-            
-        elif self.rewind_prompt_template == "constructive":
-            # Constructive feedback template
-            rewind_prompt = f"""Your previous plan didn't meet the requirements. Let me help you improve it.
-
-Original Question: {original_question}
-
-Previous Attempt (Turn {turn}):
-{chr(10).join(f"- {plan}" for plan in rejected_plans)}
-
-Guidance for improvement:
-- Consider the core intent more carefully
-- Ensure your plan directly addresses the question
-- Be more specific and actionable
-- Avoid assumptions not supported by the question
-- Focus on the most important aspects first
-
-Please generate a revised plan in <answer> tags:
-
-<answer>"""
-            
+Please provide a new, improved plan that addresses the original question more effectively."""
         else:
-            # Custom template - fallback to default
-            rewind_prompt = f"""Please regenerate your plan for: {original_question}
-
-Previous rejected attempts:
-{chr(10).join(f"- {plan}" for plan in rejected_plans)}
-
-Generate a better plan in <answer> tags:
-
-<answer>"""
+            raise ValueError(f"Invalid rewind prompt template: {self.rewind_prompt_template}")
         
+        messages = [
+            format_system_message("plan_first"),
+            {"role": "user", "content": rewind_prompt}
+        ]
+
+        rewind_prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         return rewind_prompt
     
     def validate_response_has_answers(self, response: str) -> bool:
@@ -239,7 +213,7 @@ Generate a better plan in <answer> tags:
                 print(f"  Attempt {attempt + 1}: Using original prompt")
             else:
                 # Rewind attempt: use augmented prompt
-                current_prompt = self.create_rewind_prompt(question, rejected_plans, turn)
+                current_prompt = self.create_rewind_prompt(meta_info["original_prompt"][prompt_idx], rejected_plans, turn)
                 print(f"  Attempt {attempt + 1}: Using rewind prompt with {len(rejected_plans)} rejected plans")
             
             # Generate single candidate for this attempt
@@ -271,11 +245,12 @@ Generate a better plan in <answer> tags:
                 print(f"    ✗ No <answer> tags found in response, retrying...")
                 continue
             
-            print(f"    Extracted plan ({len(extracted_plan)} chars): {extracted_plan[:100]}...")
+            print(f"    Extracted plan ({len(extracted_plan)} chars): {extracted_plan}...")
             
             # Evaluate the extracted plan
-            is_approved, confidence = self.evaluate_plan_quality(question, extracted_plan, prompt_idx, meta_info)
+            is_approved, confidence, explanation = self.evaluate_plan_quality(meta_info["original_prompt"][prompt_idx], extracted_plan, prompt_idx, meta_info)
             
+            import ipdb; ipdb.set_trace()
             if is_approved:
                 print(f"    ✅ Plan approved with confidence {confidence:.3f}")
                 return extracted_plan, rejected_plans, total_attempts
