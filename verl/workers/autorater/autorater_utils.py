@@ -470,6 +470,81 @@ def format_plan_quality_evaluation_prompt(prompt: str, plan: str) -> str:
     )
 
 
+# Coding answer correctness evaluation template
+CODING_ANSWER_CORRECTNESS_TEMPLATE = """===Task===
+You are an expert coding evaluator. Given an original programming task and a generated code solution, your task is to determine if the solution correctly addresses the task requirements.
+
+===Evaluation Criteria===
+- **Functional Correctness**: Does the code solve the problem as described in the task?
+- **Completeness**: Does the solution cover all the requirements mentioned in the task?
+- **Code Quality**: Is the code well-structured, readable, and follows good practices?
+- **Task Alignment**: Does the solution directly address what was asked for?
+
+===Input Data===
+- Original Task: {original_task}
+- Generated Code Solution: {code_solution}
+
+===Evaluation Instructions===
+Carefully analyze the code solution against the original task requirements. 
+
+A solution is CORRECT (Decision: TRUE) if it:
+- Directly implements the requested functionality
+- Handles the core requirements completely
+- Produces correct output for the given inputs
+- Is well-structured and readable
+- Follows appropriate coding conventions
+
+A solution is INCORRECT (Decision: FALSE) if it:
+- Misses key requirements from the task
+- Contains logical errors or bugs
+- Doesn't produce the expected output
+- Is incomplete or poorly structured
+- Misinterprets the task requirements
+
+===Output Format===
+Respond with exactly one line in this format:
+Decision: TRUE
+or
+Decision: FALSE
+
+===Important===
+- Do not provide explanations or reasoning in your final output
+- Do not include any additional text
+- Output only the decision line
+- Focus on whether the code correctly solves the stated problem
+
+Please proceed with the evaluation.
+Decision: """
+
+
+def format_coding_answer_correctness_prompt(original_task: str, code_solution: str) -> str:
+    """
+    Format a prompt for coding answer correctness evaluation.
+    
+    Args:
+        original_task: The original programming task/requirement
+        code_solution: The generated code solution to evaluate
+    
+    Returns:
+        str: Formatted prompt string for coding answer correctness evaluation
+    
+    Example:
+        >>> task = "Write a function to find the maximum element in a list"
+        >>> solution = "def find_max(lst): return max(lst) if lst else None"
+        >>> formatted_prompt = format_coding_answer_correctness_prompt(task, solution)
+    """
+    if not original_task or not original_task.strip():
+        raise ValueError("Original task cannot be empty")
+    
+    if not code_solution or not code_solution.strip():
+        raise ValueError("Code solution cannot be empty")
+    
+    return CODING_ANSWER_CORRECTNESS_TEMPLATE.format(
+        original_task=original_task.strip(),
+        code_solution=code_solution.strip()
+    )
+
+
 def parse_plan_evaluation_response(response: str, num_plans: int) -> int:
     """
     Parse the plan evaluation response to extract the selected plan number.

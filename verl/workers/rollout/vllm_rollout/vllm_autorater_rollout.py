@@ -381,7 +381,7 @@ class vLLMAutoraterRollout(vLLMRollout):
                         if output.outputs:
                             prompt_candidates = []
                             for candidate_output in output.outputs:
-                                text = self.tokenizer.decode(candidate_output.token_ids, skip_special_tokens=True)
+                                text = self.tokenizer.decode(candidate_output.token_ids, skip_special_tokens=False)
                                 if text.strip():
                                     prompt_candidates.append(text.strip())
                             

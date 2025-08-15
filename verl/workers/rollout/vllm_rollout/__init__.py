@@ -53,3 +53,4 @@ else:
     from .vllm_rollout_spmd import vLLMAsyncRollout, vLLMRollout, vLLMRolloutWithTool, vLLMRolloutWithMCP # noqa: F401
     from .vllm_autorater_rollout import vLLMAutoraterRollout # noqa: F401
     from .vllm_rewind_and_repeat import vLLMRewindAndRepeatRollout # noqa: F401
+    from .vllm_answer_evaluation_rollout import vLLMAnswerEvaluationRollout # noqa: F401

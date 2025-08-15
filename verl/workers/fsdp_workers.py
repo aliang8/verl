@@ -447,6 +447,9 @@ class ActorRolloutRefWorker(Worker):
             elif self.config.rollout.name == 'vllm_rewind_and_repeat':
                 from verl.workers.rollout.vllm_rollout import vLLMRewindAndRepeatRollout, vllm_mode
                 rollout_class = vLLMRewindAndRepeatRollout
+            elif self.config.rollout.name == 'vllm_answer_repeat':
+                from verl.workers.rollout.vllm_rollout import vLLMAnswerEvaluationRollout, vllm_mode
+                rollout_class = vLLMAnswerEvaluationRollout
             else:
                 raise NotImplementedError(f'Rollout name {self.config.rollout.name} is not supported')
             from verl.workers.sharding_manager import FSDPVLLMShardingManager

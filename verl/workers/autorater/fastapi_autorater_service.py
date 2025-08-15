@@ -34,6 +34,7 @@ from verl.workers.autorater.autorater_utils import (
     format_plan_evaluation_prompt,
     format_plan_quality_evaluation_prompt,
     parse_plan_evaluation_response,
+    format_coding_answer_correctness_prompt,
 )
 
 # Configure logging
@@ -165,6 +166,8 @@ class AutoRaterActor:
                     raise ValueError("Plan evaluation requires a list of plans")
                 
                 autorater_prompt = format_plan_evaluation_prompt(prompt, response)
+            elif tmpl == "coding_answer_correctness":
+                autorater_prompt = format_coding_answer_correctness_prompt(prompt, response)
             else:
                 autorater_prompt = format_autorater_prompt(
                     question=prompt,
@@ -206,6 +209,8 @@ class AutoRaterActor:
                 except Exception as e:
                     print(f"Failed to parse plan evaluation response: {e}")
                     decision = 1  # Fallback to first plan
+            elif template_types[i] == "coding_answer_correctness":
+                explanation, decision = parse_autorater_response_boolean(response)
             else:
                 explanation, decision = parse_autorater_response_scalar(response)
 
