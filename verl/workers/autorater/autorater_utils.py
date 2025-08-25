@@ -62,6 +62,7 @@ not focus on exact wording unless the exact wording is crucial to the meaning.
 3. If there are multiple questions/answers, evaluate each one and return a scalar between 0 and 1 representing the fraction of correct answers. For example, if there are two questions, output 0, 0.5, or 1. If only one question, output 0 or 1.
 4. Your final decision should be based on whether the meaning and the vital facts of the "Ground
 Truth Answer" are present in the "Predicted Answer" for each question.
+5. If math problem and the ordering of the numbers is not important, then the answer is correct if the numbers are present in the predicted answer.
 ===Input Data===
 - Predicted Answer: {predicted_answer}
 - Ground Truth Answer: {ground_truth_answer}
@@ -100,12 +101,12 @@ Decision:  """
 
 
 # # AutoRater template for evaluating helpfulness of a response
-# # explain what intermediate response is  
+# # explain what intermediate response is
 # # meta eval set for the autorater prompt, maybe as in-context examples too
 # HELPFULNESS_RATER_TEMPLATE = """===Task===
 # You are given a user question, previous context and a new intermediate response from an AI assistant.
-# In the context of interleaved reasoning, an 'intermediate response' refers to a partial output or a visible step presented by an AI assistant during its reasoning process. 
-# A good partial answer should directly address some part of a user query. 
+# In the context of interleaved reasoning, an 'intermediate response' refers to a partial output or a visible step presented by an AI assistant during its reasoning process.
+# A good partial answer should directly address some part of a user query.
 # For example, in a trip planning prompt an intermediate answer should concretely mention hotel options, or flight options rather than provide half-baked information.
 # Importantly, a good partial response goes beyond reasoning and gives actual relevant and actionable output to the user.
 # Your job is to judge whether the intermediate response is a good intermediate response.
@@ -171,6 +172,7 @@ Respond with exactly one line in this format:
 Please proceed with the evaluation.
 Decision: """
 
+
 def extract_solution(
     solution_str: str,
     template_type: str = "default",
@@ -198,9 +200,9 @@ def extract_solution(
         think_match = list(re.finditer(r"</think>", solution_str, re.IGNORECASE))
         if think_match:
             last = think_match[-1]
-            after = solution_str[last.end():].strip()
+            after = solution_str[last.end() :].strip()
             return after if after else ""
-        
+
         # Also just try to get things between <answer> and </answer>
         answer_match = list(re.finditer(r"<answer>(.*?)</answer>", solution_str, re.IGNORECASE))
         if answer_match:
@@ -212,73 +214,70 @@ def extract_solution(
 def format_autorater_prompt(question: str, predicted_answer: str, ground_truth_answer: str, template: Union[str, None] = None) -> str:
     """
     Format the auto-rater prompt with the given inputs.
-    
+
     Args:
         question: The original question
         predicted_answer: The predicted answer to evaluate
         ground_truth_answer: The ground truth answer
         template: Custom template to use (defaults to AUTO_RATER_TEMPLATE)
-    
+
     Returns:
         Formatted prompt string
     """
     if template is None:
         template = AUTO_RATER_TEMPLATE
-    
-    return template.format(
-        question=question,
-        predicted_answer=predicted_answer,
-        ground_truth_answer=ground_truth_answer
-    )
+
+    return template.format(question=question, predicted_answer=predicted_answer, ground_truth_answer=ground_truth_answer)
 
 
 def parse_autorater_response_scalar(response: str) -> tuple[str, str]:
     """
     Parse the model's response to extract explanation and decision/score.
-    
+
     Args:
         response: The raw response from the autorater model
-    
+
     Returns:
         Tuple of (explanation, score/decision as string)
     """
     # Try to find a scalar score (float between 0 and 1) on any line
-    score_pattern = r'^(0(\.\d+)?|1(\.0+)?)$'
+    score_pattern = r"^(0(\.\d+)?|1(\.0+)?)$"
     for line in response.strip().splitlines():
         line = line.strip()
         if re.match(score_pattern, line):
             return response.strip(), float(line)
     return response.strip(), 0.0
 
+
 def parse_autorater_response_boolean(response: str) -> tuple[str, str]:
     """
     Parse the model's response to extract explanation and decision.
-    
+
     Args:
         response: The raw response from the autorater model
-    
+
     Returns:
         Tuple of (explanation, decision)
     """
     # Multiple parsing patterns to catch TRUE/FALSE decisions
     decision_patterns = [
         r'Decision:\s*["\']?(TRUE|FALSE)["\']?',
-        r'\b(TRUE|FALSE)\b',
-        r'(true|false)',
-        r'answer is\s+(TRUE|FALSE)',
-        r'decision is\s+(TRUE|FALSE)',
+        r"\b(TRUE|FALSE)\b",
+        r"(true|false)",
+        r"answer is\s+(TRUE|FALSE)",
+        r"decision is\s+(TRUE|FALSE)",
     ]
-    
+
     explanation = response.strip()
     decision = "UNKNOWN"
-    
+
     # Try to find decision
     for pattern in decision_patterns:
         match = re.search(pattern, response, re.IGNORECASE)
         if match:
             decision = match.group(1).upper()
             break
-    
+
     return explanation, decision
 
 
@@ -303,7 +302,7 @@ def format_code_outline_prompt(
     return template.format(
         problem_description=problem_description.strip(),
         outline_answer=outline_answer.strip(),
-    ) 
+    )
 
 
 def format_helpfulness_prompt(question: str, predicted_answer: str, context: Optional[List[str]] = None, template: Union[str, None] = None) -> str:
@@ -324,15 +323,11 @@ def format_helpfulness_prompt(question: str, predicted_answer: str, context: Opt
 
     # Format context as numbered list if provided
     if context and isinstance(context, list):
-        context_str = "\n".join([f"{i+1}. {ans}" for i, ans in enumerate(context)])
+        context_str = "\n".join([f"{i + 1}. {ans}" for i, ans in enumerate(context)])
     else:
         context_str = "None"
-    
-    return template.format(
-        question=question,
-        predicted_answer=predicted_answer,
-        context=context_str
-    ) 
+
+    return template.format(question=question, predicted_answer=predicted_answer, context=context_str)
 
 
 # Plan evaluation template for selecting best plan from N options
@@ -413,14 +408,14 @@ Decision: """
 def format_plan_evaluation_prompt(prompt: str, plans: List[str]) -> str:
     """
     Format a prompt for plan evaluation with a prompt and list of plans.
-    
+
     Args:
         prompt: The original prompt/question
         plans: List of plans to evaluate (each plan should be a string)
-    
+
     Returns:
         str: Formatted prompt string for plan evaluation
-    
+
     Example:
         >>> prompt = "How should I implement a web scraper?"
         >>> plans = [
@@ -432,30 +427,26 @@ def format_plan_evaluation_prompt(prompt: str, plans: List[str]) -> str:
     """
     if not plans:
         raise ValueError("Plans list cannot be empty")
-    
+
     # Format the plans as numbered list
     plans_text = ""
     for i, plan in enumerate(plans, 1):
         plans_text += f"**Plan {i}:**\n{plan}\n\n"
-    
-    return PLAN_EVALUATION_TEMPLATE.format(
-        prompt=prompt,
-        plans_text=plans_text.strip(),
-        num_plans=len(plans)
-    )
+
+    return PLAN_EVALUATION_TEMPLATE.format(prompt=prompt, plans_text=plans_text.strip(), num_plans=len(plans))
 
 
 def format_plan_quality_evaluation_prompt(prompt: str, plan: str) -> str:
     """
     Format a prompt for plan quality evaluation with a prompt and a single plan.
-    
+
     Args:
         prompt: The original prompt/question
         plan: The single plan to evaluate
-    
+
     Returns:
         str: Formatted prompt string for plan quality evaluation
-    
+
     Example:
         >>> prompt = "How should I implement a web scraper?"
         >>> plan = "Use BeautifulSoup with requests library to scrape static HTML content"
@@ -463,11 +454,8 @@ def format_plan_quality_evaluation_prompt(prompt: str, plan: str) -> str:
     """
     if not plan or not plan.strip():
         raise ValueError("Plan cannot be empty")
-    
-    return PLAN_QUALITY_EVALUATION_TEMPLATE.format(
-        prompt=prompt.strip(),
-        plan=plan.strip()
-    )
+
+    return PLAN_QUALITY_EVALUATION_TEMPLATE.format(prompt=prompt.strip(), plan=plan.strip())
 
 
 # Coding answer correctness evaluation template
@@ -520,14 +508,14 @@ Decision: """
 def format_coding_answer_correctness_prompt(original_task: str, code_solution: str) -> str:
     """
     Format a prompt for coding answer correctness evaluation.
-    
+
     Args:
         original_task: The original programming task/requirement
         code_solution: The generated code solution to evaluate
-    
+
     Returns:
         str: Formatted prompt string for coding answer correctness evaluation
-    
+
     Example:
         >>> task = "Write a function to find the maximum element in a list"
         >>> solution = "def find_max(lst): return max(lst) if lst else None"
@@ -535,43 +523,39 @@ def format_coding_answer_correctness_prompt(original_task: str, code_solution: s
     """
     if not original_task or not original_task.strip():
         raise ValueError("Original task cannot be empty")
-    
+
     if not code_solution or not code_solution.strip():
         raise ValueError("Code solution cannot be empty")
-    
-    return CODING_ANSWER_CORRECTNESS_TEMPLATE.format(
-        original_task=original_task.strip(),
-        code_solution=code_solution.strip()
-    )
+
+    return CODING_ANSWER_CORRECTNESS_TEMPLATE.format(original_task=original_task.strip(), code_solution=code_solution.strip())
 
 
 def parse_plan_evaluation_response(response: str, num_plans: int) -> int:
     """
     Parse the plan evaluation response to extract the selected plan number.
-    
+
     Args:
         response: The raw response from the plan evaluation model
         num_plans: The total number of plans that were evaluated
-    
+
     Returns:
         int: The selected plan number (1-based index), or 1 if parsing fails
-    
+
     Example:
         >>> response = "3"
         >>> selected_plan = parse_plan_evaluation_response(response, 5)
         >>> print(selected_plan)  # Output: 3
     """
     # Look for numbers in the response
-    numbers = re.findall(r'\b(\d+)\b', response.strip())
-    
+    numbers = re.findall(r"\b(\d+)\b", response.strip())
+
     if numbers:
         # Get the first number found
         selected_plan = int(numbers[0])
-        
+
         # Validate that the number is within the valid range
         if 1 <= selected_plan <= num_plans:
             return selected_plan
-    
+
     # Fallback: return 1 if no valid number found
     return 1
-
