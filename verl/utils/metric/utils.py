@@ -24,13 +24,13 @@ import numpy as np
 def compute_ttft_ratio(responses: List[str]) -> Dict[str, float]:
     """
     Compute Time to First Token (TTFT) ratio - tokens to first <answer> over total response length.
-    
+
     TTFT measures how quickly the model gets to the <answer> tag within its response.
     Lower values indicate the model gets to the answer faster.
-    
+
     Args:
         responses: List of response strings to analyze
-    
+
     Returns:
         Dictionary containing TTFT mean, max, and min (values between 0 and 1)
     """
@@ -40,44 +40,44 @@ def compute_ttft_ratio(responses: List[str]) -> Dict[str, float]:
             "ttft_ratio_max": 0.0,
             "ttft_ratio_min": 0.0,
         }
-    
+
     ttft_ratios = []
-    
+
     for response in responses:
         if not response.strip():
             continue
-            
+
         # Tokenize by splitting on whitespace (simple approximation)
         tokens = response.strip().split()
         total_length = len(tokens)
-        
+
         if total_length == 0:
             continue
-        
+
         # Look for </think> tag
-        think_tag_pos = response.find('</think>')
-        
+        think_tag_pos = response.find("</think>")
+
         if think_tag_pos == -1:
             # </think> not found, set TTFT to 1.0 (worst case)
             ttft_ratio = 1.0
         else:
             # Find the first token after </think>
-            text_before_think = response[:think_tag_pos + len('</think>')]
+            text_before_think = response[: think_tag_pos + len("</think>")]
             tokens_to_think = len(text_before_think.split())
             # Normalize: tokens to think / total tokens
             ttft_ratio = tokens_to_think / total_length if total_length > 0 else 1.0
             # Ensure it's between 0 and 1
             ttft_ratio = max(0.0, min(ttft_ratio, 1.0))
-        
+
         ttft_ratios.append(ttft_ratio)
-    
+
     if not ttft_ratios:
         return {
             "ttft_ratio_mean": 0.0,
             "ttft_ratio_max": 0.0,
             "ttft_ratio_min": 0.0,
         }
-    
+
     ratios = np.array(ttft_ratios)
     return {
         "ttft_ratio_mean": float(np.mean(ratios)),

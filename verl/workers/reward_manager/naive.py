@@ -51,16 +51,16 @@ class NaiveRewardManager:
     def _apply_reward_shaping(self, score):
         """
         Apply reward shaping transformation: 1 -> 2, 0 -> -1.5
-        
+
         Args:
             score: The original score value
-            
+
         Returns:
             The transformed score
         """
         if not self.enable_reward_shaping:
             return score
-            
+
         if score == 1.0:
             return 2.0
         elif score == 0.0:
@@ -123,14 +123,14 @@ class NaiveRewardManager:
                 # Store the information including original reward
                 for key, value in score.items():
                     reward_extra_info[key].append(value)
-                
+
                 # Apply reward shaping if enabled
                 original_reward = reward
                 if self.enable_reward_shaping:
                     reward = self._apply_reward_shaping(reward)
                     reward_extra_info["original_score"].append(original_reward)
                     reward_extra_info["shaped_score"].append(reward)
-                
+
                 # Add format reward if enabled
                 if self.enable_format_reward:
                     reward_extra_info["format_score"].append(format_score)
@@ -139,14 +139,14 @@ class NaiveRewardManager:
                     reward_extra_info["combined_score"].append(reward)
             else:
                 reward = score
-                
+
                 # Apply reward shaping if enabled
                 original_reward = reward
                 if self.enable_reward_shaping:
                     reward = self._apply_reward_shaping(reward)
                     reward_extra_info["original_score"].append(original_reward)
                     reward_extra_info["shaped_score"].append(reward)
-                
+
                 if self.enable_format_reward:
                     reward_extra_info["content_score"].append(reward)
                     reward_extra_info["format_score"].append(format_score)
@@ -169,11 +169,11 @@ class NaiveRewardManager:
                         print(f"[{key}]", value)
                 else:
                     print("[content_score]", score)
-                
+
                 if self.enable_reward_shaping:
                     print("[original_score]", original_reward)
                     print("[shaped_score]", reward if not self.enable_format_reward else reward_extra_info["shaped_score"][-1])
-                
+
                 if self.enable_format_reward:
                     print("[format_score]", format_score)
                     print("[final_reward]", reward)

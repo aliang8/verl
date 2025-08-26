@@ -46,6 +46,7 @@ class Test(unittest.TestCase):
 ```
 """
 
+
 class SFTDataset(Dataset):
     """
     This is an in-memory SFTDataset
@@ -61,8 +62,8 @@ class SFTDataset(Dataset):
         response_dict_keys = config.get("response_dict_keys", None)
         max_length = config.get("max_length", 1024)
         truncation = config.get("truncation", "error")
-        use_shm = config.get('use_shm', False)
-        
+        use_shm = config.get("use_shm", False)
+
         # System template configuration
         self.system_template_type = config.get("system_template_type", "interleave")  # Default to interleaved reasoning
         self.use_system_template = config.get("use_system_template", True)  # Enable by default
@@ -129,14 +130,14 @@ class SFTDataset(Dataset):
         if isinstance(self.prompts, pd.DataFrame):
             self.prompts = self.prompts.squeeze()
         self.prompts = self.prompts.tolist()
-        
+
         # Check if dataset has system instruction type column
         self.has_system_instruction_type = self.use_dataset_system_instruction and "system_instruction_type" in self.dataframe.columns
         if self.has_system_instruction_type:
             print(f"Found system_instruction_type column in dataset")
         else:
             print("Using default system instruction template")
-            
+
         self.responses = self.dataframe[self.response_key]
         for key in self.response_dict_keys:
             try:
@@ -166,11 +167,8 @@ class SFTDataset(Dataset):
                 system_message = format_system_message(instruction_type)
             else:
                 system_message = format_system_message(self.system_template_type)
-                
-            prompt_chat = [
-                system_message,
-                {"role": "user", "content": prompt}
-            ]
+
+            prompt_chat = [system_message, {"role": "user", "content": prompt}]
         else:
             prompt_chat = [{"role": "user", "content": prompt}]
 

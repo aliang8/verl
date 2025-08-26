@@ -51,16 +51,7 @@ from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
 from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
 from verl.utils.fs import copy_to_local
-from verl.utils.fsdp_utils import (
-    CPUOffloadPolicy,
-    MixedPrecisionPolicy,
-    apply_fsdp2,
-    fsdp2_load_full_state_dict,
-    get_fsdp_wrap_policy,
-    get_init_weight_context_manager,
-    init_fn,
-    fsdp2_clip_grad_norm_
-)
+from verl.utils.fsdp_utils import CPUOffloadPolicy, MixedPrecisionPolicy, apply_fsdp2, fsdp2_load_full_state_dict, get_fsdp_wrap_policy, get_init_weight_context_manager, init_fn, fsdp2_clip_grad_norm_
 from verl.utils.torch_dtypes import PrecisionType
 from verl.utils.torch_functional import get_cosine_schedule_with_warmup, get_wsd_schedule_with_warmup
 from verl.utils.py_functional import convert_to_regular_types
@@ -109,11 +100,11 @@ class FSDPSFTTrainer:
             print(f"Using remove padding: {self.use_remove_padding}")
 
         self._build_dataloader(train_dataset, val_dataset)
-        
+
         # Print training data example with system prompt
         if self.device_mesh.get_rank() == 0:
             self._print_training_example()
-        
+
         # build model
         self._build_model_optimizer()
 
@@ -176,88 +167,83 @@ class FSDPSFTTrainer:
 
     def _print_training_example(self):
         """Print an example of how training data is formatted with system prompt."""
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("📚 TRAINING DATA EXAMPLE WITH SYSTEM PROMPT")
-        print("="*80)
-        
+        print("=" * 80)
+
         try:
             # Get the first training example
             example = self.train_dataset[0]
-            
+
             # Check if dataset has system template configuration
-            use_system_template = getattr(self.train_dataset, 'use_system_template', False)
-            system_template_type = getattr(self.train_dataset, 'system_template_type', 'none')
-            
+            use_system_template = getattr(self.train_dataset, "use_system_template", False)
+            system_template_type = getattr(self.train_dataset, "system_template_type", "none")
+
             print(f"🔸 System Template Enabled: {use_system_template}")
             print(f"🔸 System Template Type: {system_template_type}")
             print()
-            
+
             # Get raw data
             prompt = self.train_dataset.prompts[0]
             response = self.train_dataset.responses[0]
-            
+
             print("🔸 Raw Training Data:")
             print("-" * 40)
             print(f"Prompt: {prompt}")
             print(f"Response: {response}")
             print()
-            
+
             # Show system prompt if enabled
             if use_system_template:
                 from verl.utils.templates import get_system_template
+
                 system_content = get_system_template(system_template_type)
                 print("🔸 System Prompt:")
                 print("-" * 40)
                 print(system_content)
                 print()
-            
+
             # Show how chat template would format this
             print("🔸 Formatted Chat Template:")
             print("-" * 40)
-            
+
             if use_system_template:
                 from verl.utils.templates import format_system_message
-                messages = [
-                    format_system_message(system_template_type),
-                    {"role": "user", "content": prompt}
-                ]
+
+                messages = [format_system_message(system_template_type), {"role": "user", "content": prompt}]
             else:
                 messages = [{"role": "user", "content": prompt}]
-            
+
             # Format the prompt part
-            formatted_prompt = self.tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tokenize=False
-            )
-            
+            formatted_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+
             print("Formatted Prompt:")
             print(formatted_prompt)
             print()
             print("Expected Response:")
             print(response)
             print()
-            
+
             # Show token counts
             prompt_tokens = self.tokenizer.encode(formatted_prompt)
             response_tokens = self.tokenizer.encode(response)
             total_tokens = len(prompt_tokens) + len(response_tokens)
-            
+
             print("🔸 Token Information:")
             print("-" * 40)
             print(f"Prompt tokens: {len(prompt_tokens)}")
             print(f"Response tokens: {len(response_tokens)}")
             print(f"Total tokens: {total_tokens}")
             print(f"Max length configured: {self.train_dataset.max_length}")
-            
+
             if total_tokens > self.train_dataset.max_length:
                 print(f"⚠️  WARNING: This example exceeds max_length!")
-            
+
         except Exception as e:
             print(f"❌ Error showing training example: {e}")
             print("This might happen if the dataset format is different than expected.")
-        
-        print("="*80)
+
+        print("=" * 80)
         print()
 
     def _build_model_optimizer(self):
@@ -355,8 +341,7 @@ class FSDPSFTTrainer:
             )
         elif fsdp_strategy == "fsdp2":
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
-            mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32,
-                                             cast_forward_inputs=True)
+            mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, cast_forward_inputs=True)
 
             fsdp_kwargs = {
                 "mesh": self.device_mesh,
@@ -402,11 +387,11 @@ class FSDPSFTTrainer:
             checkpoint_dir = self.config.trainer.default_local_dir
             if not os.path.exists(checkpoint_dir):
                 return None
-                
-            checkpoints = [d for d in os.listdir(checkpoint_dir) if d.startswith('global_step_')]
+
+            checkpoints = [d for d in os.listdir(checkpoint_dir) if d.startswith("global_step_")]
             if not checkpoints:
                 return None
-                
+
             # Sort by step number
             checkpoints.sort(key=lambda x: extract_step(x) or 0)
             latest_checkpoint = os.path.join(checkpoint_dir, checkpoints[-1])
@@ -416,67 +401,62 @@ class FSDPSFTTrainer:
         """Perform validation rollouts using external script."""
         if self.device_mesh.get_rank() != 0:
             return
-            
+
         print(f"Performing validation rollouts for step {step}...")
-        
+
         try:
             # Get the latest checkpoint
             latest_checkpoint = self._get_latest_checkpoint()
             if latest_checkpoint is None:
                 print("No checkpoint found for rollouts")
                 return
-                
+
             # Build command to run external rollout script
-            script_path = os.path.join(os.path.dirname(__file__), 'generate_validation_rollouts.py')
-            
+            script_path = os.path.join(os.path.dirname(__file__), "generate_validation_rollouts.py")
+
             # Get config paths
             val_data_path = self.config.data.val_files
-            
+
             # Build command arguments
-            cmd = [
-                'python', script_path,
-                '--checkpoint_dir', latest_checkpoint,
-                '--val_data', val_data_path,
-                '--step', str(step)
-            ]
-            
+            cmd = ["python", script_path, "--checkpoint_dir", latest_checkpoint, "--val_data", val_data_path, "--step", str(step)]
+
             # Add vLLM config if available
-            vllm_config = getattr(self.config.trainer, 'vllm_config', {})
+            vllm_config = getattr(self.config.trainer, "vllm_config", {})
             if vllm_config:
-                if 'tensor_parallel_size' in vllm_config:
-                    cmd.extend(['--tensor_parallel_size', str(vllm_config['tensor_parallel_size'])])
-                if 'dtype' in vllm_config:
-                    cmd.extend(['--dtype', vllm_config['dtype']])
-                if 'max_model_len' in vllm_config:
-                    cmd.extend(['--max_model_len', str(vllm_config['max_model_len'])])
-                if 'gpu_memory_utilization' in vllm_config:
-                    cmd.extend(['--gpu_memory_utilization', str(vllm_config['gpu_memory_utilization'])])
-                if 'enforce_eager' in vllm_config and vllm_config['enforce_eager']:
-                    cmd.append('--enforce_eager')
-                if 'disable_custom_all_reduce' in vllm_config and vllm_config['disable_custom_all_reduce']:
-                    cmd.append('--disable_custom_all_reduce')
-                if 'max_num_batched_tokens' in vllm_config:
-                    cmd.extend(['--max_num_batched_tokens', str(vllm_config['max_num_batched_tokens'])])
-                if 'distributed_executor_backend' in vllm_config:
-                    cmd.extend(['--distributed_executor_backend', vllm_config['distributed_executor_backend']])
-            
+                if "tensor_parallel_size" in vllm_config:
+                    cmd.extend(["--tensor_parallel_size", str(vllm_config["tensor_parallel_size"])])
+                if "dtype" in vllm_config:
+                    cmd.extend(["--dtype", vllm_config["dtype"]])
+                if "max_model_len" in vllm_config:
+                    cmd.extend(["--max_model_len", str(vllm_config["max_model_len"])])
+                if "gpu_memory_utilization" in vllm_config:
+                    cmd.extend(["--gpu_memory_utilization", str(vllm_config["gpu_memory_utilization"])])
+                if "enforce_eager" in vllm_config and vllm_config["enforce_eager"]:
+                    cmd.append("--enforce_eager")
+                if "disable_custom_all_reduce" in vllm_config and vllm_config["disable_custom_all_reduce"]:
+                    cmd.append("--disable_custom_all_reduce")
+                if "max_num_batched_tokens" in vllm_config:
+                    cmd.extend(["--max_num_batched_tokens", str(vllm_config["max_num_batched_tokens"])])
+                if "distributed_executor_backend" in vllm_config:
+                    cmd.extend(["--distributed_executor_backend", vllm_config["distributed_executor_backend"]])
+
             # Add rollout config if available
-            rollout_config = getattr(self.config.trainer, 'rollout_config', {})
+            rollout_config = getattr(self.config.trainer, "rollout_config", {})
             if rollout_config:
-                if 'num_samples' in rollout_config:
-                    cmd.extend(['--num_samples', str(rollout_config['num_samples'])])
-                if 'max_tokens' in rollout_config:
-                    cmd.extend(['--max_tokens', str(rollout_config['max_tokens'])])
-                if 'temperature' in rollout_config:
-                    cmd.extend(['--temperature', str(rollout_config['temperature'])])
-                if 'top_p' in rollout_config:
-                    cmd.extend(['--top_p', str(rollout_config['top_p'])])
-            
+                if "num_samples" in rollout_config:
+                    cmd.extend(["--num_samples", str(rollout_config["num_samples"])])
+                if "max_tokens" in rollout_config:
+                    cmd.extend(["--max_tokens", str(rollout_config["max_tokens"])])
+                if "temperature" in rollout_config:
+                    cmd.extend(["--temperature", str(rollout_config["temperature"])])
+                if "top_p" in rollout_config:
+                    cmd.extend(["--top_p", str(rollout_config["top_p"])])
+
             print(f"Running rollout command: {' '.join(cmd)}")
-            
+
             # Run the external script
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)  # 1 hour timeout
-            
+
             if result.returncode == 0:
                 print("Validation rollouts completed successfully")
                 print(result.stdout)
@@ -484,7 +464,7 @@ class FSDPSFTTrainer:
                 print(f"Validation rollouts failed with return code {result.returncode}")
                 print(f"STDOUT: {result.stdout}")
                 print(f"STDERR: {result.stderr}")
-                
+
         except subprocess.TimeoutExpired:
             print("Validation rollouts timed out after 1 hour")
         except Exception as e:
@@ -593,9 +573,9 @@ class FSDPSFTTrainer:
             loss = self._compute_loss_and_backward(batch=micro_batch) / n_micro_batches
             step_loss += loss.item()
 
-        if self.config.model.strategy == 'fsdp':
+        if self.config.model.strategy == "fsdp":
             grad_norm = self.fsdp_model.clip_grad_norm_(max_norm=self.config.optim.clip_grad)
-        elif self.config.model.strategy == 'fsdp2':
+        elif self.config.model.strategy == "fsdp2":
             grad_norm = fsdp2_clip_grad_norm_(self.fsdp_model.parameters(), max_norm=self.config.optim.clip_grad)
         else:
             raise NotImplementedError(f"not implement {self.config.model.strategy}")
@@ -707,12 +687,7 @@ class FSDPSFTTrainer:
 
         for epoch in range(self.config.trainer.total_epochs):
             self.train_sampler.set_epoch(epoch=epoch)
-            for data in tqdm(
-                self.train_dataloader,
-                total=self.steps_per_epoch,
-                desc=f"Epoch {epoch + 1}/{self.config.trainer.total_epochs}",
-                disable=rank != 0
-            ):
+            for data in tqdm(self.train_dataloader, total=self.steps_per_epoch, desc=f"Epoch {epoch + 1}/{self.config.trainer.total_epochs}", disable=rank != 0):
                 global_step += 1
                 data = TensorDict(data, batch_size=self.config.data.train_batch_size).to(self.device_name)
                 metric = self.training_step(data)
@@ -737,11 +712,9 @@ class FSDPSFTTrainer:
                         tracking.log(data=metric, step=global_step)
                         last_valid_metric = metric
                     torch.distributed.barrier()
-                    
+
                     # Perform validation rollouts if enabled
-                    if (getattr(self.config.trainer, 'enable_val_rollouts', False) and
-                        getattr(self.config.trainer, 'rollout_freq', 0) > 0 and
-                        global_step % self.config.trainer.rollout_freq == 0):
+                    if getattr(self.config.trainer, "enable_val_rollouts", False) and getattr(self.config.trainer, "rollout_freq", 0) > 0 and global_step % self.config.trainer.rollout_freq == 0:
                         self._perform_validation_rollouts(global_step)
                         torch.distributed.barrier()
 
@@ -768,7 +741,7 @@ def run_sft(config):
     tokenizer = hf_tokenizer(local_model_path, trust_remote_code=config.model.trust_remote_code)
     train_dataset = create_sft_dataset(config.data.train_files, config.data, tokenizer)
     val_dataset = create_sft_dataset(config.data.val_files, config.data, tokenizer)
-    
+
     trainer = FSDPSFTTrainer(config=config, device_mesh=device_mesh, ulysses_device_mesh=ulysses_device_mesh, tokenizer=tokenizer, train_dataset=train_dataset, val_dataset=val_dataset)
 
     trainer.fit()
@@ -784,17 +757,17 @@ def main(config):
 def _parse_file_paths(data_paths):
     """Parse file paths, handling both single files and lists."""
     # Handle OmegaConf ListConfig and regular lists first
-    if hasattr(data_paths, '__iter__') and not isinstance(data_paths, str):
+    if hasattr(data_paths, "__iter__") and not isinstance(data_paths, str):
         # It's already iterable (list, tuple, ListConfig, etc.)
         return list(data_paths)
     elif isinstance(data_paths, str):
         # Check if it's a list format from command line
-        if data_paths.startswith('[') and data_paths.endswith(']'):
+        if data_paths.startswith("[") and data_paths.endswith("]"):
             # Remove brackets and split by comma
             inner_content = data_paths[1:-1].strip()
             if inner_content:
                 # Split by comma and clean up each path
-                return [path.strip().strip("'\"") for path in inner_content.split(',') if path.strip()]
+                return [path.strip().strip("'\"") for path in inner_content.split(",") if path.strip()]
             else:
                 return []
         else:
@@ -809,7 +782,7 @@ def create_sft_dataset(data_paths, data_config, tokenizer):
     """Create a dataset."""
     # Parse file paths to handle both single files and lists
     parsed_paths = _parse_file_paths(data_paths)
-    
+
     # build dataset
     # First check if a custom dataset class is specified
     if data_config.custom_cls.get("path", None):

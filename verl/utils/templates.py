@@ -58,9 +58,7 @@ CONFIDENCE_TEMPLATE = (
     "certain, while 0.0 means you are completely uncertain. Let's think step by step."
 )
 
-DEFAULT_TEMPLATE = (
-    "You are a helpful and highly intelligent assistant. Let's think step by step."
-)
+DEFAULT_TEMPLATE = "You are a helpful and highly intelligent assistant. Let's think step by step."
 
 CODE_GENERATION_TEMPLATE = (
     "**Objective:**\n"
@@ -78,12 +76,10 @@ CODE_GENERATION_TEMPLATE = (
 )
 
 PLAN_FIRST_TEMPLATE = (
-    "You are a coding assistant that solves problems using a plan-first approach. Always interleave <think></think> and <answer></answer> tags. For the first response, provide a detailed plan. Then implement the solution following your plan."
+    "You are a helpful assistant that solves problems using a plan-first approach. Always interleave <think></think> and <answer></answer> tags. For the first response, provide a detailed plan. Then implement the solution following your plan in the subsequent <answer></answer> tags."
 )
 
-UNDERSPECIFIED_HANDLING_TEMPLATE = (
-    "You are a helpful assistant. If the prompt is underspecified or ambiguous, you must choose a single, reasonable interpretation of the prompt and proceed with that interpretation. First, state your interpretation and in subsequent responses. Think about the assumptions and the respond and interleave <think></think> and <answer></answer> tags."
-)
+UNDERSPECIFIED_HANDLING_TEMPLATE = "You are a helpful assistant. If the prompt is underspecified or ambiguous, you must choose a single, reasonable interpretation of the prompt and proceed with that interpretation. First, state your interpretation and in subsequent responses. Think about the assumptions and the respond and interleave <think></think> and <answer></answer> tags."
 
 # Template mappings
 TEMPLATE_MAPPINGS = {
@@ -102,7 +98,7 @@ TEMPLATE_MAPPINGS = {
 def get_system_template(template_type: str = "default") -> str:
     """
     Get the system template based on the specified type.
-    
+
     Args:
         template_type: Type of template to use. Options:
             - "tool": Basic tool use template
@@ -113,33 +109,30 @@ def get_system_template(template_type: str = "default") -> str:
             - "interleave": Interleaved reasoning template
             - "code": Code generation template with specific formatting rules
             - "plan_first": Plan-first approach template
-    
+
     Returns:
         str: The system template content
-    
+
     Raises:
         ValueError: If template_type is not recognized
     """
     if template_type not in TEMPLATE_MAPPINGS:
         available_types = ", ".join(TEMPLATE_MAPPINGS.keys())
         raise ValueError(f"Unknown template type '{template_type}'. Available types: {available_types}")
-    
+
     return TEMPLATE_MAPPINGS[template_type]
 
 
 def format_system_message(template_type: str = "default", custom_content: str = None) -> dict:
     """
     Create a formatted system message for chat templates.
-    
+
     Args:
         template_type: Type of template to use
         custom_content: If provided, use this instead of template lookup
-    
+
     Returns:
         dict: Formatted system message with role and content
     """
     content = custom_content if custom_content is not None else get_system_template(template_type)
-    return {
-        "role": "system",
-        "content": content
-    } 
+    return {"role": "system", "content": content}

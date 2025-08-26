@@ -27,8 +27,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_dir", default="~/data/gsm8k_sft")
     parser.add_argument("--hdfs_dir", default=None)
-    parser.add_argument("--add_instruction", action="store_true", 
-                       help="Add step-by-step instruction to questions")
+    parser.add_argument("--add_instruction", action="store_true", help="Add step-by-step instruction to questions")
 
     args = parser.parse_args()
 
@@ -39,20 +38,17 @@ if __name__ == "__main__":
     train_dataset = dataset["train"]
     test_dataset = dataset["test"]
 
-    instruction_text = 'Let\'s think step by step and output the final answer in \\boxed{answer here}.'
+    instruction_text = "Let's think step by step and output the final answer in \\boxed{answer here}."
 
     def process_fn(example):
         question = example["question"]
         answer = example["answer"]
-        
+
         # Optionally add instruction to question
         if args.add_instruction:
             question = question + " " + instruction_text
-        
-        return {
-            "question": question,
-            "answer": answer
-        }
+
+        return {"question": question, "answer": answer}
 
     train_dataset = train_dataset.map(function=process_fn)
     test_dataset = test_dataset.map(function=process_fn)
@@ -61,19 +57,19 @@ if __name__ == "__main__":
     print(f"\nExample of processed GSM8K SFT data:")
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Test dataset size: {len(test_dataset)}")
-    
+
     if len(train_dataset) > 0:
         example = train_dataset[0]
         print(f"\nTrain example:")
         print(f"Question: {example['question'][:200]}...")
         print(f"Answer: {example['answer'][:200]}...")
-    
+
     if len(test_dataset) > 0:
         example = test_dataset[0]
         print(f"\nTest example:")
         print(f"Question: {example['question'][:200]}...")
         print(f"Answer: {example['answer'][:200]}...")
-    
+
     print()
 
     local_dir = args.local_dir
@@ -90,4 +86,4 @@ if __name__ == "__main__":
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
         copy(src=local_dir, dst=hdfs_dir)
-        print(f"Copied to HDFS: {hdfs_dir}") 
+        print(f"Copied to HDFS: {hdfs_dir}")

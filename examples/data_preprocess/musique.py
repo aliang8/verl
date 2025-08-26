@@ -31,17 +31,17 @@ def extract_final_answer(answer_text):
     """
     if not answer_text:
         return ""
-    
+
     # Clean up the answer text
     answer = str(answer_text).strip()
-    
+
     # Remove common prefixes/suffixes if they exist
-    answer = re.sub(r'^(the answer is:?\s*)', '', answer, flags=re.IGNORECASE)
-    answer = re.sub(r'^(answer:?\s*)', '', answer, flags=re.IGNORECASE)
-    
+    answer = re.sub(r"^(the answer is:?\s*)", "", answer, flags=re.IGNORECASE)
+    answer = re.sub(r"^(answer:?\s*)", "", answer, flags=re.IGNORECASE)
+
     # Remove trailing punctuation if it's just a period
-    answer = re.sub(r'\.$', '', answer)
-    
+    answer = re.sub(r"\.$", "", answer)
+
     return answer.strip()
 
 
@@ -52,16 +52,17 @@ def filter_by_hops(dataset, hop_types):
         dataset: The dataset to filter
         hop_types: List of hop types to include (e.g., ["3hop", "4hop"])
     """
+
     def should_include(example):
         if "id" not in example:
             return False
-        
+
         dataset_id = example["id"]
         for hop_type in hop_types:
             if dataset_id.startswith(f"{hop_type}"):
                 return True
         return False
-    
+
     return dataset.filter(should_include)
 
 
@@ -69,9 +70,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_dir", default="~/data/musique")
     parser.add_argument("--hdfs_dir", default=None)
-    parser.add_argument("--hop_types", nargs='+', default=["3hop", "4hop"],
-                        choices=["2hop", "3hop", "4hop"],
-                        help="Which hop types to include (e.g., 3hop 4hop)")
+    parser.add_argument("--hop_types", nargs="+", default=["3hop", "4hop"], choices=["2hop", "3hop", "4hop"], help="Which hop types to include (e.g., 3hop 4hop)")
 
     args = parser.parse_args()
 
@@ -84,17 +83,17 @@ if __name__ == "__main__":
 
     train_dataset = dataset["train"]
     test_dataset = dataset["validation"]  # MuSiQue uses "validation" as test split
-    
+
     instruction_following = 'Let\'s think step by step and output the final answer after "####".'
 
     print(f"Original train dataset size: {len(train_dataset)}")
     print(f"Original test dataset size: {len(test_dataset)}")
-    
+
     # Filter datasets by hop types
     print(f"Filtering for hop types: {args.hop_types}")
     train_dataset = filter_by_hops(train_dataset, args.hop_types)
     test_dataset = filter_by_hops(test_dataset, args.hop_types)
-    
+
     print(f"Filtered train dataset size: {len(train_dataset)}")
     print(f"Filtered test dataset size: {len(test_dataset)}")
 
@@ -107,7 +106,7 @@ if __name__ == "__main__":
 
             answer_raw = example.pop("answer")
             solution = extract_final_answer(answer_raw)
-            
+
             # Get additional fields that might be useful
             extra_info = {
                 "split": split,
@@ -115,7 +114,7 @@ if __name__ == "__main__":
                 "answer": answer_raw,
                 "question": question_raw,
             }
-            
+
             # Add other available fields from the dataset
             # if "id" in example:
             #     dataset_id = example.pop("id")
@@ -155,13 +154,13 @@ if __name__ == "__main__":
         print(f"Ground truth: {example['reward_model']['ground_truth']}")
         print(f"Data source: {example['data_source']}")
         print(f"Ability: {example['ability']}")
-        
+
         # Show some extra info if available
-        if "dataset_id" in example['extra_info']:
+        if "dataset_id" in example["extra_info"]:
             print(f"Dataset ID: {example['extra_info']['dataset_id']}")
-        if "hop_type" in example['extra_info']:
+        if "hop_type" in example["extra_info"]:
             print(f"Hop type: {example['extra_info']['hop_type']}")
-        if "answerable" in example['extra_info']:
+        if "answerable" in example["extra_info"]:
             print(f"Answerable: {example['extra_info']['answerable']}")
         print()
 
@@ -174,4 +173,4 @@ if __name__ == "__main__":
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
 
-        copy(src=local_dir, dst=hdfs_dir) 
+        copy(src=local_dir, dst=hdfs_dir)

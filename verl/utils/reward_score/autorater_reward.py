@@ -11,19 +11,20 @@ from collections import defaultdict
 from verl import DataProto
 from verl.trainer.ppo.reward_fns import format_check_reward
 
+
 class AutoRaterReward:
     """
     AutoRater-based reward function that uses a dedicated AutoRaterWorker with fixed base model weights.
-    
+
     This reward function evaluates responses by comparing them against ground truth answers
     using the AutoRaterWorker's own vLLM instance, which maintains the original base model weights
     throughout training to ensure consistent evaluation.
     """
-    
+
     def __init__(self, autorater_worker_group=None, config=None, tokenizer=None):
         """
         Initialize the AutoRater reward function.
-        
+
         Args:
             autorater_worker_group: The AutoRaterWorker group that has autorater capability
             config: Configuration for the reward function
@@ -36,27 +37,27 @@ class AutoRaterReward:
 
         if self.autorater_wg is not None:
             self.tokenizer = self.autorater_wg.get_tokenizer()[0]
-        
+
         # Reward weights
         self.autorater_weight = self.config.get("autorater_weight", 1.0)
-        
+
     def __call__(self, data: DataProto, return_dict: bool = False) -> Union[torch.Tensor, Dict[str, Any]]:
         """
         Compute rewards using the AutoRaterWorker's fixed base model.
-        
+
         Args:
             data: DataProto containing batch data
             return_dict: Whether to return additional information
-            
+
         Returns:
             Reward tensor or dictionary with reward and extra info
         """
         if self.autorater_wg is None:
             raise ValueError("AutoRaterWorker group not initialized")
-        
+
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
-        
+
         # Create a single batch DataProto for all items
         # Note: AutoRater doesn't need the actual responses for evaluation, just the prompts and metadata
         # The responses will be decoded by the AutoRater worker for evaluation
@@ -64,17 +65,15 @@ class AutoRaterReward:
             tensors={
                 "prompts": data.batch["prompts"],
                 "responses": data.batch["responses"],  # AutoRater will decode these for evaluation
-                "attention_mask": data.batch["attention_mask"]
+                "attention_mask": data.batch["attention_mask"],
             },
-            non_tensors={
-                "reward_model": np.array([item.non_tensor_batch["reward_model"] for item in [data[i] for i in range(len(data))]], dtype=object)
-            }
+            non_tensors={"reward_model": np.array([item.non_tensor_batch["reward_model"] for item in [data[i] for i in range(len(data))]], dtype=object)},
         )
-        
+
         # Calculate the number of workers from the actor_rollout worker group
         num_workers = 8  # Default to 8, but we could get this from the worker group
         batch_size = len(batch_data)
-        
+
         # Calculate the chunk size that's divisible by num_workers
         # We'll pad the batch to make it divisible
         remainder = batch_size % num_workers
@@ -85,18 +84,16 @@ class AutoRaterReward:
                 tensors={
                     "prompts": torch.cat([batch_data.batch["prompts"], batch_data.batch["prompts"][-pad_size:]], dim=0),
                     "responses": torch.cat([batch_data.batch["responses"], batch_data.batch["responses"][-pad_size:]], dim=0),
-                    "attention_mask": torch.cat([batch_data.batch["attention_mask"], batch_data.batch["attention_mask"][-pad_size:]], dim=0)
+                    "attention_mask": torch.cat([batch_data.batch["attention_mask"], batch_data.batch["attention_mask"][-pad_size:]], dim=0),
                 },
-                non_tensors={
-                    "reward_model": np.concatenate([batch_data.non_tensor_batch["reward_model"], batch_data.non_tensor_batch["reward_model"][-pad_size:]])
-                }
+                non_tensors={"reward_model": np.concatenate([batch_data.non_tensor_batch["reward_model"], batch_data.non_tensor_batch["reward_model"][-pad_size:]])},
             )
             batch_data = padded_batch_data
             print(f"Padded batch from {batch_size} to {len(batch_data)} items to make it divisible by {num_workers}")
-        
+
         # Evaluate using the AutoRaterWorker's compute_autorater_score method
         autorater_output = self.autorater_wg.compute_autorater_score(batch_data)
-                
+
         # Extract scores and decisions
         autorater_scores = autorater_output.batch["autorater_scores"]  # Shape: (batch_size,)
         autorater_decisions = autorater_output.batch["autorater_decisions"]  # Shape: (batch_size,)
@@ -109,48 +106,44 @@ class AutoRaterReward:
                 autorater_output.non_tensor_batch["autorater_explanations"] = autorater_output.non_tensor_batch["autorater_explanations"][:batch_size]
             if "autorater_raw_responses" in autorater_output.non_tensor_batch:
                 autorater_output.non_tensor_batch["autorater_raw_responses"] = autorater_output.non_tensor_batch["autorater_raw_responses"][:batch_size]
-        
+
         # Process each item to apply format penalty and store rewards
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
-            
+
             # Extract response for format checking
             response_ids = data_item.batch["responses"]
             prompt_length = data_item.batch["prompts"].shape[-1]
             valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
             valid_response_ids = response_ids[:valid_response_length]
-            
+
             # Decode for format checking
             predicted_answer = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-            
+
             autorater_score = autorater_scores[i].item()
             autorater_decision = autorater_decisions[i].item()
-            
+
             # Apply format penalty using the format_check_reward function
             format_score = format_check_reward(predicted_answer)
-            
+
             # Combine autorater and format scores
             final_score = self.autorater_weight * autorater_score
-            
+
             # Store the reward at the last token of the response
             reward_tensor[i, valid_response_length - 1] = final_score
-            
+
             # Collect extra information
             reward_extra_info["autorater_scores"].append(autorater_score)
             reward_extra_info["autorater_decisions"].append(autorater_decision)
             reward_extra_info["format_scores"].append(format_score)
             reward_extra_info["final_scores"].append(final_score)
-            
+
             # Add explanations if available
             if "autorater_explanations" in autorater_output.non_tensor_batch:
-                reward_extra_info["autorater_explanations"].append(
-                    autorater_output.non_tensor_batch["autorater_explanations"][i]
-                )
+                reward_extra_info["autorater_explanations"].append(autorater_output.non_tensor_batch["autorater_explanations"][i])
             if "autorater_raw_responses" in autorater_output.non_tensor_batch:
-                reward_extra_info["autorater_raw_responses"].append(
-                    autorater_output.non_tensor_batch["autorater_raw_responses"][i]
-                )
-        
+                reward_extra_info["autorater_raw_responses"].append(autorater_output.non_tensor_batch["autorater_raw_responses"][i])
+
         if return_dict:
             # Add summary statistics - make sure all values are lists for extending
             extra_info = {
@@ -163,22 +156,19 @@ class AutoRaterReward:
                 "final_scores": reward_extra_info["final_scores"],
             }
 
-            return {
-                "reward_tensor": reward_tensor,
-                "reward_extra_info": extra_info
-            }
-        
+            return {"reward_tensor": reward_tensor, "reward_extra_info": extra_info}
+
         return reward_tensor
 
 
 def create_autorater_reward_fn(autorater_worker_group, config: Dict[str, Any] = None):
     """
     Factory function to create an AutoRater reward function that uses the AutoRaterWorker.
-    
+
     Args:
         autorater_worker_group: The AutoRaterWorker group with autorater capability
         config: Configuration dictionary for the reward function
-        
+
     Returns:
         Configured AutoRater reward function
     """

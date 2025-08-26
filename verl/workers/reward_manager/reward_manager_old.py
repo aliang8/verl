@@ -2,21 +2,21 @@ import logging
 import os
 from collections import defaultdict
 from typing import Any, Dict, List, Union, Tuple, Optional
-import requests # Added this import
+import requests  # Added this import
 
 import numpy as np  # type: ignore
 import torch  # type: ignore
 from omegaconf import DictConfig, OmegaConf  # type: ignore
 from transformers import AutoTokenizer  # type: ignore
 
-from verl import DataProto # type: ignore
+from verl import DataProto  # type: ignore
 from verl.single_controller.base.decorator import register as base_register
 from verl.workers.reward_manager.registry import register
 from verl.utils.reward_score.autorater_reward import AutoRaterReward
 from verl.trainer.ppo.reward_fns import format_check_reward
-from verl.workers.autorater.autorater_utils import extract_solution # Added extract_solution and format_autorater_prompt
-from verl.workers.code_evaluator import CodeEvaluator # Import the new CodeEvaluator
-from verl.trainer.ppo.reward_fns import count_interleaved_answers, interleaved_format_reward # Import interleaved functions
+from verl.workers.autorater.autorater_utils import extract_solution  # Added extract_solution and format_autorater_prompt
+from verl.workers.code_evaluator import CodeEvaluator  # Import the new CodeEvaluator
+from verl.trainer.ppo.reward_fns import count_interleaved_answers, interleaved_format_reward  # Import interleaved functions
 from verl.utils.autorater_client import call_autorater_service  # New modular AutoRater client
 from verl.utils.debug.performance import _timer  # Add timing support
 
@@ -57,12 +57,12 @@ class RewardManager:
         self.template_type = template_type
 
         self.enable_format_reward = self.config.get("enable_format_reward", True)
-        self.format_reward_weight = self.config.get("format_reward_weight", 1.0) # Default to 1.0 for now, can be adjusted
-        
+        self.format_reward_weight = self.config.get("format_reward_weight", 1.0)  # Default to 1.0 for now, can be adjusted
+
         # Interleaved format reward configuration
         self.interleaved_format_reward_weight = self.config.get("interleaved_format_reward_weight", 1.0)
         self.min_answer_count_for_interleaved = self.config.get("min_answer_count_for_interleaved", 3)
-        
+
         # Initialize CodeEvaluator for code-related evaluation
         code_evaluator_config = self.config.get("code_evaluator", {})
         self.code_evaluator = CodeEvaluator(
@@ -71,7 +71,7 @@ class RewardManager:
             template_type=template_type,
             autorater_service_url=self.autorater_base_url,
         )
-        
+
         # Error tracking configuration
         self.enable_error_tracking = self.config.get("enable_error_tracking", True)
         self.error_tracking_output_dir = self.config.get("error_tracking_output_dir", "./error_tracking_logs")
@@ -81,14 +81,14 @@ class RewardManager:
         if self.enable_error_tracking:
             print(f"Starting error tracking for epoch {epoch}")
             self.code_evaluator.start_epoch(epoch)
-            
+
     def save_epoch_metadata(self, epoch: int, output_dir: Optional[str] = None, log_to_wandb: bool = True):
         """Save error tracking metadata for the completed epoch and log to wandb"""
         if self.enable_error_tracking:
             save_dir = output_dir or self.error_tracking_output_dir
             print(f"Saving error tracking metadata for epoch {epoch} to {save_dir}")
             self.code_evaluator.save_epoch_metadata(save_dir, epoch)
-            
+
             # Print summary to console
             summary = self.code_evaluator.get_error_summary()
             print(f"Epoch {epoch} Error Summary:")
@@ -97,11 +97,12 @@ class RewardManager:
             print(f"  Failed: {summary['failed_prompts']}")
             print(f"  Error types: {summary['error_counts']}")
             print(f"  Duration: {summary['epoch_duration']:.1f}s")
-            
+
             # Log to wandb if enabled
             if log_to_wandb:
                 try:
                     import wandb
+
                     if wandb.run is not None:
                         wandb_metrics = self.code_evaluator.get_wandb_metrics()
                         wandb.log(wandb_metrics)
@@ -134,7 +135,7 @@ class RewardManager:
         # Initialize timing_raw if not provided
         if timing_raw is None:
             timing_raw = {}
-            
+
         # Check if we're doing interleaved reasoning
         is_interleaved = self.template_type and "interleave" in self.template_type.lower()
 
@@ -162,7 +163,7 @@ class RewardManager:
         """
         if timing_raw is None:
             timing_raw = {}
-        
+
         batch_size = len(data)
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
@@ -194,9 +195,7 @@ class RewardManager:
         if code_indices:
             code_data = data.select_idxs(code_indices)
             code_gt_infos = [ground_truth_infos[i] for i in code_indices]
-            eval_scores, eval_decisions, eval_explanations, eval_raw, comp_rewards, pred_ans, gt_ans = self._evaluate_code(
-                code_data, code_gt_infos, len(code_indices), timing_raw
-            )
+            eval_scores, eval_decisions, eval_explanations, eval_raw, comp_rewards, pred_ans, gt_ans = self._evaluate_code(code_data, code_gt_infos, len(code_indices), timing_raw)
             for idx, i in enumerate(code_indices):
                 autorater_scores[i] = eval_scores[idx]
                 autorater_decisions[i] = eval_decisions[idx]
@@ -213,9 +212,7 @@ class RewardManager:
         if text_indices:
             text_data = data.select_idxs(text_indices)
             text_gt_infos = [ground_truth_infos[i] for i in text_indices]
-            eval_scores, eval_decisions, eval_explanations, eval_raw, pred_ans, gt_ans = self._evaluate_text_responses(
-                text_data, text_gt_infos, len(text_indices), timing_raw
-            )
+            eval_scores, eval_decisions, eval_explanations, eval_raw, pred_ans, gt_ans = self._evaluate_text_responses(text_data, text_gt_infos, len(text_indices), timing_raw)
             for idx, i in enumerate(text_indices):
                 autorater_scores[i] = eval_scores[idx]
                 autorater_decisions[i] = eval_decisions[idx]
@@ -285,7 +282,7 @@ class RewardManager:
         """
         if timing_raw is None:
             timing_raw = {}
-        
+
         batch_indices = data.non_tensor_batch["index"]
 
         print("Computing interleaved reasoning rewards")
@@ -315,11 +312,11 @@ class RewardManager:
         # Intersect with code_indices and text_indices
         code_interleaved_indices = [i for i in interleaved_indices if i in code_indices]
         text_interleaved_indices = [i for i in interleaved_indices if i in text_indices]
-        
+
         print(f"number of code_interleaved_indices: {len(code_interleaved_indices)}")
         print(f"number of text_interleaved_indices: {len(text_interleaved_indices)}")
         print(f"number of interleaved_indices: {len(interleaved_indices)}")
-        
+
         autorater_scores = [0.0] * batch_size
         autorater_decisions = [0] * batch_size
         autorater_explanations = ["No evaluation - insufficient answer count (<3)"] * batch_size
@@ -346,20 +343,18 @@ class RewardManager:
                     if k not in component_rewards_all:
                         component_rewards_all[k] = [0.0] * batch_size
                     component_rewards_all[k][i] = v[idx] if v[idx] is not None else 0.0
-        
+
         # Evaluate text interleaved samples in a batch
         if text_interleaved_indices:
             text_data = data.select_idxs(text_interleaved_indices)
             text_gt_infos = [ground_truth_infos[i] for i in text_interleaved_indices]
-            interleaved_scores, interleaved_decisions, interleaved_explanations, interleaved_raw, component_rewards, _ = self._evaluate_text_responses(
-                text_data, text_gt_infos, len(text_interleaved_indices), timing_raw
-            )
+            interleaved_scores, interleaved_decisions, interleaved_explanations, interleaved_raw, component_rewards, _ = self._evaluate_text_responses(text_data, text_gt_infos, len(text_interleaved_indices), timing_raw)
             for idx, i in enumerate(text_interleaved_indices):
                 autorater_scores[i] = interleaved_scores[idx]
                 autorater_decisions[i] = interleaved_decisions[idx]
                 autorater_explanations[i] = interleaved_explanations[idx]
                 autorater_raw_responses[i] = interleaved_raw[idx]
-        
+
         final_scores = []
         for i in range(batch_size):
             # Retrieve the correct length for storing the reward
@@ -439,24 +434,24 @@ class RewardManager:
                 extracted_prompts.append(p)
                 extracted_answers.append(ans if ans is not None else "")
                 reward_model_info.append({"template": "helpfulness", "context": []})
-        
+
         # Filter out empty answers and prepare for AutoRater
         non_empty_indices = []
         non_empty_prompts = []
         non_empty_answers = []
         non_empty_reward_model_info = []
-        
+
         for i, (prompt, answer, rm_info) in enumerate(zip(extracted_prompts, extracted_answers, reward_model_info)):
             if answer and answer.strip():  # Check if answer is non-empty
                 non_empty_indices.append(i)
                 non_empty_prompts.append(prompt)
                 non_empty_answers.append(answer)
                 non_empty_reward_model_info.append(rm_info)
-        
+
         # Initialize results with defaults (0.0 score, 0decision for all)
         autorater_scores = [0.0] * len(extracted_answers)
         autorater_decisions = [0] * len(extracted_answers)
-        
+
         # Only call AutoRater if we have non-empty answers
         if non_empty_answers:
             responses = [self.tokenizer.encode(ans, add_special_tokens=False) for ans in non_empty_answers]
@@ -470,12 +465,12 @@ class RewardManager:
                 "reward_model_info": non_empty_reward_model_info,
             }
             non_empty_scores, non_empty_decisions, *_ = call_autorater_service(self.autorater_base_url, payload, len(non_empty_answers))
-            
+
             # Update the results for non-empty answers
             for idx, score, decision in zip(non_empty_indices, non_empty_scores, non_empty_decisions):
                 autorater_scores[idx] = score
                 autorater_decisions[idx] = decision
-        
+
         return autorater_scores, autorater_decisions
 
     def _get_tokenizer(self):
@@ -487,38 +482,31 @@ class RewardManager:
 
     def _should_use_code_evaluation(self, ground_truth_infos: List[Dict[str, Any]]) -> bool:
         """Determine if code evaluation should be used based on ground truth info."""
+
         def _has_tests(info: Dict[str, Any]):
-            return bool(
-                isinstance(info, dict)
-                and (
-                    ("unit_tests" in info and info["unit_tests"])
-                    or ("tests" in info and info["tests"])
-                )
-            )
+            return bool(isinstance(info, dict) and (("unit_tests" in info and info["unit_tests"]) or ("tests" in info and info["tests"])))
 
         use_code_evaluator = any(_has_tests(info) for info in ground_truth_infos)
-        
+
         # Check if we're doing interleaved reasoning
-        is_interleaved = (
-            (self.template_type and "interleave" in self.template_type.lower())
-        )
-        
+        is_interleaved = self.template_type and "interleave" in self.template_type.lower()
+
         return is_interleaved or use_code_evaluator
 
     def _evaluate_code(
-        self, 
-        data: DataProto, 
-        ground_truth_infos: List[Dict[str, Any]], 
+        self,
+        data: DataProto,
+        ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
         timing_raw: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[float], List[int], List[str], List[str], Dict[str, List[float]], List[str], List[str]]:
         """Evaluate code responses using CodeEvaluator."""
         if timing_raw is None:
             timing_raw = {}
-            
+
         logger.info("Using CodeEvaluator for evaluation")
         batch_indices = data.non_tensor_batch["index"]
-        
+
         # Extract ground truth information
         decoded_ground_truth_answers = []
         for gt in ground_truth_infos:
@@ -541,7 +529,7 @@ class RewardManager:
                 batch_indices=batch_indices,
                 timing_raw=timing_raw,
             )
-        
+
         is_interleaved = self.code_evaluator.is_interleaved
 
         # Extract answers for logging
@@ -555,22 +543,22 @@ class RewardManager:
                 single_answer = extract_solution(pred_ans, template_type=self.template_type)
                 extracted_pred_answers.append(single_answer if single_answer else "No answer extracted")
             extracted_gt_answers.append(gt_ans)
-        
+
         return autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, component_rewards, extracted_pred_answers, extracted_gt_answers
 
     def _evaluate_text_responses(
-        self, 
-        data: DataProto, 
-        ground_truth_infos: List[Dict[str, Any]], 
+        self,
+        data: DataProto,
+        ground_truth_infos: List[Dict[str, Any]],
         batch_size: int,
         timing_raw: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[float], List[int], List[str], List[str], List[str], List[str]]:
         """Evaluate text responses using remote AutoRater service."""
         if timing_raw is None:
             timing_raw = {}
-            
+
         logger.info("Using remote AutoRater service for text evaluation")
-        
+
         # Extract ground truth information
         decoded_ground_truth_answers = []
         for gt in ground_truth_infos:
@@ -622,7 +610,7 @@ class RewardManager:
                 if orig_info.get("libs"):
                     info_dict["libs"] = orig_info["libs"]
             new_reward_model_info.append(info_dict)
-        
+
         payload_common = {
             "prompts": data.batch["prompts"].cpu().tolist(),
             "responses": pred_answers_token_ids,
@@ -633,35 +621,35 @@ class RewardManager:
 
         # mypy: self.autorater_base_url is ensured non-None by caller when use_autorater is True
         assert self.autorater_base_url is not None, "autorater_base_url must be provided when calling AutoRater service"
-        
+
         with _timer("call_autorater_service", timing_raw):
             autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(  # type: ignore[arg-type]
                 self.autorater_base_url, payload_common, batch_size
             )
-        
+
         return autorater_scores, autorater_decisions, autorater_explanations, autorater_raw_responses, extracted_pred_answers, extracted_gt_answers
 
     def _compute_interleaved_format_scores(self, data: DataProto, batch_size: int) -> Tuple[List[float], List[int]]:
         """Compute interleaved format scores and answer counts for responses."""
         format_scores = []
         answer_counts = []
-        
+
         for i in range(batch_size):
             data_item = data[i]
             response_ids = data_item.batch["responses"]
             predicted_answer = self.tokenizer.decode(response_ids, skip_special_tokens=True)
-            
+
             # Count answers and compute interleaved format reward
             answer_count = count_interleaved_answers(predicted_answer)
             interleaved_score = interleaved_format_reward(predicted_answer, self.min_answer_count_for_interleaved)
             format_scores.append(interleaved_score)
             answer_counts.append(answer_count)
-            
+
             # Interleaved format reward
             if self.enable_format_reward:
                 score = interleaved_format_reward(predicted_answer, answer_count)
                 format_scores.append(score)
             else:
                 format_scores.append(0.0)
-        
+
         return format_scores, answer_counts

@@ -87,8 +87,8 @@ def compute_subthought_subanswer_metrics(all_thought_lengths, all_answer_lengths
     for i in range(max_subs):
         ith_subthought_lengths = [tl[i] for tl in all_thought_lengths if len(tl) > i]
         ith_subanswer_lengths = [al[i] for al in all_answer_lengths if len(al) > i]
-        metrics[f'subthought_{i+1}_avg_length'] = sum(ith_subthought_lengths) / len(ith_subthought_lengths) if ith_subthought_lengths else 0.0
-        metrics[f'subanswer_{i+1}_avg_length'] = sum(ith_subanswer_lengths) / len(ith_subanswer_lengths) if ith_subanswer_lengths else 0.0
+        metrics[f"subthought_{i + 1}_avg_length"] = sum(ith_subthought_lengths) / len(ith_subthought_lengths) if ith_subthought_lengths else 0.0
+        metrics[f"subanswer_{i + 1}_avg_length"] = sum(ith_subanswer_lengths) / len(ith_subanswer_lengths) if ith_subanswer_lengths else 0.0
     return metrics
 
 
@@ -188,25 +188,27 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True, tokenizer=No
     # Add thought/answer length metrics if tokenizer is provided
     if tokenizer is not None:
         ta_lengths = compute_thought_and_answer_lengths(batch, tokenizer, template_type)
-        all_thought_lengths = [d['thought_lengths'] for d in ta_lengths]
-        all_answer_lengths = [d['answer_lengths'] for d in ta_lengths]
+        all_thought_lengths = [d["thought_lengths"] for d in ta_lengths]
+        all_answer_lengths = [d["answer_lengths"] for d in ta_lengths]
 
         if template_type == "default":
-            pass 
+            pass
         elif template_type == "interleave":
             # Add subthought/subanswer metrics
             metrics.update(compute_subthought_subanswer_metrics(all_thought_lengths, all_answer_lengths))
-        
-        metrics.update({
-            'thought_length/mean': np.mean([sum(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
-            'thought_length/max': np.max([sum(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
-            'thought_length/min': np.min([sum(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
-            'answer_length/mean': np.mean([sum(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
-            'answer_length/max': np.max([sum(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
-            'answer_length/min': np.min([sum(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
-            "thought_length/num_subthoughts": np.mean([len(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
-            "answer_length/num_subanswers": np.mean([len(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
-        })
+
+        metrics.update(
+            {
+                "thought_length/mean": np.mean([sum(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
+                "thought_length/max": np.max([sum(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
+                "thought_length/min": np.min([sum(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
+                "answer_length/mean": np.mean([sum(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
+                "answer_length/max": np.max([sum(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
+                "answer_length/min": np.min([sum(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
+                "thought_length/num_subthoughts": np.mean([len(sub) for sub in all_thought_lengths]) if all_thought_lengths else 0.0,
+                "answer_length/num_subanswers": np.mean([len(sub) for sub in all_answer_lengths]) if all_answer_lengths else 0.0,
+            }
+        )
     return metrics
 
 
@@ -470,34 +472,34 @@ def process_validation_metrics(data_sources: list[str], sample_inputs: list[str]
 def process_training_reward_metrics(data_sources: list[str], reward_extra_infos_dict: dict[str, list]) -> dict[str, float]:
     """
     Process training reward metrics by data source for simple plotting.
-    
+
     Args:
         data_sources: List of data source identifiers for each sample
         reward_extra_infos_dict: Dictionary mapping variable names to lists of values
-        
+
     Returns:
         Dictionary with format_score and content_score metrics per data source
     """
     if not reward_extra_infos_dict:
         return {}
-    
+
     # Group rewards by data source
     data_src_to_indices = defaultdict(list)
     for idx, data_source in enumerate(data_sources):
         data_src_to_indices[data_source].append(idx)
-    
+
     metrics = {}
-    
+
     # Process format_score and content_score for each data source
     for metric_name in ["unit_test_pass_rate", "pass@1", "autorater_scores", "format_rewards", "code_outline_helpfulness", "unit_test_rewards"]:
         if metric_name in reward_extra_infos_dict:
             metric_values = reward_extra_infos_dict[metric_name]
-            
+
             for data_source, indices in data_src_to_indices.items():
                 if indices and len(metric_values) > max(indices):  # Safety check
                     data_source_values = [metric_values[i] for i in indices]
                     metrics[f"rewards/{data_source}/{metric_name}"] = np.mean(data_source_values)
-    
+
     return metrics
 
 
@@ -523,35 +525,37 @@ def compute_thought_and_answer_lengths(batch: DataProto, tokenizer, template_typ
         attn_mask = attention_mask[i]
         valid_response_mask = attn_mask[-response_length:]
         valid_len = valid_response_mask.sum().item()
-        valid_response_ids = responses[i][:int(valid_len)]
+        valid_response_ids = responses[i][: int(valid_len)]
         response_str = tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
         # Find all <think>...</think> and <answer>...</answer> spans
-        think_spans = [m.group(1) for m in re.finditer(r'<think>(.*?)</think>', response_str, re.DOTALL | re.IGNORECASE)]
-        
+        think_spans = [m.group(1) for m in re.finditer(r"<think>(.*?)</think>", response_str, re.DOTALL | re.IGNORECASE)]
+
         # if there are no think spans, then the think is the entire response
         if len(think_spans) == 0:
             think_spans = [response_str]
 
         if template_type == "default":
             # The answer is everything after the first </think>
-            think_end = re.search(r'</think>', response_str, re.IGNORECASE)
+            think_end = re.search(r"</think>", response_str, re.IGNORECASE)
             if think_end:
-                answer_text = response_str[think_end.end():].strip()
+                answer_text = response_str[think_end.end() :].strip()
                 answer_spans = [answer_text] if answer_text else []
             else:
                 answer_spans = []
         else:
-            answer_spans = [m.group(1) for m in re.finditer(r'<answer>(.*?)</answer>', response_str, re.DOTALL | re.IGNORECASE)]
+            answer_spans = [m.group(1) for m in re.finditer(r"<answer>(.*?)</answer>", response_str, re.DOTALL | re.IGNORECASE)]
 
         # Compute token lengths for each span
         thought_lengths = [len(tokenizer.encode(span, add_special_tokens=False)) for span in think_spans]
         answer_lengths = [len(tokenizer.encode(span, add_special_tokens=False)) for span in answer_spans]
 
-        results.append({
-            'thought_lengths': thought_lengths,
-            'answer_lengths': answer_lengths,
-            'total_thought_length': sum(thought_lengths),
-            'total_answer_length': sum(answer_lengths),
-        })
+        results.append(
+            {
+                "thought_lengths": thought_lengths,
+                "answer_lengths": answer_lengths,
+                "total_thought_length": sum(thought_lengths),
+                "total_answer_length": sum(answer_lengths),
+            }
+        )
     return results

@@ -382,7 +382,7 @@ def load_state_dict_to_megatron_gptmodel(state_dict, wrapped_models, config, par
                 sync_layer.self_attention.linear_qkv.layer_norm_weight if dst_pp_rank == pp_rank else None,
                 f"{layer_name}.input_layernorm.weight",
             )
-     
+
             if f"{layer_name}.self_attn.q_norm.weight" in state_dict:
                 _broadcast_tensor(
                     sync_layer.self_attention.q_layernorm.weight if dst_pp_rank == pp_rank else None,

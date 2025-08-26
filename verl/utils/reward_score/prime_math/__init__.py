@@ -41,6 +41,7 @@ BAD_SUBSTRINGS = ["^{", "^("]
 BAD_REGEXES = ["\^[0-9]+\^", "\^[0-9][0-9]+"]
 TUPLE_CHARS = "()[]"
 
+
 def _sympy_parse(expr: str):
     """Parses an expression with sympy."""
     py_expr = expr.replace("^", "**")

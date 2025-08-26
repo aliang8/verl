@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Tuple
 
 __all__ = ["call_autorater_service"]
 
+
 def call_autorater_service(
     base_url: str,
     payload: Dict[str, Any],
@@ -27,9 +28,9 @@ def call_autorater_service(
     response = requests.post(full_url, json=payload, timeout=timeout)
     response.raise_for_status()
     data = response.json()
-    
+
     decisions = data.get("autorater_decisions", [-1] * batch_size)
     explanations = data.get("autorater_explanations", ["N/A"] * batch_size)
     raw = data.get("autorater_raw_responses", ["N/A"] * batch_size)
 
-    return decisions, explanations, raw 
+    return decisions, explanations, raw

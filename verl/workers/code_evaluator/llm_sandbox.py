@@ -74,22 +74,13 @@ class SafeResourceManagedExecutor:
                         return {
                             "error": "Security violation",
                             "error_type": "security_violation",
-                            "violations": [
-                                (
-                                    v.description
-                                    if hasattr(v, "description")
-                                    else str(v)
-                                )
-                                for v in violations
-                            ],
+                            "violations": [(v.description if hasattr(v, "description") else str(v)) for v in violations],
                             "exit_code": 1,
                             "stdout": "",
                             "stderr": "Security violation detected",
                         }
                 except Exception as e:
-                    logger.warning(
-                        f"Security check failed: {e}, proceeding with execution"
-                    )
+                    logger.warning(f"Security check failed: {e}, proceeding with execution")
 
             # Execute using the reused session
             try:
@@ -126,10 +117,7 @@ class SafeResourceManagedExecutor:
                 elif "syntaxerror" in stderr_lower:
                     # import ipdb; ipdb.set_trace()
                     error_type = "syntax_error"
-                elif (
-                    "importerror" in stderr_lower
-                    or "modulenotfounderror" in stderr_lower
-                ):
+                elif "importerror" in stderr_lower or "modulenotfounderror" in stderr_lower:
                     error_type = "import_error"
                 elif "assertionerror" in stderr_lower:
                     error_type = "assertion_error"

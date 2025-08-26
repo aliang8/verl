@@ -35,9 +35,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_dir", default="~/data/knights_and_knaves")
     parser.add_argument("--hdfs_dir", default=None)
-    parser.add_argument("--subsets", nargs='+', default=["2ppl"], 
-                        choices=["2ppl", "3ppl", "4ppl", "5ppl", "6ppl", "7ppl", "8ppl"],
-                        help="Which subsets to process (number of people in puzzles). Can specify multiple subsets.")
+    parser.add_argument("--subsets", nargs="+", default=["2ppl"], choices=["2ppl", "3ppl", "4ppl", "5ppl", "6ppl", "7ppl", "8ppl"], help="Which subsets to process (number of people in puzzles). Can specify multiple subsets.")
 
     args = parser.parse_args()
 
@@ -48,15 +46,15 @@ if __name__ == "__main__":
     # Load datasets for all specified subsets
     train_datasets = []
     test_datasets = []
-    
+
     for subset in args.subsets:
         print(f"Loading subset: {subset}")
         train_dataset = datasets.load_dataset(data_source, "train", split=subset)
         test_dataset = datasets.load_dataset(data_source, "test", split=subset)
-        
+
         print(f"  Train dataset size for {subset}: {len(train_dataset)}")
         print(f"  Test dataset size for {subset}: {len(test_dataset)}")
-        
+
         train_datasets.append(train_dataset)
         test_datasets.append(test_dataset)
 
@@ -67,11 +65,11 @@ if __name__ == "__main__":
     else:
         combined_train_dataset = train_datasets[0]
         combined_test_dataset = test_datasets[0]
-    
+
     print(f"\nCombined train dataset size: {len(combined_train_dataset)}")
     print(f"Combined test dataset size: {len(combined_test_dataset)}")
 
-    instruction_following = 'You must infer the identity of each character. At the end of your answer, you must clearly state the identity of each character by following the format:\n\nCONCLUSION:\n(1) ...\n(2) ...\n(3) ...'
+    instruction_following = "You must infer the identity of each character. At the end of your answer, you must clearly state the identity of each character by following the format:\n\nCONCLUSION:\n(1) ...\n(2) ...\n(3) ..."
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
@@ -132,4 +130,4 @@ if __name__ == "__main__":
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
 
-        copy(src=local_dir, dst=hdfs_dir) 
+        copy(src=local_dir, dst=hdfs_dir)

@@ -15,6 +15,7 @@
 import re
 from pathlib import Path
 
+
 def validate_yaml_format(yaml_lines):
     errors = []
     i = 0
@@ -30,21 +31,21 @@ def validate_yaml_format(yaml_lines):
             continue
 
         # Match YAML keys like "field:" or "field: value"
-        key_match = re.match(r'^(\s*)([a-zA-Z0-9_]+):', line)
+        key_match = re.match(r"^(\s*)([a-zA-Z0-9_]+):", line)
         if key_match:
             indent = key_match.group(1)
-            is_section_header = (i + 1 < len(yaml_lines) and yaml_lines[i + 1].strip() == "")
+            is_section_header = i + 1 < len(yaml_lines) and yaml_lines[i + 1].strip() == ""
 
             # Check if there's a comment above
             if i == 0 or not yaml_lines[i - 1].strip().startswith("#"):
-                errors.append(f"Missing comment above line {i+1}: {line.strip()}")
+                errors.append(f"Missing comment above line {i + 1}: {line.strip()}")
 
             # Check for inline comment
             if "#" in line and not stripped.startswith("#"):
                 comment_index = line.index("#")
                 colon_index = line.index(":")
                 if comment_index > colon_index:
-                    errors.append(f"Inline comment found on line {i+1}: {line.strip()}")
+                    errors.append(f"Inline comment found on line {i + 1}: {line.strip()}")
 
             # Check for blank line after this key line (unless next is a deeper indent)
             if i + 1 < len(yaml_lines):
@@ -53,7 +54,7 @@ def validate_yaml_format(yaml_lines):
 
                 # If next is not empty and not a deeper nested line, enforce blank line
                 if next_stripped != "":
-                    errors.append(f"Missing blank line after line {i+1}: {line.strip()}")
+                    errors.append(f"Missing blank line after line {i + 1}: {line.strip()}")
 
         i += 1
 

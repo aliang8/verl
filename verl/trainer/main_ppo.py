@@ -75,7 +75,7 @@ class TaskRunner:
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
-    
+
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
@@ -119,20 +119,20 @@ class TaskRunner:
         # Map roles to the resource pool.
         global_pool_id = "global_pool"
         autorater_pool_id = "autorater_pool"
-        
+
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
-        
+
         mapping = {
             Role.ActorRollout: global_pool_id,
             Role.Critic: global_pool_id,
         }
-        
+
         # # Add separate resource pool for AutoRater if enabled to avoid vLLM conflicts
         # if hasattr(config, 'autorater') and config.autorater.get('enable', False):
         #     autorater_gpus_per_node = config.autorater.get('autorater_gpus_per_node', 0.5)  # Default to 0.5 GPU per node for AutoRater
-            
+
         #     if autorater_gpus_per_node > 0:
         #         # Create separate resource pool for AutoRater to avoid vLLM sleep mode conflicts
         #         # This ensures AutoRater runs in completely separate Ray processes
@@ -191,7 +191,7 @@ class TaskRunner:
 
         template_type = config.reward_manager.template_type
         print(f"\nUsing template type: {template_type}")
-        
+
         # Get the system template content
         system_template = get_system_template(template_type)
 
@@ -199,15 +199,15 @@ class TaskRunner:
         print("Creating training and validation datasets")
 
         print(f"Creating training dataset")
-        print(f"="*100)
+        print(f"=" * 100)
 
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, system_template, debug=config.trainer.debug)
         print(f"Creating validation dataset")
-        print(f"="*100)
+        print(f"=" * 100)
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, system_template, debug=config.trainer.debug)
         train_sampler = create_rl_sampler(config.data, train_dataset)
         print(f"Done creating training and validation datasets")
-        print(f"="*100)
+        print(f"=" * 100)
 
         # Initialize the PPO trainer.
         trainer = RayPPOTrainer(

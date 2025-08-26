@@ -19,10 +19,8 @@ if __name__ == "__main__":
     parser.add_argument("--target_split", default="v0.1.4", help="Dataset split/version to preprocess (default: v0.1.4)")
     parser.add_argument("--val_ratio", type=float, default=0.2, help="Ratio of validation set size (default: 0.2 for 20%)")
     parser.add_argument("--shuffle_seed", type=int, default=42, help="Random seed for shuffling before split")
-    parser.add_argument("--add_instruction", action="store_true", 
-                       help="Add step-by-step instruction to questions")
-    parser.add_argument("--include_solution", action="store_true",
-                       help="Include canonical solution in the answer")
+    parser.add_argument("--add_instruction", action="store_true", help="Add step-by-step instruction to questions")
+    parser.add_argument("--include_solution", action="store_true", help="Include canonical solution in the answer")
 
     args = parser.parse_args()
 
@@ -38,15 +36,15 @@ if __name__ == "__main__":
     raw_ds = dataset_dict[args.target_split]
     print(f"Processing split '{args.target_split}' with {len(raw_ds)} examples…", flush=True)
 
-    instruction_text = 'Please implement the function step by step and provide the complete solution in a code block.'
+    instruction_text = "Please implement the function step by step and provide the complete solution in a code block."
 
     def process_fn(example):
         question = example.get("instruct_prompt", "")
-        
+
         # Optionally add instruction to question
         if args.add_instruction:
             question = question + " " + instruction_text
-        
+
         # Use canonical solution as answer if available and requested
         if args.include_solution and example.get("canonical_solution"):
             answer = f"```python\n{example['canonical_solution']}\n```"
@@ -57,11 +55,8 @@ if __name__ == "__main__":
             if not answer:
                 return None  # Skip examples without solutions
             answer = f"```python\n{answer}\n```"
-        
-        return {
-            "question": question,
-            "answer": answer
-        }
+
+        return {"question": question, "answer": answer}
 
     # Process and filter out None results
     processed_ds = raw_ds.map(function=process_fn)
@@ -76,19 +71,19 @@ if __name__ == "__main__":
     print(f"\nExample of processed BigCodeBench SFT data:")
     print(f"Train dataset size: {len(train_ds)}")
     print(f"Val dataset size: {len(val_ds)}")
-    
+
     if len(train_ds) > 0:
         example = train_ds[0]
         print(f"\nTrain example:")
         print(f"Question: {example['question'][:200]}...")
         print(f"Answer: {example['answer'][:200]}...")
-    
+
     if len(val_ds) > 0:
         example = val_ds[0]
         print(f"\nVal example:")
         print(f"Question: {example['question'][:200]}...")
         print(f"Answer: {example['answer'][:200]}...")
-    
+
     print()
 
     local_dir = args.local_dir
@@ -105,4 +100,4 @@ if __name__ == "__main__":
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
         copy(src=local_dir, dst=hdfs_dir)
-        print(f"Copied to HDFS: {hdfs_dir}") 
+        print(f"Copied to HDFS: {hdfs_dir}")

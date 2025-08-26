@@ -50,7 +50,9 @@ if Version(vllm_package_version) <= Version("0.6.3"):
 
 else:
     vllm_mode = "spmd"
-    from .vllm_rollout_spmd import vLLMAsyncRollout, vLLMRollout, vLLMRolloutWithTool, vLLMRolloutWithMCP # noqa: F401
-    from .vllm_autorater_rollout import vLLMAutoraterRollout # noqa: F401
-    from .vllm_rewind_and_repeat import vLLMRewindAndRepeatRollout # noqa: F401
-    from .vllm_answer_evaluation_rollout import vLLMAnswerEvaluationRollout # noqa: F401
+    from .vllm_rollout_spmd import vLLMAsyncRollout, vLLMRollout, vLLMRolloutWithTool, vLLMRolloutWithMCP  # noqa: F401
+    from .vllm_force_answer import vLLMForceAnswerRollout  # noqa: F401
+    from .vllm_best_of_n import vLLMBestOfN  # noqa: F401
+    from .vllm_rewind_and_repeat import vLLMRewindAndRepeatRollout  # noqa: F401
+    from .vllm_answer_evaluation_rollout import vLLMAnswerEvaluationRollout  # noqa: F401
+    from .vllm_force_think_after_max import vLLMForceThinkAfterMaxRollout  # noqa: F401

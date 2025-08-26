@@ -28,25 +28,19 @@ def extract_solution(solution_str):
     """Extract the final answer from the solution string."""
     # For MATH-500, the answer is typically in a \\boxed{} format
     # First try to find \\boxed{} pattern
-    boxed_pattern = r'\\boxed\{([^}]*)\}'
+    boxed_pattern = r"\\boxed\{([^}]*)\}"
     match = re.search(boxed_pattern, solution_str)
     if match:
         return match.group(1)
-    
+
     # If no boxed pattern, try to find the answer after common patterns
-    answer_patterns = [
-        r'final answer is[:\s]*([^\n\.]+)',
-        r'answer is[:\s]*([^\n\.]+)',
-        r'the answer[:\s]*([^\n\.]+)',
-        r'therefore[:\s]*([^\n\.]+)',
-        r'thus[:\s]*([^\n\.]+)'
-    ]
-    
+    answer_patterns = [r"final answer is[:\s]*([^\n\.]+)", r"answer is[:\s]*([^\n\.]+)", r"the answer[:\s]*([^\n\.]+)", r"therefore[:\s]*([^\n\.]+)", r"thus[:\s]*([^\n\.]+)"]
+
     for pattern in answer_patterns:
         match = re.search(pattern, solution_str, re.IGNORECASE)
         if match:
             return match.group(1).strip()
-    
+
     # If no pattern matches, return the original solution
     return solution_str.strip()
 
@@ -122,4 +116,4 @@ if __name__ == "__main__":
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
 
-        copy(src=local_dir, dst=hdfs_dir) 
+        copy(src=local_dir, dst=hdfs_dir)

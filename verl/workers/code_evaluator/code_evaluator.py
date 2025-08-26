@@ -13,14 +13,14 @@ from verl.utils.autorater_client import call_autorater_service
 
 logger = logging.getLogger(__name__)
 
+
 class CodeEvaluator:
     def __init__(self, config: DictConfig, tokenizer: AutoTokenizer):
         self.config = config
         self.tokenizer = tokenizer
         self.executor = SafeResourceManagedExecutor(max_concurrent=config.max_concurrent)
-    
-    def evaluate_code_outlines(self, code_outlines: List[str], prompts: List[str]) -> List[int]:
 
+    def evaluate_code_outlines(self, code_outlines: List[str], prompts: List[str]) -> List[int]:
         autorater_payload = {
             "prompts": prompts,
             "responses": code_outlines,
@@ -28,11 +28,7 @@ class CodeEvaluator:
             "gt_answers": [""] * len(code_outlines),
         }
 
-        decisions, explanations, raw_responses = call_autorater_service(
-            self.config.autorater_service_url,
-            autorater_payload,
-            batch_size=len(code_outlines)
-        )
+        decisions, explanations, raw_responses = call_autorater_service(self.config.autorater_service_url, autorater_payload, batch_size=len(code_outlines))
 
         # convert from TRUE/FALSE to 1/0
         decisions = [1 if d == "TRUE" else 0 for d in decisions]
@@ -40,25 +36,25 @@ class CodeEvaluator:
         return decisions
 
     def evaluate_unit_tests(self, unit_tests: List[str]) -> List[int]:
-        # for now, we just check if unit tests exist and follow the correct format 
+        # for now, we just check if unit tests exist and follow the correct format
         unit_test_rewards = []
         for unit_test in unit_tests:
-            # check if using unit_test format 
+            # check if using unit_test format
             if "unittest.TestCase" in unit_test and re.search(r"def test_", unit_test):
                 unit_test_rewards.append(1.0)
             else:
                 unit_test_rewards.append(0.0)
 
         return unit_test_rewards
-        
+
     def _test_code_snippets(self, code_snippets: List[str], unit_tests: List[str], required_libs: List[str]) -> Dict[str, Any]:
         if len(code_snippets) > len(unit_tests):
-            # repeat the unit tests for each code snippet 
+            # repeat the unit tests for each code snippet
             unit_tests = [unit_tests[0]] * len(code_snippets)
         elif len(code_snippets) < len(unit_tests) and len(code_snippets) > 0:
-            # repeat the code snippets for each unit test 
+            # repeat the code snippets for each unit test
             code_snippets = [code_snippets[0]] * len(unit_tests)
-    
+
         results = []
         for i, (code_snippet, unit_test) in enumerate(zip(code_snippets, unit_tests)):
             if len(required_libs) == 0:
@@ -67,7 +63,7 @@ class CodeEvaluator:
                 libs = required_libs[-1]
             else:
                 libs = required_libs[i]
-            
+
             code_snippet = code_snippet.replace("\\n", "\n")
             combined_test = f"""import unittest\nimport pandas as pd\nimport numpy as np\n\n{code_snippet}\n\n{unit_test}\n\nif __name__ == '__main__':\n    unittest.main(verbosity=2)\n"""
 
@@ -79,7 +75,7 @@ class CodeEvaluator:
                     libs = ast.literal_eval(libs)
             elif isinstance(libs, list):
                 libs = [ast.literal_eval(lib) for lib in libs]
-            
+
             result = self.executor.execute_safely(combined_test, libraries=libs)
             results.append(result)
         return results
@@ -87,7 +83,7 @@ class CodeEvaluator:
     def _evaluate_code_helper(self, code_snippets: List[str], rm_infos: List[Dict[str, Any]], batch_indices: List[int]) -> Tuple[List[float], List[Dict[str, Any]]]:
         code_snippets_extracted = [self._extract_code_snippets(snippet) for snippet in code_snippets]
 
-        # First extract the ground truth unit tests 
+        # First extract the ground truth unit tests
         unit_tests = []
         for info in rm_infos:
             if "unit_tests" in info:
@@ -96,8 +92,8 @@ class CodeEvaluator:
                 unit_tests.append(info["tests"])
             else:
                 raise ValueError(f"No unit tests found in ground truth info: {info}")
-        
-        # run the code snippets 
+
+        # run the code snippets
         sandbox_results = []
 
         if self.config.execute_sequential:
@@ -105,27 +101,25 @@ class CodeEvaluator:
                 code_snippet = code_snippets_extracted[i]
                 unit_test = unit_tests[i]
                 libs = rm_infos[i].get("libs", [])
+                import ipdb; ipdb.set_trace()
                 result = self._test_code_snippets(code_snippet, unit_test, libs)
                 sandbox_results.append(result)
         else:
             # run the code snippets in parallel
             with ThreadPoolExecutor(max_workers=self.config.max_concurrent) as executor:
-                futures = [
-                    executor.submit(self._test_code_snippets, code_snippets_extracted[i], unit_tests[i], rm_infos[i].get("libs", []))
-                    for i, code_snippet in enumerate(code_snippets_extracted)
-                ]
+                futures = [executor.submit(self._test_code_snippets, code_snippets_extracted[i], unit_tests[i], rm_infos[i].get("libs", [])) for i, code_snippet in enumerate(code_snippets_extracted)]
                 for future in as_completed(futures):
                     sandbox_results.append(future.result())
-        
+
         # print(sandbox_results)
-        # parse the results to compute success rate 
+        # parse the results to compute success rate
         unit_test_pass_rate = []
-        
+
         for result in sandbox_results:
             if result is None:
                 unit_test_pass_rate.append(0)
                 continue
-            
+
             single_pass_rate = []
             for r in result:
                 ran_successfully = "PASSED" in r["stderr"] or "FAILED" in r["stderr"] or "Ran" in r["stderr"]
@@ -139,7 +133,7 @@ class CodeEvaluator:
                     total_unit_tests = int(ran_match.group(1)) if ran_match else 0
 
                     failed_match = re.search(r"FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)", output)
-                    
+
                     failures = 0
                     errors = 0
                     if failed_match:
@@ -148,10 +142,10 @@ class CodeEvaluator:
                         if failed_match.group(2):
                             errors = int(failed_match.group(2))
 
-                    passed = total_unit_tests - failures - errors 
+                    passed = total_unit_tests - failures - errors
                     passed = max(passed, 0)
                     single_pass_rate.append(passed / total_unit_tests if total_unit_tests > 0 else 0.0)
-            
+
             if len(single_pass_rate) > 0:
                 unit_test_pass_rate.append(sum(single_pass_rate) / len(single_pass_rate))
             else:
@@ -161,7 +155,7 @@ class CodeEvaluator:
 
     def _extract_code_snippets(self, answer: Union[str, List[str]]) -> List[str]:
         """Extract a list of code snippets from predicted answer.
-        
+
         If answer is a list extract the first code snippet from each answer.
         If answer is a string, extract the first code snippet from the answer.
         """
@@ -175,7 +169,7 @@ class CodeEvaluator:
         code_matches = re.findall(code_block_pattern, answer, re.DOTALL)
 
         if code_matches:
-            # TODO: fix this, but we just want the first code snippet 
+            # TODO: fix this, but we just want the first code snippet
             return [code_matches[0]]
 
         # If no code blocks found, try to extract task_func function
@@ -207,22 +201,15 @@ class CodeEvaluator:
         code_snippets = [answers[i][1] for i in range(len(answers))]
         unit_tests = [answers[i][2] for i in range(len(answers))]
 
-        # run the code snippets 
-        unit_test_pass_rate, sandbox_results = self._evaluate_code_helper(
-            code_snippets, 
-            [rm_infos[i] for i in range(len(answers))], 
-            [batch_indices[i] for i in range(len(answers))]
-        )
+        # run the code snippets
+        unit_test_pass_rate, sandbox_results = self._evaluate_code_helper(code_snippets, [rm_infos[i] for i in range(len(answers))], [batch_indices[i] for i in range(len(answers))])
 
         pass_1 = [1 if r == 1.0 else 0 for r in unit_test_pass_rate]
 
         # evaluate the outlines with llm autorater
-        code_outline_helpfulness = self.evaluate_code_outlines(
-            code_outlines, 
-            prompts
-        )
+        code_outline_helpfulness = self.evaluate_code_outlines(code_outlines, prompts)
 
-        # evaluate the generated unit tests  
+        # evaluate the generated unit tests
         unit_test_rewards = self.evaluate_unit_tests(unit_tests)
 
         code_rewards = {

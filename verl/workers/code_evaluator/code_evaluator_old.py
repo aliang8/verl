@@ -120,22 +120,16 @@ class ErrorTracker:
     def get_error_summary(self) -> Dict[str, Any]:
         """Get a summary of all errors"""
         total_prompts = len(self.error_logs)
-        successful_prompts = sum(
-            1 for log in self.error_logs.values() if log["success"]
-        )
+        successful_prompts = sum(1 for log in self.error_logs.values() if log["success"])
         failed_prompts = total_prompts - successful_prompts
 
         return {
             "total_prompts": total_prompts,
             "successful_prompts": successful_prompts,
             "failed_prompts": failed_prompts,
-            "success_rate": (
-                successful_prompts / total_prompts if total_prompts > 0 else 0.0
-            ),
+            "success_rate": (successful_prompts / total_prompts if total_prompts > 0 else 0.0),
             "error_counts": dict(self.error_counts),
-            "epoch_duration": (
-                time.time() - self.epoch_start_time if self.epoch_start_time else 0
-            ),
+            "epoch_duration": (time.time() - self.epoch_start_time if self.epoch_start_time else 0),
             "epoch": self.current_epoch,
         }
 
@@ -165,16 +159,12 @@ class ErrorTracker:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Save detailed error logs
-        detailed_file = os.path.join(
-            output_dir, f"epoch_{epoch}_detailed_logs_{timestamp}.json"
-        )
+        detailed_file = os.path.join(output_dir, f"epoch_{epoch}_detailed_logs_{timestamp}.json")
         with open(detailed_file, "w") as f:
             json.dump(self.error_logs, f, indent=2)
 
         # Save error summary
-        summary_file = os.path.join(
-            output_dir, f"epoch_{epoch}_error_summary_{timestamp}.json"
-        )
+        summary_file = os.path.join(output_dir, f"epoch_{epoch}_error_summary_{timestamp}.json")
         summary = self.get_error_summary()
         summary["epoch"] = epoch
         summary["timestamp"] = timestamp
@@ -182,9 +172,7 @@ class ErrorTracker:
             json.dump(summary, f, indent=2)
 
         # Save CSV for easy analysis
-        csv_file = os.path.join(
-            output_dir, f"epoch_{epoch}_prompt_results_{timestamp}.csv"
-        )
+        csv_file = os.path.join(output_dir, f"epoch_{epoch}_prompt_results_{timestamp}.csv")
         try:
             import pandas as pd
 
@@ -200,9 +188,7 @@ class ErrorTracker:
                     "response_text": log["response_text"],
                 }
                 if log["success"] and "success_details" in log:
-                    row.update(
-                        {f"success_{k}": v for k, v in log["success_details"].items()}
-                    )
+                    row.update({f"success_{k}": v for k, v in log["success_details"].items()})
                 rows.append(row)
 
             df = pd.DataFrame(rows)
@@ -267,22 +253,13 @@ class SafeResourceManagedExecutor:
                             return {
                                 "error": "Security violation",
                                 "error_type": "security_violation",
-                                "violations": [
-                                    (
-                                        v.description
-                                        if hasattr(v, "description")
-                                        else str(v)
-                                    )
-                                    for v in violations
-                                ],
+                                "violations": [(v.description if hasattr(v, "description") else str(v)) for v in violations],
                                 "exit_code": 1,
                                 "stdout": "",
                                 "stderr": "Security violation detected",
                             }
                     except Exception as e:
-                        logger.warning(
-                            f"Security check failed: {e}, proceeding with execution"
-                        )
+                        logger.warning(f"Security check failed: {e}, proceeding with execution")
 
                 # Execute using the reused session
                 result = session.run(code, libraries=libraries)
@@ -298,10 +275,7 @@ class SafeResourceManagedExecutor:
                         error_type = "timeout_error"
                     elif "syntaxerror" in stderr_lower:
                         error_type = "syntax_error"
-                    elif (
-                        "importerror" in stderr_lower
-                        or "modulenotfounderror" in stderr_lower
-                    ):
+                    elif "importerror" in stderr_lower or "modulenotfounderror" in stderr_lower:
                         error_type = "import_error"
                     elif "assertionerror" in stderr_lower:
                         error_type = "assertion_error"
@@ -373,9 +347,7 @@ class CodeEvaluator:
         """
         self.config = config
         self.tokenizer = tokenizer
-        self.autorater_base_url = (
-            autorater_service_url.rstrip("/") if autorater_service_url else None
-        )
+        self.autorater_base_url = autorater_service_url.rstrip("/") if autorater_service_url else None
         self.template_type = template_type
 
         self.interleaved_reward_weights = self.config.get(
@@ -392,9 +364,7 @@ class CodeEvaluator:
         # Initialize error tracking
         self.error_tracker = ErrorTracker()
 
-        self.is_interleaved = bool(
-            self.template_type and "interleave" in self.template_type.lower()
-        )
+        self.is_interleaved = bool(self.template_type and "interleave" in self.template_type.lower())
 
         self._init_sandbox()
 
@@ -465,9 +435,7 @@ class CodeEvaluator:
 
         # Ensure sandbox session exists
         if self.sandbox_session is None:
-            logger.info(
-                "SandboxSession not available, attempting to initialize on demand"
-            )
+            logger.info("SandboxSession not available, attempting to initialize on demand")
             with _timer("init_sandbox", timing_raw):
                 self._init_sandbox()
 
@@ -485,15 +453,9 @@ class CodeEvaluator:
         error_list: List[str] = [""] * batch_size
 
         def run_single(idx, rm_info):
-            prompt_id = (
-                prompt_ids[idx]
-                if prompt_ids and idx < len(prompt_ids)
-                else f"batch_{self.error_tracker.batch_counter}_idx_{idx}"
-            )
+            prompt_id = prompt_ids[idx] if prompt_ids and idx < len(prompt_ids) else f"batch_{self.error_tracker.batch_counter}_idx_{idx}"
             prompt_text = prompts[idx] if prompts and idx < len(prompts) else ""
-            response_text = (
-                predicted_answers[idx] if idx < len(predicted_answers) else ""
-            )
+            response_text = predicted_answers[idx] if idx < len(predicted_answers) else ""
             tests_raw: List[str] = []
             libs: Optional[List[str]] = None
             import ast
@@ -526,26 +488,16 @@ class CodeEvaluator:
                     response_text,
                 )
                 return (idx, 0.0, 0, 0, "", "", "No unit tests provided")
-            code_match = re.search(
-                r"```[\w]*\n(.*?)```", predicted_answers[idx], re.DOTALL
-            )
-            pred_code_block = (
-                code_match.group(1) if code_match else predicted_answers[idx]
-            )
+            code_match = re.search(r"```[\w]*\n(.*?)```", predicted_answers[idx], re.DOTALL)
+            pred_code_block = code_match.group(1) if code_match else predicted_answers[idx]
             all_test_blocks = []
             for snippet in tests_raw:
                 normalized_snippet = snippet.replace("\\n", "\n")
                 all_test_blocks.append(normalized_snippet)
             combined_test = f"""import unittest\nimport pandas as pd\nimport numpy as np\n\n{pred_code_block}\n\n{chr(10).join(all_test_blocks)}\n\nif __name__ == '__main__':\n    unittest.main(verbosity=2)\n"""
             try:
-                result = self.safe_executor.execute_safely(
-                    combined_test, session=sess, libraries=libs
-                )
-                is_unittest_failure = (
-                    "Ran " in result.get("stderr", "")
-                    or "FAILED" in result.get("stderr", "")
-                    or "PASSED" in result.get("stderr", "")
-                )
+                result = self.safe_executor.execute_safely(combined_test, session=sess, libraries=libs)
+                is_unittest_failure = "Ran " in result.get("stderr", "") or "FAILED" in result.get("stderr", "") or "PASSED" in result.get("stderr", "")
                 if result.get("success") or is_unittest_failure:
                     stdout = result.get("stdout", "")
                     stderr = result.get("stderr", "")
@@ -624,10 +576,7 @@ class CodeEvaluator:
 
         # Parallel execution
         with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [
-                executor.submit(run_single, idx, rm_info)
-                for idx, rm_info in enumerate(reward_model_info)
-            ]
+            futures = [executor.submit(run_single, idx, rm_info) for idx, rm_info in enumerate(reward_model_info)]
             for future in as_completed(futures):
                 idx, code_score, passed, total, stdout, stderr, error = future.result()
                 code_scores[idx] = code_score
@@ -708,36 +657,26 @@ class CodeEvaluator:
         if code_matches:
             # Return the first code block found
             code_snippet = code_matches[0].strip()
-            logger.debug(
-                f"Extracted code from ``` block: {len(code_snippet)} characters"
-            )
+            logger.debug(f"Extracted code from ``` block: {len(code_snippet)} characters")
             return code_snippet
 
         # Method 2: Try to extract from "def task_func" onwards
-        task_func_pattern = (
-            r"(def task_func.*?)(?=\n\n|\n(?:def |class |import |from |#|$)|\Z)"
-        )
+        task_func_pattern = r"(def task_func.*?)(?=\n\n|\n(?:def |class |import |from |#|$)|\Z)"
         task_func_match = re.search(task_func_pattern, predicted_answer, re.DOTALL)
 
         if task_func_match:
             code_snippet = task_func_match.group(1).strip()
-            logger.debug(
-                f"Extracted code from def task_func: {len(code_snippet)} characters"
-            )
+            logger.debug(f"Extracted code from def task_func: {len(code_snippet)} characters")
             return code_snippet
 
         # Method 3: Look for any function definition as fallback
-        function_pattern = (
-            r"(def \w+.*?)(?=\n\n|\n(?:def |class |import |from |#|$)|\Z)"
-        )
+        function_pattern = r"(def \w+.*?)(?=\n\n|\n(?:def |class |import |from |#|$)|\Z)"
         function_matches = re.findall(function_pattern, predicted_answer, re.DOTALL)
 
         if function_matches:
             # Return the first function found
             code_snippet = function_matches[0].strip()
-            logger.debug(
-                f"Extracted code from function def: {len(code_snippet)} characters"
-            )
+            logger.debug(f"Extracted code from function def: {len(code_snippet)} characters")
             return code_snippet
 
         logger.debug(f"No code snippet found in predicted answer")
@@ -757,12 +696,7 @@ class CodeEvaluator:
             return 0.0, "Unit Tests: No unit tests found"
 
         # Check if unit tests look reasonable (same logic as in interleaved reasoning)
-        if (
-            "assert" in unit_test_text
-            or "test" in unit_test_text.lower()
-            or "unittest" in unit_test_text.lower()
-            or "def test_" in unit_test_text
-        ):
+        if "assert" in unit_test_text or "test" in unit_test_text.lower() or "unittest" in unit_test_text.lower() or "def test_" in unit_test_text:
             return 1.0, "Unit Tests: Self-generated tests provided"
         else:
             return 0.0, "Unit Tests: No unit tests found"
@@ -792,13 +726,7 @@ class CodeEvaluator:
 
         # Check if any unit tests are present
         def _has_tests(info: Dict[str, Any]):
-            return bool(
-                isinstance(info, dict)
-                and (
-                    ("unit_tests" in info and info["unit_tests"])
-                    or ("tests" in info and info["tests"])
-                )
-            )
+            return bool(isinstance(info, dict) and (("unit_tests" in info and info["unit_tests"]) or ("tests" in info and info["tests"])))
 
         use_code_evaluator = any(_has_tests(info) for info in ground_truth_infos)
 
@@ -812,16 +740,12 @@ class CodeEvaluator:
                 extracted_code = self.extract_code_snippet(pred_answer)
                 if not extracted_code.strip():
                     failed_extraction_indices.append(i)
-                    extracted_code_answers.append(
-                        ""
-                    )  # Use empty string for failed extractions
+                    extracted_code_answers.append("")  # Use empty string for failed extractions
                 else:
                     extracted_code_answers.append(extracted_code)
 
             if failed_extraction_indices:
-                logger.warning(
-                    f"Failed to extract code from {len(failed_extraction_indices)} samples: {failed_extraction_indices}"
-                )
+                logger.warning(f"Failed to extract code from {len(failed_extraction_indices)} samples: {failed_extraction_indices}")
 
             # Use local unit test execution
             logger.info("Using local unit test execution for code evaluation")
@@ -861,28 +785,19 @@ class CodeEvaluator:
                 else:
                     # Normalize score as passed_tests / total_tests
                     if code_total_tests[i] > 0:
-                        normalized_score = (
-                            code_tests_passed[i] / code_total_tests[i]
-                        )
+                        normalized_score = code_tests_passed[i] / code_total_tests[i]
                     else:
                         normalized_score = 0.0
 
                     # Check for generated unit tests in the original response
-                    unit_test_score, unit_test_explanation = (
-                        self._check_generated_unit_tests(decoded_pred_answers[i])
-                    )
+                    unit_test_score, unit_test_explanation = self._check_generated_unit_tests(decoded_pred_answers[i])
 
                     weights = self.interleaved_reward_weights
-                    total_score = (
-                        normalized_score * weights["code"]
-                        + unit_test_score * weights["unit_tests"]
-                    )
+                    total_score = normalized_score * weights["code"] + unit_test_score * weights["unit_tests"]
                     code_scores.append(normalized_score)
                     total_scores.append(total_score)
                     decisions.append(1 if normalized_score > 0 else 0)
-                    explanations.append(
-                        f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests | {unit_test_explanation} \\nstdout: {code_stdout[i]} \\nstderr: {code_stderr[i]} \\nerror: {code_error[i]}"
-                    )
+                    explanations.append(f"passed {code_tests_passed[i]}/{code_total_tests[i]} tests | {unit_test_explanation} \\nstdout: {code_stdout[i]} \\nstderr: {code_stderr[i]} \\nerror: {code_error[i]}")
                     pass_at_1.append(1 if normalized_score == 1.0 else 0)
                     unit_test_scores.append(unit_test_score)
 
@@ -901,9 +816,7 @@ class CodeEvaluator:
                 },
             )
         else:
-            raise ValueError(
-                "No unit tests available, using simple heuristic evaluation"
-            )
+            raise ValueError("No unit tests available, using simple heuristic evaluation")
 
     def _evaluate_interleaved_reasoning(
         self,
@@ -943,9 +856,7 @@ class CodeEvaluator:
 
         # --- Batch-evaluate all descriptions first ---
         with _timer("evaluate_descriptions", timing_raw):
-            description_scores_map = self._evaluate_all_descriptions(
-                decoded_pred_answers, original_prompts, timing_raw
-            )
+            description_scores_map = self._evaluate_all_descriptions(decoded_pred_answers, original_prompts, timing_raw)
 
         component_rewards = collections.defaultdict(list)
 
@@ -953,12 +864,8 @@ class CodeEvaluator:
         all_extracted_code = []
         all_unit_test_info = []
         code_eval_indices = []  # Indices where we have code/unit-tests to evaluate
-        for i, (pred_answer, gt_info) in enumerate(
-            zip(decoded_pred_answers, ground_truth_infos)
-        ):
-            all_answers = extract_solution(
-                pred_answer, template_type=self.template_type
-            )
+        for i, (pred_answer, gt_info) in enumerate(zip(decoded_pred_answers, ground_truth_infos)):
+            all_answers = extract_solution(pred_answer, template_type=self.template_type)
             if isinstance(all_answers, list):
                 answer_parts = [part.strip() for part in all_answers]
             else:
@@ -972,9 +879,7 @@ class CodeEvaluator:
             code_text = answer_parts[1]
             extracted_code = self.extract_code_snippet(code_text)
             all_extracted_code.append(extracted_code)
-            if isinstance(gt_info, dict) and (
-                gt_info.get("unit_tests") or gt_info.get("tests")
-            ):
+            if isinstance(gt_info, dict) and (gt_info.get("unit_tests") or gt_info.get("tests")):
                 all_unit_test_info.append(
                     {
                         "ground_truth": "code",
@@ -993,14 +898,12 @@ class CodeEvaluator:
         code_total_tests = [0] * batch_size
         print(f"Running unit tests for {len(code_eval_indices)} samples")
         if any(all_unit_test_info[i] for i in code_eval_indices):
-            (batch_code_scores, batch_tests_passed, batch_total_tests, _, _, _) = (
-                self.run_unit_tests_combined(
-                    all_extracted_code,
-                    all_unit_test_info,
-                    prompt_ids=[f"interleaved_prompt_{i}" for i in batch_indices],
-                    prompts=decoded_pred_answers,
-                    timing_raw=timing_raw,
-                )
+            (batch_code_scores, batch_tests_passed, batch_total_tests, _, _, _) = self.run_unit_tests_combined(
+                all_extracted_code,
+                all_unit_test_info,
+                prompt_ids=[f"interleaved_prompt_{i}" for i in batch_indices],
+                prompts=decoded_pred_answers,
+                timing_raw=timing_raw,
             )
             for idx in code_eval_indices:
                 code_scores_list[idx] = batch_code_scores[idx]
@@ -1010,18 +913,12 @@ class CodeEvaluator:
 
         # --- Main evaluation loop (now just uses batch results) ---
         with _timer("evaluate_interleaved_components", timing_raw):
-            for i, (pred_answer, gt_info) in enumerate(
-                zip(decoded_pred_answers, ground_truth_infos)
-            ):
-                all_answers = extract_solution(
-                    pred_answer, template_type=self.template_type
-                )
+            for i, (pred_answer, gt_info) in enumerate(zip(decoded_pred_answers, ground_truth_infos)):
+                all_answers = extract_solution(pred_answer, template_type=self.template_type)
                 if isinstance(all_answers, list):
                     answer_parts = [part.strip() for part in all_answers]
                 else:
-                    answer_parts = [
-                        part.strip() for part in str(all_answers).split(",")
-                    ]
+                    answer_parts = [part.strip() for part in str(all_answers).split(",")]
                 if len(answer_parts) < 3:
                     explanations[i] = "Not enough answer parts"
                     continue
@@ -1032,38 +929,24 @@ class CodeEvaluator:
                 component_explanations = []
                 # Evaluate first answer (description/explanation)
                 description_score = description_scores_map.get(i, 0.0)
-                component_explanations.append(
-                    f"Description Score: {description_score:.2f}"
-                )
+                component_explanations.append(f"Description Score: {description_score:.2f}")
                 # Evaluate second answer (code implementation)
                 if code_total_tests[i] > 0:
                     code_score = code_tests_passed[i] / code_total_tests[i]
-                    component_explanations.append(
-                        f"Code: passed {code_tests_passed[i]}/{code_total_tests[i]} tests"
-                    )
+                    component_explanations.append(f"Code: passed {code_tests_passed[i]}/{code_total_tests[i]} tests")
                 else:
-                    component_explanations.append(
-                        "Code: No gt unit tests provided or failed extraction"
-                    )
+                    component_explanations.append("Code: No gt unit tests provided or failed extraction")
                 # Evaluate third answer (self-generated unit tests) - optional
                 unit_test_text = answer_parts[2]
-                unit_test_score, unit_test_explanation = (
-                    self._check_generated_unit_tests(unit_test_text)
-                )
+                unit_test_score, unit_test_explanation = self._check_generated_unit_tests(unit_test_text)
                 component_explanations.append(unit_test_explanation)
                 # Combine scores with weights
                 weights = self.interleaved_reward_weights
-                total_score = (
-                    description_score * weights["description"]
-                    + code_score * weights["code"]
-                    + unit_test_score * weights["unit_tests"]
-                )
+                total_score = description_score * weights["description"] + code_score * weights["code"] + unit_test_score * weights["unit_tests"]
                 total_scores[i] = total_score
                 decisions[i] = 1 if total_score > 1.0 else 0  # Threshold for success
                 explanations[i] = " | ".join(component_explanations)
-                raw_responses[i] = (
-                    f"Interleaved evaluation: {len(answer_parts)} answers found"
-                )
+                raw_responses[i] = f"Interleaved evaluation: {len(answer_parts)} answers found"
                 component_rewards["description_scores"].append(description_score)
                 component_rewards["code_scores"].append(code_score)
                 component_rewards["unit_test_scores"].append(unit_test_score)
@@ -1083,17 +966,13 @@ class CodeEvaluator:
             timing_raw = {}
 
         if not self.autorater_base_url:
-            logger.warning(
-                "AutoRater service URL not configured in CodeEvaluator; skipping description evaluation."
-            )
+            logger.warning("AutoRater service URL not configured in CodeEvaluator; skipping description evaluation.")
             return {}
 
         descriptions_to_eval: List[Tuple[int, str, str]] = []
 
         for i, pred_answer in enumerate(decoded_pred_answers):
-            answers = extract_solution(
-                pred_answer, template_type=self.template_type
-            )
+            answers = extract_solution(pred_answer, template_type=self.template_type)
             if isinstance(answers, list):
                 first_answer = answers[0]
             else:
@@ -1131,15 +1010,10 @@ class CodeEvaluator:
             # Dummy values for fields that are not used by outline evaluation but required by schema
             "attention_mask": [[1] * len(r) for r in tokenized_responses],
             "position_ids": [list(range(len(r))) for r in tokenized_responses],
-            "reward_model_info": [
-                {"template": "outline", "ground_truth": ""}
-                for _ in range(batch_size)
-            ],
+            "reward_model_info": [{"template": "outline", "ground_truth": ""} for _ in range(batch_size)],
         }
 
-        logger.info(
-            f"Calling AutoRater to evaluate {batch_size} description outlines."
-        )
+        logger.info(f"Calling AutoRater to evaluate {batch_size} description outlines.")
         scores, decisions, _, _ = call_autorater_service(
             self.autorater_base_url,
             payload,
@@ -1162,9 +1036,7 @@ class CodeEvaluator:
                     self.sandbox_session.__exit__(None, None, None)
                     logger.info("SandboxSession cleaned up via __exit__")
                 else:
-                    logger.info(
-                        "SandboxSession cleanup - no explicit close method available"
-                    )
+                    logger.info("SandboxSession cleanup - no explicit close method available")
             except Exception as e:
                 logger.warning(f"Error closing SandboxSession: {e}")
             finally:

@@ -30,11 +30,11 @@ def extract_solution(solution_str):
     """
     # Clean up the solution string
     solution = solution_str.strip()
-    
+
     # For Frames benchmark, answers are usually direct
     # Remove any trailing punctuation
-    solution = re.sub(r'[.!?]+$', '', solution)
-    
+    solution = re.sub(r"[.!?]+$", "", solution)
+
     return solution
 
 
@@ -53,20 +53,20 @@ def main():
     if args.max_samples is not None:
         dataset = dataset.select(range(args.max_samples))
 
-    instruction_following = 'Let\'s think step by step and output the final answer in \\boxed{answer here}.'
+    instruction_following = "Let's think step by step and output the final answer in \\boxed{answer here}."
 
     def make_map_fn(split):
         def process_fn(example, idx):
             # Extract the prompt and answer from the Frames dataset
             prompt_raw = example.pop("Prompt")
             answer_raw = example.pop("Answer")
-            
+
             # Add instruction following to the prompt
             prompt = prompt_raw + " " + instruction_following
-            
+
             # Extract the clean solution
             final_solution = extract_solution(answer_raw)
-            
+
             data = {
                 "data_source": data_source,
                 "prompt": [
@@ -113,9 +113,9 @@ def main():
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
         copy(src=local_dir, dst=hdfs_dir)
-    
+
     print(f"Processed {len(test_dataset)} examples and saved to {local_dir}/test.parquet")
 
 
 if __name__ == "__main__":
-    main() 
+    main()

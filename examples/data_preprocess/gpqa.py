@@ -27,22 +27,17 @@ from verl.utils.hdfs_io import copy, makedirs
 def extract_correct_answer_letter(example):
     """Extract the correct answer letter (A, B, C, or D) from the GPQA example."""
     # Create a list of all choices including the correct answer
-    choices = [
-        example["Incorrect Answer 1"], 
-        example["Incorrect Answer 2"], 
-        example["Incorrect Answer 3"],
-        example["Correct Answer"]
-    ]
-    
+    choices = [example["Incorrect Answer 1"], example["Incorrect Answer 2"], example["Incorrect Answer 3"], example["Correct Answer"]]
+
     # Randomly shuffle the incorrect answers
     incorrect_answers = [example["Incorrect Answer 1"], example["Incorrect Answer 2"], example["Incorrect Answer 3"]]
     random.shuffle(incorrect_answers)
-    
+
     # Insert the correct answer at a random position
     gold_index = random.randint(0, 3)
     final_choices = incorrect_answers.copy()
     final_choices.insert(gold_index, example["Correct Answer"])
-    
+
     # Return the letter corresponding to the correct answer position
     gold_choice = "ABCD"[gold_index]
     return final_choices, gold_choice
@@ -52,8 +47,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_dir", default="~/data/gpqa")
     parser.add_argument("--hdfs_dir", default=None)
-    parser.add_argument("--subset", default="gpqa_diamond", choices=["gpqa_diamond", "gpqa_main", "gpqa_extended"], 
-                        help="Which GPQA subset to process")
+    parser.add_argument("--subset", default="gpqa_diamond", choices=["gpqa_diamond", "gpqa_main", "gpqa_extended"], help="Which GPQA subset to process")
 
     args = parser.parse_args()
 
@@ -66,25 +60,19 @@ if __name__ == "__main__":
     test_dataset = dataset["train"]
 
     # Template for GPQA multiple choice questions
-    GPQA_QUERY_TEMPLATE = 'Answer the following multiple choice question. The last line of your response should be of the following format: \'Answer: $LETTER\' (without quotes) where LETTER is one of ABCD. Think step by step before answering.\n\n{Question}\n\nA) {A}\nB) {B}\nC) {C}\nD) {D}'
+    GPQA_QUERY_TEMPLATE = "Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: $LETTER' (without quotes) where LETTER is one of ABCD. Think step by step before answering.\n\n{Question}\n\nA) {A}\nB) {B}\nC) {C}\nD) {D}"
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         def process_fn(example, idx):
             question_raw = example.pop("Question")
-            
+
             # Extract choices and determine correct answer position
             choices, correct_letter = extract_correct_answer_letter(example)
-            
+
             # Format the question with choices
-            question = GPQA_QUERY_TEMPLATE.format(
-                Question=question_raw,
-                A=choices[0],
-                B=choices[1], 
-                C=choices[2],
-                D=choices[3]
-            )
-            
+            question = GPQA_QUERY_TEMPLATE.format(Question=question_raw, A=choices[0], B=choices[1], C=choices[2], D=choices[3])
+
             data = {
                 "data_source": data_source,
                 "prompt": [
@@ -135,4 +123,4 @@ if __name__ == "__main__":
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
 
-        copy(src=local_dir, dst=hdfs_dir) 
+        copy(src=local_dir, dst=hdfs_dir)

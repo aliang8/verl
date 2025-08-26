@@ -39,20 +39,20 @@ def extract_solution(solution_str, method="strict"):
             r"\b([ABCD])\s*is\s+correct",  # "A is correct"
             r"\b([ABCD])\s*is\s+the\s+answer",  # "A is the answer"
         ]
-        
+
         final_answer = None
         for pattern in patterns:
             match = re.search(pattern, solution_str, re.IGNORECASE)
             if match:
                 final_answer = match.group(1).upper()
                 break
-        
+
         # If no pattern matches, look for the last occurrence of A, B, C, or D
         if final_answer is None:
             matches = re.findall(r"\b([ABCD])\b", solution_str, re.IGNORECASE)
             if matches:
                 final_answer = matches[-1].upper()
-    
+
     return final_answer
 
 
@@ -67,11 +67,11 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
         score: the score for the correct answer
     """
     answer = extract_solution(solution_str=solution_str, method=method)
-    
+
     if answer is None:
         return 0.0
     else:
         if answer == ground_truth.upper():
             return score
         else:
-            return format_score 
+            return format_score

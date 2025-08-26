@@ -25,11 +25,11 @@ def extract_solution(solution_str, method="strict"):
         match = re.search(conclusion_pattern, solution_str, re.IGNORECASE | re.DOTALL)
         if match:
             conclusion_text = match.group(1).strip()
-            
+
             # Extract individual numbered lines from the conclusion text
-            lines = conclusion_text.split('\n')
+            lines = conclusion_text.split("\n")
             numbered_lines = []
-            
+
             for line in lines:
                 line = line.strip()
                 if line:  # Skip empty lines
@@ -38,14 +38,14 @@ def extract_solution(solution_str, method="strict"):
                     if match_line:
                         number, content = match_line.groups()
                         numbered_lines.append((int(number), content.strip()))
-            
+
             if numbered_lines:
                 # Sort by the number and extract just the conclusion part
                 sorted_lines = sorted(numbered_lines, key=lambda x: x[0])
                 conclusions = [line[1] for line in sorted_lines]
                 return conclusions
         return None
-    
+
     elif method == "flexible":
         # More flexible extraction patterns
         patterns = [
@@ -54,16 +54,16 @@ def extract_solution(solution_str, method="strict"):
             r"Answer:\s*(.*)",  # Answer format
             r"Solution:\s*(.*)",  # Solution format
         ]
-        
+
         for pattern in patterns:
             match = re.search(pattern, solution_str, re.IGNORECASE | re.DOTALL)
             if match:
                 conclusion_text = match.group(1).strip()
-                
+
                 # Same improved parsing as strict method
-                lines = conclusion_text.split('\n')
+                lines = conclusion_text.split("\n")
                 numbered_lines = []
-                
+
                 for line in lines:
                     line = line.strip()
                     if line:
@@ -71,12 +71,12 @@ def extract_solution(solution_str, method="strict"):
                         if match_line:
                             number, content = match_line.groups()
                             numbered_lines.append((int(number), content.strip()))
-                
+
                 if numbered_lines:
                     sorted_lines = sorted(numbered_lines, key=lambda x: x[0])
                     conclusions = [line[1] for line in sorted_lines]
                     return conclusions
-        
+
         # If no structured format found, look for knight/knave statements anywhere
         knight_knave_pattern = r"(\w+)\s+is\s+a\s+(knight|knave)"
         matches = re.findall(knight_knave_pattern, solution_str, re.IGNORECASE)
@@ -84,7 +84,7 @@ def extract_solution(solution_str, method="strict"):
             # Extract conclusions in the order they appear
             conclusions = [f"{name.title()} is a {role.lower()}" for name, role in matches]
             return conclusions
-            
+
         return None
 
 
@@ -92,7 +92,7 @@ def normalize_conclusion(conclusion):
     """Normalize a conclusion string for comparison."""
     # Remove extra whitespace and convert to lowercase
     conclusion = conclusion.strip().lower()
-    
+
     # Standardize the format: "name is a knight/knave"
     # Handle various formats like "name is knight", "name: knight", etc.
     patterns = [
@@ -101,13 +101,13 @@ def normalize_conclusion(conclusion):
         (r"(\w+):\s*(knight|knave)", r"\1 is a \2"),
         (r"(\w+)\s*-\s*(knight|knave)", r"\1 is a \2"),
     ]
-    
+
     for pattern, replacement in patterns:
         match = re.search(pattern, conclusion, re.IGNORECASE)
         if match:
             name, role = match.groups()
             return f"{name.lower()} is a {role.lower()}"
-    
+
     return conclusion
 
 
@@ -115,14 +115,14 @@ def compare_conclusions(predicted_conclusions, ground_truth_conclusions):
     """Compare predicted conclusions with ground truth conclusions."""
     if predicted_conclusions is None or ground_truth_conclusions is None:
         return False
-    
+
     if len(predicted_conclusions) != len(ground_truth_conclusions):
         return False
-    
+
     # Normalize both sets of conclusions
     pred_normalized = [normalize_conclusion(conc) for conc in predicted_conclusions]
     gt_normalized = [normalize_conclusion(conc) for conc in ground_truth_conclusions]
-    
+
     # Check if all conclusions match (order should be maintained)
     return pred_normalized == gt_normalized
 
@@ -138,22 +138,22 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
         score: the score for the correct conclusions
     """
     predicted_conclusions = extract_solution(solution_str=solution_str, method=method)
-    
+
     # Handle ground truth format - could be string or list
     if isinstance(ground_truth, str):
         # If ground truth is a string, try to parse it
         gt_conclusions = extract_solution(ground_truth, method="flexible")
         if gt_conclusions is None:
             # Fallback: split by lines and clean up
-            gt_lines = [line.strip() for line in ground_truth.split('\n') if line.strip()]
+            gt_lines = [line.strip() for line in ground_truth.split("\n") if line.strip()]
             gt_conclusions = gt_lines
     else:
         gt_conclusions = ground_truth
-    
+
     if predicted_conclusions is None:
         return 0.0
     else:
         if compare_conclusions(predicted_conclusions, gt_conclusions):
             return score
         else:
-            return format_score 
+            return format_score

@@ -28,7 +28,7 @@ from enum import Enum
 from pprint import pprint
 from typing import Optional, Type
 
-import numpy as np # type: ignore
+import numpy as np  # type: ignore
 import ray  # type: ignore
 import torch  # type: ignore
 from omegaconf import OmegaConf, open_dict, DictConfig  # type: ignore
@@ -63,7 +63,7 @@ from verl.utils.metric.utils import compute_ttft_ratio
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.reward_manager.reward_manager import RewardManager # type: ignore
+from verl.workers.reward_manager.reward_manager import RewardManager  # type: ignore
 
 WorkerType = Type[Worker]
 
@@ -362,10 +362,10 @@ class RayPPOTrainer:
         # # Merge autorater config into reward_manager_config if it's not already there
         # if "autorater_config" not in reward_manager_config:
         #     reward_manager_config["autorater_config"] = OmegaConf.to_container(self.autorater_config, resolve=True) if self.autorater_config else {}
-        
+
         # # Get template_type from rollout config
         # template_type = self.config.actor_rollout_ref.rollout.get("template_type", None)
-        
+
         # self.reward_manager = RewardManager(
         #     config=OmegaConf.create(reward_manager_config),
         #     tokenizer=self.tokenizer,
@@ -373,10 +373,7 @@ class RayPPOTrainer:
         #     use_autorater=self.use_autorater, # Pass the flag
         #     template_type=template_type # Pass template type for interleaved reasoning detection
         # )
-        self.reward_manager = RewardManager(
-            config=config.reward_manager,
-            tokenizer=self.tokenizer
-        )
+        self.reward_manager = RewardManager(config=config.reward_manager, tokenizer=self.tokenizer)
 
     def _validate_config(self):
         config = self.config
@@ -566,7 +563,7 @@ class RayPPOTrainer:
     def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path, data_sources=None, ground_truths=None):
         """Dump rollout/validation samples as JSONL, optionally separated by data source."""
         os.makedirs(dump_path, exist_ok=True)
-        
+
         n = len(inputs)
         base_data = {
             "question": inputs,
@@ -574,7 +571,7 @@ class RayPPOTrainer:
             "score": scores,
             "step": [self.global_steps] * n,
         }
-        
+
         # Add ground truth answers if provided
         if ground_truths is not None and len(ground_truths) == n:
             base_data["ground_truth"] = ground_truths
@@ -603,8 +600,9 @@ class RayPPOTrainer:
 
         # Group entries by data source
         from collections import defaultdict
+
         data_source_groups = defaultdict(list)
-        
+
         for i in range(n):
             data_source = data_sources[i] if isinstance(data_sources[i], str) else str(data_sources[i])
             data_source_groups[data_source].append(i)
@@ -612,17 +610,17 @@ class RayPPOTrainer:
         # Create separate files for each data source
         for data_source, indices in data_source_groups.items():
             # Sanitize data source name for filename
-            safe_data_source = "".join(c for c in data_source if c.isalnum() or c in ('-', '_')).rstrip()
+            safe_data_source = "".join(c for c in data_source if c.isalnum() or c in ("-", "_")).rstrip()
             if not safe_data_source:
                 safe_data_source = "unknown"
-            
+
             filename = os.path.join(dump_path, f"{self.global_steps}_{safe_data_source}.jsonl")
-            
+
             with open(filename, "w") as f:
                 for i in indices:
                     entry = {k: v[i] for k, v in base_data.items()}
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            
+
             print(f"Dumped {len(indices)} generations for '{data_source}' to {filename}")
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
@@ -655,13 +653,13 @@ class RayPPOTrainer:
         sample_inputs = []
         sample_outputs = []
         sample_scores = []
-        
+
         # List to collect ground truth answers from validation data
         validation_ground_truths_all = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
-            
+
             # Extract ground truth from this test batch before repeating
             batch_ground_truths = []
             if "reward_model" in test_batch.non_tensor_batch:
@@ -675,7 +673,7 @@ class RayPPOTrainer:
 
             # repeat test batch
             test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True)
-            
+
             # Also repeat ground truths to match the repeated test batch
             repeated_ground_truths = []
             for gt in batch_ground_truths:
@@ -733,9 +731,7 @@ class RayPPOTrainer:
             test_batch = test_batch.union(test_output_gen_batch)
 
             # Evaluate rewards using RewardManager (which handles ground-truth extraction internally)
-            reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(
-                test_batch
-            )
+            reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(test_batch)
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
@@ -744,12 +740,10 @@ class RayPPOTrainer:
                     reward_extra_infos_dict[key] = []
                 reward_extra_infos_dict[key].extend(val_list)
 
-            data_source_lst.append(
-                test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0])
-            )
+            data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
-        
+
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         val_data_dir = os.path.join(val_data_dir, self.config.trainer.experiment_name)
@@ -761,12 +755,12 @@ class RayPPOTrainer:
                     flattened_data_sources.extend(ds_batch)
                 else:
                     flattened_data_sources.append(ds_batch)
-            
+
             # Use the collected ground truths from validation data
-            validation_ground_truths = validation_ground_truths_all[:len(sample_inputs)]
+            validation_ground_truths = validation_ground_truths_all[: len(sample_inputs)]
             if len(validation_ground_truths) < len(sample_inputs):
                 validation_ground_truths.extend(["Unknown"] * (len(sample_inputs) - len(validation_ground_truths)))
-            
+
             self._dump_generations(
                 inputs=sample_inputs,
                 outputs=sample_outputs,
@@ -788,10 +782,7 @@ class RayPPOTrainer:
             data_sources = np.array([])
 
         # Filter out non-numeric reward info to avoid errors in metric aggregation
-        numeric_reward_infos = {
-            k: v for k, v in reward_extra_infos_dict.items()
-            if all(isinstance(x, (int, float, np.number)) for x in v)
-        }
+        numeric_reward_infos = {k: v for k, v in reward_extra_infos_dict.items() if all(isinstance(x, (int, float, np.number)) for x in v)}
 
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, numeric_reward_infos)
         metric_dict = {}
@@ -827,7 +818,7 @@ class RayPPOTrainer:
         2. Worker groups for each role (actor, critic, etc.)
         """
         print(f"Initializing workers")
-        print(f"="*100)
+        print(f"=" * 100)
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
@@ -881,7 +872,7 @@ class RayPPOTrainer:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
 
         print(f"Creating worker groups")
-        print(f"="*100)
+        print(f"=" * 100)
         print(f"resource_pool_to_cls: {self.resource_pool_to_cls}")
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
@@ -892,7 +883,7 @@ class RayPPOTrainer:
             all_wg.update(spawn_wg)
             print(f"\tDone creating worker group for {resource_pool}")
         print(f"Done creating worker groups")
-        print(f"="*100)
+        print(f"=" * 100)
         print("\n\n\n")
 
         if self.use_critic:
@@ -917,7 +908,7 @@ class RayPPOTrainer:
         #     self.autorater_wg.init_model()
         #     print("AutoRater configured with separate vLLM instance using fixed base model weights")
         print(f"Done initializing actor rollout")
-        print(f"="*100)
+        print(f"=" * 100)
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
@@ -1114,9 +1105,11 @@ class RayPPOTrainer:
 
                             batch = batch.union(gen_baseline_output)
 
-                            import ipdb; ipdb.set_trace()
+                            import ipdb
+
+                            ipdb.set_trace()
                             # Use remote AutoRater service for baseline reward computation
-                            if hasattr(self.config.trainer, 'autorater_service_url') and self.config.trainer.autorater_service_url:
+                            if hasattr(self.config.trainer, "autorater_service_url") and self.config.trainer.autorater_service_url:
                                 print("Using remote AutoRater service for baseline reward computation")
                                 baseline_autorater_response = self._call_remote_autorater_service(batch)
                                 baseline_autorater_scores = baseline_autorater_response["autorater_scores"]
@@ -1160,13 +1153,13 @@ class RayPPOTrainer:
                         reward_tensor, batch_extra_infos = self.reward_manager.compute_rewards(batch, timing_raw=timing_raw)
 
                     # Add data source breakdown for format/content rewards
-                    if hasattr(batch, 'non_tensor_batch') and 'data_source' in batch.non_tensor_batch:
-                        data_sources = batch.non_tensor_batch['data_source']
+                    if hasattr(batch, "non_tensor_batch") and "data_source" in batch.non_tensor_batch:
+                        data_sources = batch.non_tensor_batch["data_source"]
                         if isinstance(data_sources, np.ndarray):
                             data_sources = data_sources.tolist()
                         training_reward_metrics = process_training_reward_metrics(data_sources, batch_extra_infos)
                         metrics.update(training_reward_metrics)
-                    
+
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
@@ -1303,23 +1296,23 @@ class RayPPOTrainer:
                         "training/epoch": epoch,
                     }
                 )
-                
+
                 # Compute TTFT ratio metrics (tokens to first answer / total response length)
                 if "responses" in batch.batch:
                     try:
                         # Decode the responses to text
                         response_texts = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-                        
+
                         # Compute TTFT ratio metrics
                         ttft_metrics = compute_ttft_ratio(response_texts)
-                        
+
                         # Add prefix to all TTFT metrics
                         ttft_prefixed_metrics = {f"training/{k}": v for k, v in ttft_metrics.items()}
                         metrics.update(ttft_prefixed_metrics)
                     except Exception as e:
                         # Log error but don't fail training
                         print(f"Warning: Failed to compute TTFT metrics: {e}")
-                        
+
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic, tokenizer=self.tokenizer, template_type=self.config.reward_manager.template_type))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
@@ -1336,5 +1329,5 @@ class RayPPOTrainer:
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
-            
+
             self.reward_manager.save_epoch_metadata(epoch + 1, log_to_wandb=True)

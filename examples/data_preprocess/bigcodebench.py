@@ -111,4 +111,4 @@ if __name__ == "__main__":
     if args.hdfs_dir is not None:
         makedirs(args.hdfs_dir)
         copy(src=args.local_dir, dst=args.hdfs_dir)
-        print(f"Copied data to HDFS directory {args.hdfs_dir}") 
+        print(f"Copied data to HDFS directory {args.hdfs_dir}")

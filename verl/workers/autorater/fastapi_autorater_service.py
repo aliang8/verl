@@ -85,9 +85,7 @@ class AutoRaterActor:
 
         # Load tokenizer
         trust_remote_code = self.config.model.get("trust_remote_code", False)
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            local_path, trust_remote_code=trust_remote_code
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(local_path, trust_remote_code=trust_remote_code)
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -136,7 +134,7 @@ class AutoRaterActor:
         evaluation_prompts = []
         if not template_types:
             template_types = ["standard"] * len(prompts)
-        
+
         # Handle None context by creating a list of None values
         if gt_answers is None:
             gt_answers = [None] * len(prompts)
@@ -145,13 +143,9 @@ class AutoRaterActor:
 
         print(f"template_types: {template_types}")
 
-        for i, (prompt, response, gt_answer, tmpl, ctx) in enumerate(
-            zip(prompts, responses, gt_answers, template_types, context)
-        ):
+        for i, (prompt, response, gt_answer, tmpl, ctx) in enumerate(zip(prompts, responses, gt_answers, template_types, context)):
             if tmpl == "outline":
-                autorater_prompt = format_code_outline_prompt(
-                    problem_description=prompt, outline_answer=response
-                )
+                autorater_prompt = format_code_outline_prompt(problem_description=prompt, outline_answer=response)
             elif "helpfulness" in tmpl:
                 autorater_prompt = format_helpfulness_prompt(
                     question=prompt,
@@ -164,7 +158,7 @@ class AutoRaterActor:
             elif tmpl == "plan_evaluation":
                 if not isinstance(response, list):
                     raise ValueError("Plan evaluation requires a list of plans")
-                
+
                 autorater_prompt = format_plan_evaluation_prompt(prompt, response)
             elif tmpl == "coding_answer_correctness":
                 autorater_prompt = format_coding_answer_correctness_prompt(prompt, response)
@@ -272,9 +266,7 @@ async def health_check():
     memory_usage = None
 
     try:
-        result = subprocess.run(
-            ["nvidia-smi"], capture_output=True, text=True, timeout=5
-        )
+        result = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=5)
         gpu_available = result.returncode == 0
 
         if gpu_available:
@@ -342,14 +334,10 @@ async def initialize_autorater(request: InitializeRequest):
 
     # Validate configuration
     if "model" not in app.state.autorater_config:
-        raise HTTPException(
-            status_code=400, detail="Config must contain 'model' section"
-        )
+        raise HTTPException(status_code=400, detail="Config must contain 'model' section")
 
     if "rollout" not in app.state.autorater_config:
-        raise HTTPException(
-            status_code=400, detail="Config must contain 'rollout' section"
-        )
+        raise HTTPException(status_code=400, detail="Config must contain 'rollout' section")
 
     # Create Ray actors for each GPU
     app.state.autorater_actors = []
@@ -391,15 +379,11 @@ async def initialize_autorater(request: InitializeRequest):
 async def evaluate_responses(request: AutoRaterRequest):
     """Evaluate responses using distributed AutoRater actors"""
     if len(app.state.autorater_actors) == 0:
-        raise HTTPException(
-            status_code=400, detail="AutoRater not initialized. Call /initialize first."
-        )
+        raise HTTPException(status_code=400, detail="AutoRater not initialized. Call /initialize first.")
 
     start_time = time.time()
     batch_size = len(request.prompts)
-    logger.info(
-        f"Processing AutoRater request with {batch_size} samples using {len(app.state.autorater_actors)} actors"
-    )
+    logger.info(f"Processing AutoRater request with {batch_size} samples using {len(app.state.autorater_actors)} actors")
 
     # --- LLM AutoRater ---
     autorater_decisions, autorater_explanations, autorater_raw = _run_llm_autorater(
@@ -533,9 +517,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AutoRater FastAPI Service")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=80, help="Port to bind to")
-    parser.add_argument(
-        "--workers", type=int, default=1, help="Number of worker processes"
-    )
+    parser.add_argument("--workers", type=int, default=1, help="Number of worker processes")
     parser.add_argument("--config", type=str, help="Path to AutoRater config file")
 
     args = parser.parse_args()
