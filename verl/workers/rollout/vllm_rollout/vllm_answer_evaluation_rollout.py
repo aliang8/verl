@@ -234,6 +234,7 @@ Please provide a new, improved answer that correctly addresses the question."""
             non_tensor_batch["raw_prompt_ids"] = np.array([_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object)
 
         meta_info = prompts.meta_info
+        original_text_prompt = meta_info["original_prompt"]
 
         if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
             raise RuntimeError("vllm sharding manager is not working properly.")
@@ -265,6 +266,12 @@ Please provide a new, improved answer that correctly addresses the question."""
         for i in range(batch_size):
             generation_history.append({"prompt_idx": i, "original_prompt": original_prompts[i], "attempts": [], "final_response": "", "total_regeneration_attempts": 0, "final_answer_approved": False, "total_tokens_generated": 0})
 
+        # Rewind-like tracking arrays for reprompts (per-example flags)
+        needed_first_rewind_arr = np.zeros(batch_size, dtype=np.int32)
+        first_rewind_approved_arr = np.zeros(batch_size, dtype=np.int32)
+        needed_second_rewind_arr = np.zeros(batch_size, dtype=np.int32)
+        second_rewind_approved_arr = np.zeros(batch_size, dtype=np.int32)
+
         # Main generation loop with answer evaluation
         while active_indices:
             print(f"\n🔄 Processing {len(active_indices)} active prompts...")
@@ -293,14 +300,21 @@ Please provide a new, improved answer that correctly addresses the question."""
                 prompts=batch_prompts,
                 num_outputs=1,  # Always 1 for this strategy
                 max_new_tokens_list=batch_max_tokens,
-                temperature=1.2,
+                temperature=0.6,
                 top_p=0.9,
                 seeds=batch_seeds,
             )
+            
+            # Track tokens generated in this iteration for all prompts with responses
+            for i, prompt_idx in enumerate(batch_prompt_indices):
+                candidates = generation_candidates[i]
+                if candidates and candidates[0].strip():
+                    response_text = candidates[0].strip()
+                    response_tokens = self.tokenizer.encode(response_text)
+                    generation_history[prompt_idx]["total_tokens_generated"] += len(response_tokens)
 
-            # Process generation results and evaluate answers
-            new_active_indices = []
-
+            # Collect answers for batched autorater evaluation
+            eval_items = []  # list of dicts with prompt_idx, explicit_task, extracted_answer, generated_response
             for i, prompt_idx in enumerate(batch_prompt_indices):
                 candidates = generation_candidates[i]
                 if not candidates or not candidates[0].strip():
@@ -312,6 +326,9 @@ Please provide a new, improved answer that correctly addresses the question."""
                 # Validate that the response contains think tags
                 if not self.validate_response_has_think_tags(generated_response):
                     print(f"    Prompt {prompt_idx}: ⚠️  Response missing <think> tags, stopping generation")
+                    # Preserve generated response so it appears in final outputs and can be forced to complete
+                    full_response_ids = self.tokenizer.encode(generated_response)
+                    curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx].copy(), full_response_ids])
                     continue
 
                 # Extract the answer portion after </think>
@@ -319,31 +336,81 @@ Please provide a new, improved answer that correctly addresses the question."""
 
                 if not extracted_answer:
                     print(f"    Prompt {prompt_idx}: ⚠️  No answer found after </think>, stopping generation")
+                    # Preserve generated response so it appears in final outputs and can be forced to complete
+                    full_response_ids = self.tokenizer.encode(generated_response)
+                    curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx].copy(), full_response_ids])
                     continue
 
                 # Get explicit task for evaluation
-                explicit_task = original_prompts[prompt_idx]
+                explicit_task = original_text_prompt[prompt_idx]
                 if meta_info and "explicit_tasks" in meta_info:
                     explicit_tasks = meta_info["explicit_tasks"]
                     if prompt_idx < len(explicit_tasks) and explicit_tasks[prompt_idx]:
                         explicit_task = explicit_tasks[prompt_idx]
 
-                # Evaluate answer correctness
-                is_correct, confidence, explanation = self.evaluate_answer_correctness(explicit_task, extracted_answer, prompt_idx, meta_info)
+                eval_items.append({
+                    "prompt_idx": prompt_idx,
+                    "explicit_task": explicit_task,
+                    "extracted_answer": extracted_answer,
+                    "generated_response": generated_response,
+                })
 
-                # Update generation history
+            # Batch evaluate collected answers
+            is_correct_list = {}
+            explanations = {}
+            if eval_items:
+                autorater_payload = {
+                    "prompts": [it["explicit_task"] for it in eval_items],
+                    "responses": [it["extracted_answer"] for it in eval_items],
+                    "gt_answers": [meta_info["gt_answers"][it["prompt_idx"]] for it in eval_items],
+                    "template_types": ["default"] * len(eval_items),
+                }
+                autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(self.answer_evaluation_service_url, autorater_payload, batch_size=len(eval_items))
+                for j, it in enumerate(eval_items):
+                    decision = autorater_decisions[j] if (autorater_decisions and j < len(autorater_decisions)) else False
+                    if decision >= 0.5:
+                        is_correct = True
+                    else:
+                        is_correct = False
+                    is_correct_list[it["prompt_idx"]] = is_correct
+                    explanations[it["prompt_idx"]] = autorater_explanations[j] if (autorater_explanations and j < len(autorater_explanations)) else ""
+
+            # Process evaluation results and decide reprompts
+            new_active_indices = []
+            for it in eval_items:
+                prompt_idx = it["prompt_idx"]
+                generated_response = it["generated_response"]
+                extracted_answer = it["extracted_answer"]
+                is_correct = bool(is_correct_list.get(prompt_idx, False))
+                explanation = explanations.get(prompt_idx, "")
+
+                # Prepare attempt data
+                attempt_number = generation_history[prompt_idx]["total_regeneration_attempts"] + 1
                 attempt_data = {
-                    "attempt_number": generation_history[prompt_idx]["total_regeneration_attempts"] + 1,
+                    "attempt_number": attempt_number,
                     "full_response": generated_response,
                     "extracted_answer": extracted_answer,
                     "is_correct": is_correct,
-                    "confidence": confidence,
+                    "confidence": 1.0 if is_correct else 0.0,
                     "explanation": explanation,
                     "tokens_generated": len(self.tokenizer.encode(generated_response)),
                 }
+
+                # Update history and totals
                 generation_history[prompt_idx]["attempts"].append(attempt_data)
                 generation_history[prompt_idx]["total_regeneration_attempts"] += 1
-                generation_history[prompt_idx]["total_tokens_generated"] += attempt_data["tokens_generated"]
+                # total_tokens_generated already updated immediately after generation
+
+                # Update reprompt tracking arrays
+                if attempt_number == 1 and not is_correct:
+                    needed_first_rewind_arr[prompt_idx] = 1
+                elif attempt_number == 2:
+                    if is_correct:
+                        first_rewind_approved_arr[prompt_idx] = 1
+                    else:
+                        needed_second_rewind_arr[prompt_idx] = 1
+                elif attempt_number == 3 and is_correct:
+                    second_rewind_approved_arr[prompt_idx] = 1
 
                 if is_correct:
                     # Answer is correct, mark as complete
@@ -353,7 +420,6 @@ Please provide a new, improved answer that correctly addresses the question."""
                     # Add the full response to current input
                     full_response_ids = self.tokenizer.encode(generated_response)
                     curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx].copy(), full_response_ids])
-
                 else:
                     # Answer is incorrect, check if we can try again
                     if generation_history[prompt_idx]["total_regeneration_attempts"] < self.max_regeneration_attempts:
@@ -367,7 +433,6 @@ Please provide a new, improved answer that correctly addresses the question."""
 
                         # Keep this prompt active for next iteration
                         new_active_indices.append(prompt_idx)
-
                     else:
                         # Max attempts reached
                         generation_history[prompt_idx]["final_response"] = generated_response
@@ -406,59 +471,112 @@ Please provide a new, improved answer that correctly addresses the question."""
 
         # Collect final responses and update generation history
         response_list = []
-
+        
         for i in range(batch_size):
             # Get the final accumulated generation for this prompt
             input_len = len(init_inputs[i])
             response_ids = curr_inputs[i][input_len:]
-
+            
             # Use the accumulated generation directly
             response_list.append(response_ids)
-
+            
             # Update the final response in generation history if not already set
             if not generation_history[i]["final_response"]:
                 generation_history[i]["final_response"] = self.tokenizer.decode(response_ids, skip_special_tokens=True)
+        
+        # Force answer completion if needed for prompts that lack </think> or have empty answer
+        if hasattr(self, 'additional_answer_tokens') and self.additional_answer_tokens:
+            to_force_answer_indices = []
+            batched_force_answer_inputs = []
+            batched_force_answer_prefixes = []
+            
+            for i, response_ids in enumerate(response_list):
+                # Decode current final response text
+                response_text = self.tokenizer.decode(response_ids, skip_special_tokens=True)
+                has_think_end = "</think>" in response_text
+                extracted_answer = self.extract_answer_after_think(response_text)
+                needs_forcing = (not has_think_end) or (extracted_answer.strip() == "")
+                
+                if needs_forcing:
+                    # Ensure we close </think> to trigger answer generation
+                    if not has_think_end:
+                        response_text += "</think>"
+                    
+                    forced_prefix_ids = self.tokenizer.encode(response_text, add_special_tokens=False)
+                    continuation_input = np.concatenate([init_inputs[i].copy(), forced_prefix_ids])
+                    
+                    to_force_answer_indices.append(i)
+                    batched_force_answer_inputs.append(continuation_input)
+                    batched_force_answer_prefixes.append(forced_prefix_ids)
+                    
+                    # Placeholder until continuation is generated
+                    response_list[i] = None
+            
+            if to_force_answer_indices:
+                print(f"\n🔧 Forcing answer completion for {len(to_force_answer_indices)} prompts (missing </think> or empty answer)...")
+                additional_tokens = int(getattr(self, 'additional_answer_tokens', 512))
 
-            # Update the final response in generation history if not already set
-            if not generation_history[i]["final_response"]:
-                generation_history[i]["final_response"] = self.tokenizer.decode(response_ids, skip_special_tokens=True)
-
+                with self.update_sampling_params(max_tokens=additional_tokens, stop=None):
+                    force_answer_outputs = self.inference_engine.generate(
+                        prompts=[{"prompt_token_ids": input_ids.tolist()} for input_ids in batched_force_answer_inputs],
+                        sampling_params=self.sampling_params,
+                        use_tqdm=False,
+                    )
+                
+                for j, force_idx in enumerate(to_force_answer_indices):
+                    output = force_answer_outputs[j]
+                    continuation_ids = output.outputs[0].token_ids
+                    final_response = batched_force_answer_prefixes[j] + continuation_ids
+                    
+                    # Update response list and history
+                    response_list[force_idx] = final_response
+                    generation_history[force_idx]["final_response"] = self.tokenizer.decode(final_response, skip_special_tokens=True)
+                    generation_history[force_idx]["total_tokens_generated"] += len(continuation_ids)
+                    
+                    print(f"    Prompt {force_idx}: Added {len(continuation_ids)} forced continuation tokens")
+        
         # Print final summary
         approved_indices = [i for i in range(batch_size) if generation_history[i]["final_answer_approved"]]
         rejected_indices = [i for i in range(batch_size) if not generation_history[i]["final_answer_approved"]]
-
+        
         # Calculate total tokens across all attempts
         total_tokens_all_attempts = sum(generation_history[i]["total_tokens_generated"] for i in range(batch_size))
-
+        
         print(f"\n🎯 Final Generation Summary:")
         print(f"  ✅ Total approved answers: {len(approved_indices)} (indices: {approved_indices})")
         print(f"  ❌ Total rejected answers: {len(rejected_indices)} (indices: {rejected_indices})")
         print(f"  🔢 Total tokens generated across all attempts: {total_tokens_all_attempts:,}")
-
+        
         for i in range(batch_size):
-            print(f"  Prompt {i}: {len(response_ids)} tokens, {generation_history[i]['total_regeneration_attempts']} attempts, {generation_history[i]['total_tokens_generated']:,} total tokens, {'✅ Approved' if generation_history[i]['final_answer_approved'] else '❌ Rejected'}")
-
+            print(f"  Prompt {i}: {generation_history[i]['total_regeneration_attempts']} attempts, {generation_history[i]['total_tokens_generated']:,} total tokens, {'✅ Approved' if generation_history[i]['final_answer_approved'] else '❌ Rejected'}")
+        
+        # Store rewind-like arrays into non_tensor_batch for downstream aggregation/visualization
+        non_tensor_batch["needed_first_rewind"] = needed_first_rewind_arr
+        non_tensor_batch["first_rewind_approved"] = first_rewind_approved_arr
+        non_tensor_batch["needed_second_rewind"] = needed_second_rewind_arr
+        non_tensor_batch["second_rewind_approved"] = second_rewind_approved_arr
+        
         # Pad responses to uniform length
         response = pad_2d_list_to_length(response_list, self.pad_token_id, max_length=self.config.response_length).to(idx.device)
-
+        
         # Concatenate input and response
         seq = torch.cat([idx, response], dim=-1)
-
+        
         # Update position IDs and attention mask
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
         delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
         if position_ids.dim() == 3:  # qwen2vl mrope
             delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, 3, -1)
-
+        
         response_position_ids = position_ids[..., -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         response_attention_mask = get_response_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
-
+        
         # Create dummy log probs (will be recomputed by actor)
         rollout_log_probs = torch.zeros(batch_size, response_length, dtype=torch.float32, device=idx.device)
-
+        
         # Create final batch
         batch = TensorDict(
             {
@@ -471,12 +589,12 @@ Please provide a new, improved answer that correctly addresses the question."""
             },
             batch_size=batch_size,
         )
-
+        
         # Add generation history to non_tensor_batch
         non_tensor_batch["generation_history"] = np.array(generation_history, dtype=object)
-
+        
         # Free vllm cache engine
         if vllm_version in ("0.5.4", "0.6.3") and self.config.free_cache_engine:
             self.inference_engine.free_cache_engine()
-
+        
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)

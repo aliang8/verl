@@ -97,6 +97,7 @@ class vLLMBestOfN(vLLMRollout):
             print(f"Random selection seed: {self.random_seed}")
         print(f"Answer stop token: '{self.answer_stop_token}' -> token IDs: {self.answer_stop_token_ids}")
         print(f"Answer start token: '{self.answer_start_token}' -> token IDs: {self.answer_start_token_ids}")
+        print(f"Two-turn generation: Turn 1 generates {self.n_candidates} candidates, Turn 2 generates 1 sequence")
         print(f"Iterative reprompting: enabled={self.enable_iterative_reprompting}, max_iterations={self.max_iterative_iterations}")
         print(f"Force answer completion: {self.force_answer_completion}")
         print(f"Additional answer tokens: {self.additional_answer_tokens}")
@@ -125,53 +126,48 @@ class vLLMBestOfN(vLLMRollout):
             
             print(f"Random selection: selected candidate {best_idx + 1} from {len(candidates)} candidates")
             return best_idx, best_score
-        
-        # Otherwise, use autorater service for oracle selection
-        try:
-            # Use explicit task if available, otherwise use original question
-            evaluation_question = question
-            if meta_info and "explicit_tasks" in meta_info:
-                explicit_tasks = meta_info["explicit_tasks"]
-                if prompt_idx < len(explicit_tasks) and explicit_tasks[prompt_idx]:
-                    evaluation_question = explicit_tasks[prompt_idx]
-                    print(f"Using explicit task for evaluation: {evaluation_question[:100]}...")
-                else:
-                    print(f"Using original question for evaluation: {question[:100]}...")
+
+        # Use explicit task if available, otherwise use original question
+        evaluation_question = question
+        if meta_info and "explicit_tasks" in meta_info:
+            explicit_tasks = meta_info["explicit_tasks"]
+            if prompt_idx < len(explicit_tasks) and explicit_tasks[prompt_idx]:
+                evaluation_question = explicit_tasks[prompt_idx]
+                print(f"Using explicit task for evaluation: {evaluation_question[:100]}...")
             else:
                 print(f"Using original question for evaluation: {question[:100]}...")
+        else:
+            print(f"Using original question for evaluation: {question[:100]}...")
 
-            # Prepare autorater payload for plan evaluation
-            autorater_payload = {
-                "prompts": [evaluation_question],  # Use explicit task if available
-                "responses": [candidates],  # The list of plans to evaluate
-                "gt_answers": [""],  # Empty ground truth for plan evaluation
-                "template_types": ["plan_evaluation"],
-            }
+        # Prepare autorater payload for plan evaluation
+        autorater_payload = {
+            "prompts": [evaluation_question],  # Use explicit task if available
+            "responses": [candidates],  # The list of plans to evaluate
+            "gt_answers": [""],  # Empty ground truth for plan evaluation
+            "template_types": ["plan_evaluation"],
+        }
 
-            # Call autorater service
-            autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(self.autorater_service_url, autorater_payload, batch_size=1)
+        # Call autorater service
+        autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(self.autorater_service_url, autorater_payload, batch_size=1)
 
-            # Parse the response to get the selected plan number
-            if autorater_raw_responses and len(autorater_raw_responses) > 0:
-                raw_response = autorater_raw_responses[0]
-                # For plan evaluation, the autorater service returns the plan number directly
-                # as the decision (not as a raw response that needs parsing)
-                if autorater_decisions and len(autorater_decisions) > 0:
-                    selected_plan = int(autorater_decisions[0])
-                else:
-                    # Fallback to parsing the raw response
-                    selected_plan = parse_plan_evaluation_response(raw_response, len(candidates))
+        # Parse the response to get the selected plan number
+        if autorater_raw_responses and len(autorater_raw_responses) > 0:
+            raw_response = autorater_raw_responses[0]
+            # For plan evaluation, the autorater service returns the plan number directly
+            # as the decision (not as a raw response that needs parsing)
+            if autorater_decisions and len(autorater_decisions) > 0:
+                selected_plan = int(autorater_decisions[0])
+            else:
+                # Fallback to parsing the raw response
+                selected_plan = parse_plan_evaluation_response(raw_response, len(candidates))
 
-                # Convert to 0-based index and return with a default score
-                best_idx = selected_plan - 1  # Convert from 1-based to 0-based
-                best_score = 1.0  # Default score for plan evaluation
+            # Convert to 0-based index and return with a default score
+            best_idx = selected_plan - 1  # Convert from 1-based to 0-based
+            best_score = 1.0  # Default score for plan evaluation
 
-                print(f"Plan evaluator selected candidate {selected_plan} (index {best_idx})")
-            return best_idx, best_score
-        except Exception as e:
-            print(f"Error calling autorater service for plan evaluation: {e}")
-            # Fallback: return first candidate with default score
-            return 0, 1.0
+            print(f"Plan evaluator selected candidate {selected_plan} (index {best_idx})")
+        return best_idx, best_score
+
 
     def filter_similar_candidates(self, candidates: List[Dict], threshold: float = None) -> Tuple[List[Dict], List[int]]:
         """
@@ -428,7 +424,7 @@ class vLLMBestOfN(vLLMRollout):
 
         return candidates
 
-    def generate_candidates_for_all_prompts_batch(self, active_indices: List[int], curr_inputs: List, curr_max_tokens: List) -> List[List[str]]:
+    def generate_candidates_for_all_prompts_batch(self, active_indices: List[int], curr_inputs: List, curr_max_tokens: List, num_outputs: int = None) -> List[List[str]]:
         """
         Generate candidates for all prompts simultaneously using vLLM batch processing.
 
@@ -436,6 +432,7 @@ class vLLMBestOfN(vLLMRollout):
             active_indices: List of active prompt indices
             curr_inputs: Current input tokens for each prompt
             curr_max_tokens: Maximum tokens to generate for each prompt
+            num_outputs: Number of outputs to generate per prompt (n parameter)
 
         Returns:
             List of candidate lists for each prompt
@@ -456,7 +453,7 @@ class vLLMBestOfN(vLLMRollout):
             batch_seeds.append(prompt_idx)  # Use prompt_idx as seed for reproducibility
 
         # Generate all candidates simultaneously using batch processing
-        all_candidates = self.generate_text_with_model_batch(prompts=batch_prompts, num_outputs=self.n_candidates, max_new_tokens_list=batch_max_tokens, temperature=1.2, top_p=0.9, seeds=batch_seeds)
+        all_candidates = self.generate_text_with_model_batch(prompts=batch_prompts, num_outputs=num_outputs if num_outputs is not None else self.n_candidates, max_new_tokens_list=batch_max_tokens, temperature=1.2, top_p=0.9, seeds=batch_seeds)
 
         return all_candidates
 
@@ -599,6 +596,7 @@ Existing approaches to avoid:
             non_tensor_batch["raw_prompt_ids"] = np.array([_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object)
 
         meta_info = prompts.meta_info
+        original_text_prompt = meta_info["original_prompt"]
 
         if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
             raise RuntimeError("vllm sharding manager is not working properly.")
@@ -623,138 +621,172 @@ Existing approaches to avoid:
             active_indices.append(sample_idx)
             curr_max_tokens.append(self.config.response_length)
 
-        print(f"Initialized {batch_size} prompts, will generate {self.n_candidates} candidates per prompt")
+        print(f"Initialized {batch_size} prompts, will generate {self.n_candidates} candidates per prompt in first turn, then 1 sequence per prompt in second turn")
 
         # Initialize generation history for each prompt
         generation_history = []
         for i in range(batch_size):
-            generation_history.append({"prompt_idx": i, "original_prompt": original_prompts[i], "turns": [], "final_response": ""})
+            generation_history.append({"prompt_idx": i, "original_prompt": original_prompts[i], "turns": [], "final_response": "", "total_tokens_generated": 0})
 
+        # Track total generated tokens per prompt across all generations in this rollout
+        prompt_total_tokens = [0] * batch_size
+        
         # Multi-turn generation with autorater
         max_turns = self.config.get("max_turns", 2)
-
-        print(f"Multi-turn generation: max_turns={max_turns}")
-
+        
+        print(f"Two-turn generation: max_turns={max_turns}")
+        print(f"  Turn 1: Generate {self.n_candidates} candidates per prompt, evaluate and select best")
+        print(f"  Turn 2: Generate 1 sequence per prompt to complete the answer")
+        
         for turn in range(max_turns):
             if not active_indices:
                 break
-
+            
             print(f"Turn {turn + 1}: Processing {len(active_indices)} active prompts")
             print(f"  Expected answer count for this turn: {turn + 1}")
-
+            
             # Generate candidates for all prompts simultaneously using batch processing
-            print(f"Generating {self.n_candidates} candidates for {len(active_indices)} prompts simultaneously...")
-
-            all_candidates = self.generate_candidates_for_all_prompts_batch(active_indices, curr_inputs, curr_max_tokens)
+            if turn == 0:
+                # First turn: generate n_candidates for each prompt
+                print(f"Generating {self.n_candidates} candidates for {len(active_indices)} prompts simultaneously...")
+                all_candidates = self.generate_candidates_for_all_prompts_batch(active_indices, curr_inputs, curr_max_tokens)
+            else:
+                # Second turn: generate only 1 sequence for each prompt
+                print(f"Generating 1 sequence for {len(active_indices)} prompts simultaneously...")
+                all_candidates = self.generate_candidates_for_all_prompts_batch(active_indices, curr_inputs, curr_max_tokens, num_outputs=1)
+            
             prompt_indices = active_indices  # Keep original order
-
-            print(f"Generated {len(active_indices)} prompt sets, each with {self.n_candidates} candidates")
-
+            
+            if turn == 0:
+                print(f"Generated {len(active_indices)} prompt sets, each with {self.n_candidates} candidates")
+            else:
+                print(f"Generated {len(active_indices)} prompt sets, each with 1 sequence")
+            
+            # Count tokens generated in this batch for each prompt
+            for i, prompt_idx in enumerate(prompt_indices):
+                for candidate_text in all_candidates[i]:
+                    if candidate_text:
+                        prompt_total_tokens[prompt_idx] += len(self.tokenizer.encode(candidate_text))
+                generation_history[prompt_idx]["total_tokens_generated"] = prompt_total_tokens[prompt_idx]
+            
             # Process each prompt's candidates and use autorater to select best answers
             new_active_indices = []
-
+            
             for i, prompt_idx in enumerate(prompt_indices):
                 print("=" * 100)
                 print(f"Processing prompt {prompt_idx}, turn {turn + 1}")
                 print("=" * 100)
-
+                
                 candidates = all_candidates[i]
-                question = original_prompts[prompt_idx]
-
+                question = original_text_prompt[prompt_idx]
+                
                 print(f"Prompt {prompt_idx}: Processing {len(candidates)} candidates")
-
+                
                 # Check if any candidate has reached </answer> and extract answers
                 candidates_with_answers, candidates_without_answers = self.process_candidates_for_turn(candidates, prompt_idx, question, init_inputs, curr_inputs, turn)
-
+                
                 # Evaluate and select the best candidate if any have reached </answer>
                 if len(candidates_with_answers) > 0:
-                    print(f"Prompt {prompt_idx}: {len(candidates_with_answers)}/{len(candidates)} candidates reached </answer>, evaluating and selecting best one")
-
-                    # Apply similarity filtering to original candidates first
-                    if self.use_similarity_filtering and len(candidates_with_answers) > 1:
-                        print(f"  Applying similarity filtering to {len(candidates_with_answers)} original candidates...")
-                        filtered_original_candidates, kept_indices = self.filter_similar_candidates(candidates_with_answers)
-
-                        if len(filtered_original_candidates) < len(candidates_with_answers):
-                            print(f"  Reduced from {len(candidates_with_answers)} to {len(filtered_original_candidates)} diverse original candidates")
-                    else:
-                        filtered_original_candidates = candidates_with_answers
-
-                    candidates_with_answers = filtered_original_candidates
-
-                    # Iterative answer generation: generate additional diverse answers if needed
-                    # Only do this on the first turn (turn 0) to establish the initial diverse set
-                    if turn == 0 and self.enable_iterative_reprompting:
-                        target_diverse_candidates = min(self.n_candidates, 10)  # Cap at 10 to avoid infinite loops
-
-                        if len(candidates_with_answers) < target_diverse_candidates:
-                            iteration = 0
-                            while len(candidates_with_answers) < target_diverse_candidates:
-                                num_needed = target_diverse_candidates - len(candidates_with_answers)
-                                print(f"  Need {num_needed} more diverse candidates, generating batch...")
-
-                                # Extract existing answers for diversity comparison
-                                existing_answers = [c["answer"] for c in candidates_with_answers]
-
-                                # Generate all needed answers in one batch
-                                new_responses = self.generate_diverse_answers_batch(prompt=question, existing_answers=existing_answers, num_to_generate=num_needed, max_new_tokens=curr_max_tokens[prompt_idx])
-
-                                print(f"  Generated {len(new_responses)} new responses")
-
-                                if new_responses:
-                                    added_candidates = 0
-                                    # Create synthetic candidates for the new responses and add them to candidates_with_answers
+                    if turn == 0:
+                        # First turn: evaluate multiple candidates and select the best one
+                        print(f"Prompt {prompt_idx}: {len(candidates_with_answers)}/{len(candidates)} candidates reached </answer>, evaluating and selecting best one")
+                        
+                        # Apply similarity filtering to original candidates first
+                        if self.use_similarity_filtering and len(candidates_with_answers) > 1:
+                            print(f"  Applying similarity filtering to {len(candidates_with_answers)} original candidates...")
+                            filtered_original_candidates, kept_indices = self.filter_similar_candidates(candidates_with_answers)
+                        
+                            if len(filtered_original_candidates) < len(candidates_with_answers):
+                                print(f"  Reduced from {len(candidates_with_answers)} to {len(filtered_original_candidates)} diverse original candidates")
+                        else:
+                            filtered_original_candidates = candidates_with_answers
+                        
+                        candidates_with_answers = filtered_original_candidates
+                        
+                        # Iterative answer generation: generate additional diverse answers if needed
+                        # Only do this on the first turn (turn 0) to establish the initial diverse set
+                        if self.enable_iterative_reprompting:
+                            target_diverse_candidates = min(self.n_candidates, 10)  # Cap at 10 to avoid infinite loops
+                            
+                            if len(candidates_with_answers) < target_diverse_candidates:
+                                iteration = 0
+                                while len(candidates_with_answers) < target_diverse_candidates:
+                                    num_needed = target_diverse_candidates - len(candidates_with_answers)
+                                    print(f"  Need {num_needed} more diverse candidates, generating batch...")
+                                    
+                                    # Extract existing answers for diversity comparison
+                                    existing_answers = [c["answer"] for c in candidates_with_answers]
+                                    
+                                    # Generate all needed answers in one batch
+                                    new_responses = self.generate_diverse_answers_batch(prompt=question, existing_answers=existing_answers, num_to_generate=num_needed, max_new_tokens=curr_max_tokens[prompt_idx])
+                                    
+                                    print(f"  Generated {len(new_responses)} new responses")
+                                    
+                                    # Count tokens from newly generated diverse responses
                                     for new_response in new_responses:
-                                        # Extract the answer from the full response for the candidate structure
-                                        extracted_answer = self.extract_last_answer(new_response)
-                                        if extracted_answer:
-                                            new_candidate = self.create_synthetic_candidate(extracted_answer, len(candidates_with_answers), candidates, prompt_idx, curr_inputs, init_inputs, new_response)
-                                            candidates_with_answers.append(new_candidate)
-                                            candidates.append(new_candidate)
-                                            added_candidates += 1
-                                    print(f"    ✓ Added {added_candidates} new candidates to the pool")
-                                else:
-                                    print(f"    ✗ Failed to generate new responses")
-
-                                iteration += 1
-
-                                # Apply similarity filtering to all candidates (including synthetic ones) after iterative generation
-                                if self.use_similarity_filtering and len(candidates_with_answers) > 1:
-                                    print(f"  Applying similarity filtering to {len(candidates_with_answers)} total candidates (original + synthetic)...")
-                                    candidates_with_answers, kept_indices = self.filter_similar_candidates(candidates_with_answers)
-
-                                if iteration > self.max_iterative_iterations:
-                                    break
-
-                        print(f"  Final candidate count after iterative generation: {len(candidates_with_answers)}")
-                    elif turn == 0 and not self.enable_iterative_reprompting:
-                        print(f"  Turn {turn}: Iterative reprompting disabled, using {len(candidates_with_answers)} original candidates")
+                                        if new_response and new_response.strip():
+                                            prompt_total_tokens[prompt_idx] += len(self.tokenizer.encode(new_response))
+                                    generation_history[prompt_idx]["total_tokens_generated"] = prompt_total_tokens[prompt_idx]
+                                    
+                                    if new_responses:
+                                        added_candidates = 0
+                                        # Create synthetic candidates for the new responses and add them to candidates_with_answers
+                                        for new_response in new_responses:
+                                            # Extract the answer from the full response for the candidate structure
+                                            extracted_answer = self.extract_last_answer(new_response)
+                                            if extracted_answer:
+                                                new_candidate = self.create_synthetic_candidate(extracted_answer, len(candidates_with_answers), candidates, prompt_idx, curr_inputs, init_inputs, new_response)
+                                                candidates_with_answers.append(new_candidate)
+                                                candidates.append(new_candidate)
+                                                added_candidates += 1
+                                        print(f"    ✓ Added {added_candidates} new candidates to the pool")
+                                    else:
+                                        print(f"    ✗ Failed to generate new responses")
+                                    
+                                    iteration += 1
+                                    
+                                    # Apply similarity filtering to all candidates (including synthetic ones) after iterative generation
+                                    if self.use_similarity_filtering and len(candidates_with_answers) > 1:
+                                        print(f"  Applying similarity filtering to {len(candidates_with_answers)} total candidates (original + synthetic)...")
+                                        candidates_with_answers, kept_indices = self.filter_similar_candidates(candidates_with_answers)
+                                    
+                                    if iteration > self.max_iterative_iterations:
+                                        break
+                            
+                            print(f"  Final candidate count after iterative generation: {len(candidates_with_answers)}")
+                        else:
+                            print(f"  Turn {turn}: Iterative reprompting disabled, using {len(candidates_with_answers)} original candidates")
+                        
+                        # Use autorater to select the best answer from filtered candidates
+                        # Extract answers from filtered candidates for autorater evaluation
+                        filtered_answers = [c["answer"] for c in candidates_with_answers]
+                        
+                        if self.use_random_selection:
+                            print(f"Prompt {prompt_idx}: Using random selection from {len(filtered_answers)} candidates")
+                        else:
+                            print(f"Prompt {prompt_idx}: Using autorater to select best from {len(filtered_answers)} candidates")
+                        
+                        best_idx, score = self.evaluate_response(question, filtered_answers, prompt_idx, meta_info)
+                        
+                        # Get the best candidate from candidates_with_answers
+                        # Now they are perfectly aligned since we filtered the candidates themselves
+                        best_idx = min(best_idx, len(candidates_with_answers) - 1)
+                        best_candidate = candidates_with_answers[best_idx]
+                        
+                        # Check if the selected candidate came from iterative generation
+                        is_iterative_candidate = best_candidate.get("is_synthetic", False)
+                        candidate_source = "iterative generation" if is_iterative_candidate else "original candidates"
+                        
+                        print(f"Prompt {prompt_idx}: Autorater selected candidate {best_candidate['candidate_idx'] + 1} with score {score}")
+                        print(f"Prompt {prompt_idx}: Selected candidate source: {candidate_source}")
                     else:
-                        print(f"  Turn {turn}: Using existing candidates without regeneration")
-
-                    # Use autorater to select the best answer from filtered candidates
-                    # Extract answers from filtered candidates for autorater evaluation
-                    filtered_answers = [c["answer"] for c in candidates_with_answers]
+                        # Second turn: just use the single candidate
+                        print(f"Prompt {prompt_idx}: Single sequence reached </answer>, using it directly")
+                        best_candidate = candidates_with_answers[0]
+                        best_idx = 0
+                        score = 1.0  # Default score for single candidate
+                        candidate_source = "second turn generation"
                     
-                    if self.use_random_selection:
-                        print(f"Prompt {prompt_idx}: Using random selection from {len(filtered_answers)} candidates")
-                    else:
-                        print(f"Prompt {prompt_idx}: Using autorater to select best from {len(filtered_answers)} candidates")
-                    
-                    best_idx, score = self.evaluate_response(question, filtered_answers, prompt_idx, meta_info)
-
-                    # Get the best candidate from candidates_with_answers
-                    # Now they are perfectly aligned since we filtered the candidates themselves
-                    best_idx = min(best_idx, len(candidates_with_answers) - 1)
-                    best_candidate = candidates_with_answers[best_idx]
-
-                    # Check if the selected candidate came from iterative generation
-                    is_iterative_candidate = best_candidate.get("is_synthetic", False)
-                    candidate_source = "iterative generation" if is_iterative_candidate else "original candidates"
-
-                    print(f"Prompt {prompt_idx}: Autorater selected candidate {best_candidate['candidate_idx'] + 1} with score {score}")
-                    print(f"Prompt {prompt_idx}: Selected candidate source: {candidate_source}")
-
                     # Store turn data in generation history
                     turn_data = {
                         "turn_number": turn,
@@ -766,36 +798,110 @@ Existing approaches to avoid:
                     }
                     generation_history[prompt_idx]["turns"].append(turn_data)
                     print(f"Prompt {prompt_idx}: Stored turn {turn + 1} data with {len(candidates_with_answers)} filtered answers")
-
+                    
                     # Copy the context from the best candidate to continue generation
                     best_full_generation_ids = best_candidate["full_generation_ids"]
-
-                    # Ubate the current input to use the best candidate's generation
+                    
+                    # Update the current input to use the best candidate's generation
                     curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx].copy(), best_full_generation_ids])
+                    
+                    print(f"Prompt {prompt_idx}: Updated curr_inputs with best candidate from Turn {turn + 1}")
+                    print(f"  Best candidate length: {len(best_full_generation_ids)} tokens")
+                    
+                    # After Turn 0 (plan generation), add <think> tag to prepare for Turn 1 (answer generation)
+                    if turn == 0:
+                        # Decode the current input to check if it already ends with <think>
+                        current_response_text = self.tokenizer.decode(curr_inputs[prompt_idx], skip_special_tokens=True)
+                        
+                        if not current_response_text.endswith("<think>"):
+                            # Ensure we have a proper ending structure: </answer><think>
+                            if not current_response_text.endswith("</answer>"):
+                                # If no </answer> found, add it
+                                current_response_text += "</answer>"
+                            
+                            # Add <think> tag to start the thinking process for turn 1
+                            current_response_text += "<think>"
+                            
+                            # Re-encode with the added <think> tag
+                            updated_response_ids = self.tokenizer.encode(current_response_text, add_special_tokens=False)
+                            curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx].copy(), updated_response_ids])
+                            
+                            print(f"Prompt {prompt_idx}: Added <think> tag after Turn 0 for Turn 1 continuation")
+                            print(f"  Response preview: {current_response_text[-100:]}...")
+                            print(f"  Updated curr_inputs length: {len(curr_inputs[prompt_idx]) - len(init_inputs[prompt_idx])} tokens")
+                        else:
+                            print(f"Prompt {prompt_idx}: Already has <think> tag, skipping addition")
+                    else:
+                        # For Turn 1 and beyond, we need to add the new generation to the existing curr_inputs
+                        # The current curr_inputs already contains all previous turns + <think> tag
+                        # We need to add the new generation from this turn
+                        if best_candidate and "current_turn_generation" in best_candidate:
+                            new_generation = best_candidate["current_turn_generation"]
+                            if new_generation:
+                                # Add the new generation to the existing curr_inputs
+                                new_generation_ids = self.tokenizer.encode(new_generation)
+                                curr_inputs[prompt_idx] = np.concatenate([curr_inputs[prompt_idx], new_generation_ids])
+                                
+                                print(f"Prompt {prompt_idx}: Added Turn {turn + 1} generation to accumulated response")
+                                print(f"  New generation: {new_generation[:100]}...")
+                                print(f"  New generation tokens: {len(new_generation_ids)}")
+                                print(f"  Total accumulated length: {len(curr_inputs[prompt_idx]) - len(init_inputs[prompt_idx])} tokens")
 
                     # Check if we should continue generation for this prompt
                     current_length = len(curr_inputs[prompt_idx]) - len(init_inputs[prompt_idx])
                     if current_length < self.config.response_length:
                         new_active_indices.append(prompt_idx)
                         curr_max_tokens[prompt_idx] = self.config.response_length - current_length
-
-                    print(f"Prompt {prompt_idx}: Using best candidate's context (length: {len(best_full_generation_ids)} tokens)")
+                    
+                    print(f"Prompt {prompt_idx}: Using accumulated context (length: {len(curr_inputs[prompt_idx]) - len(init_inputs[prompt_idx])} tokens)")
                 else:
                     print(f"Prompt {prompt_idx}: No candidates reached </answer>, using first candidate")
                     best_idx = 0
                     best_candidate = candidates[0]
                     # best_full_generation_ids = best_candidate['full_generation_ids']
                     best_candidate_id = self.tokenizer.encode(best_candidate)
-                    curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx].copy(), best_candidate_id])
+                    
+                    # For Turn 0, we start fresh with the new generation
+                    if turn == 0:
+                        curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx].copy(), best_candidate_id])
+                        
+                        # After Turn 0, add <think> tag even if no candidates reached </answer>
+                        # Decode the current input to check if it already ends with <think>
+                        current_response_text = self.tokenizer.decode(curr_inputs[prompt_idx], skip_special_tokens=True)
+                        
+                        if not current_response_text.endswith("<think>"):
+                            # Ensure we have a proper ending structure: </answer><think>
+                            if not current_response_text.endswith("</answer>"):
+                                # If no </answer> found, add it
+                                current_response_text += "</answer>"
+                            
+                            # Add <think> tag to start the thinking process for turn 1
+                            current_response_text += "<think>"
+                            
+                            # Re-encode with the added <think> tag
+                            updated_response_ids = self.tokenizer.encode(current_response_text, add_special_tokens=False)
+                            curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx].copy(), updated_response_ids])
+                            
+                            print(f"Prompt {prompt_idx}: Added <think> tag after Turn 0 (no candidates reached </answer>)")
+                            print(f"  Response preview: {current_response_text[-100:]}...")
+                        else:
+                            print(f"Prompt {prompt_idx}: Already has <think> tag, skipping addition")
+                    else:
+                        # For Turn 1 and beyond, add the new generation to existing curr_inputs
+                        curr_inputs[prompt_idx] = np.concatenate([curr_inputs[prompt_idx], best_candidate_id])
+                        
+                        print(f"Prompt {prompt_idx}: Added Turn {turn + 1} generation to accumulated response (no candidates reached </answer>)")
+                        print(f"  New generation: {best_candidate[:100]}...")
+                        print(f"  Total accumulated length: {len(curr_inputs[prompt_idx]) - len(init_inputs[prompt_idx])} tokens")
                     
                     # Calculate current_length for this case as well
                     current_length = len(curr_inputs[prompt_idx]) - len(init_inputs[prompt_idx])
                     
                     new_active_indices.append(prompt_idx)
                     curr_max_tokens[prompt_idx] = self.config.response_length - current_length
-
+            
             active_indices = new_active_indices
-
+            
             # Check if any prompts have reached max length
             final_active_indices = []
             for prompt_idx in active_indices:
@@ -804,45 +910,45 @@ Existing approaches to avoid:
                     curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx], curr_inputs[prompt_idx][len(init_inputs[prompt_idx]) : len(init_inputs[prompt_idx]) + self.config.response_length]])
                 else:
                     final_active_indices.append(prompt_idx)
-
+            
             active_indices = final_active_indices
-
+        
         # Collect final responses and update generation history
         response_list = []
-
+        
         for i in range(batch_size):
             # Get the final accumulated generation for this prompt
             input_len = len(init_inputs[i])
             response_ids = curr_inputs[i][input_len:]
-
+            
             # Use the accumulated generation directly - no need to regenerate
             response_list.append(response_ids)
             print(f"Prompt {i}: Using accumulated generation ({len(response_ids)} tokens)")
-
+            
             # Update the final response in generation history
             generation_history[i]["final_response"] = self.tokenizer.decode(response_ids, skip_special_tokens=True)
-
+        
         # Pad responses to uniform length
         response = pad_2d_list_to_length(response_list, self.pad_token_id, max_length=self.config.response_length).to(idx.device)
-
+        
         # Concatenate input and response
         seq = torch.cat([idx, response], dim=-1)
-
+        
         # Update position IDs and attention mask
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
         delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
         if position_ids.dim() == 3:  # qwen2vl mrope
             delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, 3, -1)
-
+        
         response_position_ids = position_ids[..., -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         response_attention_mask = get_response_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
-
+        
         # Create dummy log probs (will be recomputed by actor)
         rollout_log_probs = torch.zeros(batch_size, response_length, dtype=torch.float32, device=idx.device)
-
+        
         # Create final batch
         batch = TensorDict(
             {
@@ -855,7 +961,7 @@ Existing approaches to avoid:
             },
             batch_size=batch_size,
         )
-
+        
         # Add generation history to non_tensor_batch
         # Convert to numpy array to be compatible with DataProto
         non_tensor_batch["generation_history"] = np.array(generation_history, dtype=object)
@@ -928,6 +1034,10 @@ Existing approaches to avoid:
                     # Update response list
                     response_list[force_idx] = final_response
                     
+                    # Count only continuation tokens as newly generated
+                    prompt_total_tokens[force_idx] += len(continuation_ids)
+                    generation_history[force_idx]["total_tokens_generated"] = prompt_total_tokens[force_idx]
+                    
                     print(f"    Prompt {force_idx}: Added {len(continuation_ids)} forced completion tokens")
         else:
             print(f"\n⚠️  Force answer completion disabled, skipping answer completion check")
@@ -937,9 +1047,21 @@ Existing approaches to avoid:
                 if response_ids is not None:
                     # Update the final response in generation history
                     generation_history[i]["final_response"] = self.tokenizer.decode(response_ids, skip_special_tokens=True)
-
+        
+        # Update non_tensor_batch with final token counts and refreshed history
+        non_tensor_batch["generation_history"] = np.array(generation_history, dtype=object)
+        non_tensor_batch["total_tokens_generated"] = np.array(prompt_total_tokens, dtype=np.int64)
+        
+        # Print summary of total tokens generated
+        total_tokens_all_prompts = sum(prompt_total_tokens)
+        print(f"\n📊 Total Tokens Generated Summary (BestOfN):")
+        print(f"  Total tokens across all prompts: {total_tokens_all_prompts:,}")
+        print(f"  Average tokens per prompt: {total_tokens_all_prompts / batch_size:.1f}")
+        for i, tokens in enumerate(prompt_total_tokens):
+            print(f"  Prompt {i}: {tokens:,} tokens")
+        
         # Free vllm cache engine
         if vllm_version in ("0.5.4", "0.6.3") and self.config.free_cache_engine:
             self.inference_engine.free_cache_engine()
-
+        
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)

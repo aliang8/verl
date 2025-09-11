@@ -77,73 +77,6 @@ class vLLMRewindAndRepeatRollout(vLLMBestOfN):
         print(f"Force answer completion: {self.force_answer_completion}")
         print(f"Additional answer tokens: {self.additional_answer_tokens}")
 
-    def evaluate_plan_quality(self, question: str, plan: str, prompt_idx: int = 0, meta_info: Dict = None) -> Tuple[bool, float]:
-        """
-        Use the autorater service to evaluate if a plan is good given the intent.
-
-        Args:
-            question: The original question/prompt
-            plan: The generated plan to evaluate
-            prompt_idx: Index of the current prompt
-            meta_info: Additional metadata
-
-        Returns:
-            Tuple of (is_approved, confidence_score)
-        """
-        try:
-            # Use explicit task if available, otherwise use original question
-            evaluation_question = question
-            if meta_info and "explicit_tasks" in meta_info:
-                explicit_tasks = meta_info["explicit_tasks"]
-                if prompt_idx < len(explicit_tasks) and explicit_tasks[prompt_idx]:
-                    evaluation_question = explicit_tasks[prompt_idx]
-                    # print(f"Using explicit task for plan evaluation: {evaluation_question[:100]}...")
-                else:
-                    pass
-                    # print(f"Using original question for plan evaluation: {question[:100]}...")
-            # else:
-                # print(f"Using original question for plan evaluation: {question[:100]}...")
-
-            # Prepare autorater payload for plan quality evaluation
-            autorater_payload = {
-                "prompts": [evaluation_question],
-                "responses": [plan],
-                "gt_answers": [""],  # Empty ground truth for plan evaluation
-                "template_types": ["plan_quality_evaluation"],  # Use the new template type
-            }
-
-            # Call autorater service
-            autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(self.plan_evaluation_service_url, autorater_payload, batch_size=1)
-
-            # Parse the response to get the plan approval decision
-            if autorater_decisions and len(autorater_decisions) > 0:
-                # The autorater service should return the parsed decision directly
-                decision = autorater_decisions[0]
-
-                # Handle different response formats
-                if isinstance(decision, bool):
-                    is_approved = decision
-                    confidence_score = 1.0
-                elif isinstance(decision, str):
-                    # Convert string decision to boolean
-                    is_approved = decision.upper() == "TRUE"
-                    confidence_score = 1.0 if is_approved else 0.0
-                else:
-                    # Default to rejection for unknown response types
-                    is_approved = False
-                    confidence_score = 0.0
-
-                # print(f"Plan evaluator decision: {decision} (approved: {is_approved})")
-                return is_approved, confidence_score, autorater_explanations[0]
-            else:
-                # print("Warning: No decision from plan evaluator, defaulting to rejection")
-                return False, 0.0, ""
-
-        except Exception as e:
-            print(f"Error calling autorater service for plan evaluation: {e}")
-            # Fallback: reject plan with low confidence
-            return False, 0.0, ""
-
     def create_rewind_prompt(self, original_question: str, rejected_plans: List[str], turn: int, explicit_task: str = None, hit_max_length: bool = False) -> str:
         """
         Create an augmented prompt for regeneration after plan rejection.
@@ -183,7 +116,7 @@ Question: {evaluation_question}
 Please provide a concise plan that fits within the max length and addresses the question effectively."""
             else:
                 if rejected_plans:
-                    rewind_prompt = f"""The following plan was rejected as not meeting the requirements. Please generate a better plan.
+                    rewind_prompt = f"""The following plan was rejected as not meeting the requirements. Please generate a better plan. Remember to include the <answer> tags.
 
 Question: {evaluation_question}
 
@@ -192,7 +125,7 @@ Rejected Plan (Turn {turn}):
 
 Please provide a new, improved plan that addresses the question more effectively."""
                 else:
-                    rewind_prompt = f"""The previous attempt did not produce a valid plan. Please generate a new plan.
+                    rewind_prompt = f"""The previous attempt did not produce a valid plan. Please generate a new plan. Remember to include the <answer> tags.
 
 Question: {evaluation_question}
 
@@ -245,6 +178,7 @@ Please provide a new plan that addresses the question effectively."""
             non_tensor_batch["raw_prompt_ids"] = np.array([_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object)
 
         meta_info = prompts.meta_info
+        original_text_prompt = meta_info["original_prompt"]
 
         if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
             raise RuntimeError("vllm sharding manager is not working properly.")
@@ -295,14 +229,14 @@ Please provide a new plan that addresses the question effectively."""
 
         # TURN 1: Plan Generation with Rewind on Rejection
         print(f"\n🔄 TURN 1: Plan Generation with Rewind Capability")
-        
+
         # Generate initial plans for all prompts
         print(f"  Generating initial plans for {len(active_indices)} prompts...")
-        
+
         batch_prompts = []
         batch_max_tokens = []
         batch_seeds = []
-        
+
         for prompt_idx in active_indices:
             question = original_prompts[prompt_idx]
             batch_prompts.append(question)
@@ -337,7 +271,7 @@ Please provide a new plan that addresses the question effectively."""
         for i, prompt_idx in enumerate(active_indices):
             candidates = initial_candidates[i]
             if not candidates or not candidates[0].strip():
-                prompts_needing_rewind.append(original_prompts[prompt_idx])
+                prompts_needing_rewind.append(original_text_prompt[prompt_idx])
                 prompt_indices_needing_rewind.append(prompt_idx)
                 continue
 
@@ -350,20 +284,20 @@ Please provide a new plan that addresses the question effectively."""
                 if len(response_tokens) >= curr_max_tokens[prompt_idx]:
                     # Hit max length without plan - add to rewind pool instead of forcing completion
                     max_length_without_plan_indices.append(prompt_idx)
-                    prompts_needing_rewind.append(original_prompts[prompt_idx])
-                    prompt_indices_needing_rewind.append(prompt_idx)
-                    print(f"      Prompt {prompt_idx}: Hit max length without generating plan, adding to rewind pool")
+                    # prompts_needing_rewind.append(original_prompts[prompt_idx])
+                    # prompt_indices_needing_rewind.append(prompt_idx)
+                    # print(f"      Prompt {prompt_idx}: Hit max length without generating plan, adding to rewind pool")
                 else:
                     # Didn't hit max length but still no answer tags - needs rewind
-                    prompts_needing_rewind.append(original_prompts[prompt_idx])
+                    prompts_needing_rewind.append(original_text_prompt[prompt_idx])
                     prompt_indices_needing_rewind.append(prompt_idx)
-                continue
+                    continue
 
             # Extract the plan from the <answer> tags
             extracted_plan = self.extract_last_answer(generated_response)
 
             if not extracted_plan:
-                prompts_needing_rewind.append(original_prompts[prompt_idx])
+                prompts_needing_rewind.append(original_text_prompt[prompt_idx])
                 prompt_indices_needing_rewind.append(prompt_idx)
                 continue
 
@@ -390,7 +324,7 @@ Please provide a new plan that addresses the question effectively."""
                 plan = item["plan"]
 
                 # Use explicit task if available, otherwise use original question
-                evaluation_question = original_prompts[prompt_idx]
+                evaluation_question = original_text_prompt[prompt_idx]
                 if meta_info and "explicit_tasks" in meta_info:
                     explicit_tasks = meta_info["explicit_tasks"]
                     if prompt_idx < len(explicit_tasks) and explicit_tasks[prompt_idx]:
@@ -444,13 +378,13 @@ Please provide a new plan that addresses the question effectively."""
                         rejected_indices.append(prompt_idx)
                         # Store the rejected plan
                         rejected_plans_per_prompt[prompt_idx].append(plan)
-                        prompts_needing_rewind.append(original_prompts[prompt_idx])
+                        prompts_needing_rewind.append(original_text_prompt[prompt_idx])
                         prompt_indices_needing_rewind.append(prompt_idx)
                 else:
                     rejected_indices.append(prompt_idx)
                     # Store the rejected plan (even if extraction failed)
                     rejected_plans_per_prompt[prompt_idx].append("Failed to extract plan")
-                    prompts_needing_rewind.append(original_prompts[prompt_idx])
+                    prompts_needing_rewind.append(original_text_prompt[prompt_idx])
                     prompt_indices_needing_rewind.append(prompt_idx)
 
             # Print summary of evaluation results
@@ -464,157 +398,237 @@ Please provide a new plan that addresses the question effectively."""
             if max_length_without_plan_indices:
                 print(f"    Note: {len(max_length_without_plan_indices)} prompts hit max length without generating plan and will be rewound")
 
+            # Rewind tracking arrays (per-example flags)
+            needed_first_rewind_arr = np.zeros(batch_size, dtype=np.int32)
+            needed_second_rewind_arr = np.zeros(batch_size, dtype=np.int32)
+            first_rewind_approved_arr = np.zeros(batch_size, dtype=np.int32)
+            second_rewind_approved_arr = np.zeros(batch_size, dtype=np.int32)
+            # Mark those that needed a first rewind
+            for _idx in prompt_indices_needing_rewind:
+                needed_first_rewind_arr[_idx] = 1
+
             # Track rewind attempts for each prompt
             rewind_attempts = {idx: 1 for idx in prompt_indices_needing_rewind}
             max_rewind_attempts = self.max_rewind_attempts
-
-            while prompts_needing_rewind and max(rewind_attempts.values()) <= max_rewind_attempts:
+            
+            while prompts_needing_rewind and max(rewind_attempts.values()) < max_rewind_attempts:
                 current_rewind_count = max(rewind_attempts.values())
                 print(f"    Rewind iteration {current_rewind_count}: Processing {len(prompts_needing_rewind)} prompts")
-
+                
                 # Prepare rewind prompts for this batch
                 rewind_prompts = []
                 rewind_max_tokens = []
                 rewind_seeds = []
                 rewind_prompt_indices = []
-
+                
                 for i, prompt_idx in enumerate(prompt_indices_needing_rewind):
                     if rewind_attempts[prompt_idx] > max_rewind_attempts:
                         continue
-
+                    
                     # Get rejected plans for this prompt
                     rejected_plans = rejected_plans_per_prompt[prompt_idx]
-
+                    
                     # Create rewind prompt with explicit task if available
                     explicit_task = None
                     if "explicit_tasks" in meta_info and prompt_idx < len(meta_info["explicit_tasks"]):
                         explicit_task = meta_info["explicit_tasks"][prompt_idx]
-
+                    
                     # Check if this prompt hit max length without generating a plan
                     hit_max_length = prompt_idx in max_length_without_plan_indices
                     
                     rewind_prompt = self.create_rewind_prompt(
-                        meta_info["original_prompt"][prompt_idx], 
+                        original_text_prompt[prompt_idx], 
                         rejected_plans, 
                         1, 
                         explicit_task,
                         hit_max_length
                     )
-
+                    
                     rewind_prompts.append(rewind_prompt)
                     rewind_max_tokens.append(curr_max_tokens[prompt_idx])
                     rewind_seeds.append(prompt_idx + rewind_attempts[prompt_idx])
                     rewind_prompt_indices.append(prompt_idx)
-
+                
                 if not rewind_prompts:
                     break
-
+                
                 # Generate rewind plans in batch
                 rewind_candidates = self.generate_text_with_model_batch(prompts=rewind_prompts, num_outputs=1, max_new_tokens_list=rewind_max_tokens, temperature=0.6, top_p=0.9, seeds=rewind_seeds)
-
+                
                 # Track tokens generated in rewind attempts
                 for i, prompt_idx in enumerate(rewind_prompt_indices):
                     if rewind_candidates[i] and rewind_candidates[i][0].strip():
                         response_text = rewind_candidates[i][0].strip()
                         response_tokens = self.tokenizer.encode(response_text)
                         generation_history[prompt_idx]["total_tokens_generated"] += len(response_tokens)
-
-                # Process rewind results
+                
+                # Process rewind results: collect valid plans for batch evaluation
                 still_needing_rewind = []
                 still_needing_rewind_indices = []
                 approved_in_this_round = []
-
+                rewind_plans_to_evaluate = []
+                
                 for i, prompt_idx in enumerate(rewind_prompt_indices):
                     candidates = rewind_candidates[i]
                     if not candidates or not candidates[0].strip():
-                        still_needing_rewind.append(original_prompts[prompt_idx])
+                        still_needing_rewind.append(original_text_prompt[prompt_idx])
                         still_needing_rewind_indices.append(prompt_idx)
                         rewind_attempts[prompt_idx] += 1
                         continue
-
+                    
                     generated_response = candidates[0].strip()
-
+                    
                     # Validate and extract plan
                     if not self.validate_response_has_answers(generated_response):
-                        still_needing_rewind.append(original_prompts[prompt_idx])
+                        still_needing_rewind.append(original_text_prompt[prompt_idx])
                         still_needing_rewind_indices.append(prompt_idx)
                         rewind_attempts[prompt_idx] += 1
                         continue
-
+                    
                     extracted_plan = self.extract_last_answer(generated_response)
                     if not extracted_plan:
-                        still_needing_rewind.append(original_prompts[prompt_idx])
+                        still_needing_rewind.append(original_text_prompt[prompt_idx])
                         still_needing_rewind_indices.append(prompt_idx)
                         rewind_attempts[prompt_idx] += 1
                         continue
-
-                    # Evaluate the rewind plan
-                    is_approved, confidence, explanation = self.evaluate_plan_quality(meta_info["original_prompt"][prompt_idx], extracted_plan, prompt_idx, meta_info)
-
-                    if is_approved:
-                        approved_in_this_round.append(prompt_idx)
-
-                        # Add the full approved response (including thinking parts) to the current input
-                        full_response_ids = self.tokenizer.encode(generated_response)
-                        curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx].copy(), full_response_ids])
-
-                        # Update generation history
-                        generation_history[prompt_idx]["total_regeneration_attempts"] += rewind_attempts[prompt_idx]
-                        turn_data = {"turn_number": 1, "approved_plan": extracted_plan, "rejected_plans": rejected_plans_per_prompt[prompt_idx].copy(), "total_attempts": rewind_attempts[prompt_idx], "plan_approved": True}
-                        generation_history[prompt_idx]["turns"].append(turn_data)
-
-                        print(f"        ✓ Prompt {prompt_idx}: Plan approved after {rewind_attempts[prompt_idx]} rewind attempts")
-                    else:
-                        # Store the rejected plan
-                        rejected_plans_per_prompt[prompt_idx].append(extracted_plan)
-                        still_needing_rewind.append(original_prompts[prompt_idx])
-                        still_needing_rewind_indices.append(prompt_idx)
-                        rewind_attempts[prompt_idx] += 1
-
+                    
+                    # Queue for batch evaluation
+                    rewind_plans_to_evaluate.append({
+                        "prompt_idx": prompt_idx,
+                        "plan": extracted_plan,
+                        "response": generated_response,
+                    })
+                
+                # Batch evaluate collected rewind plans
+                if rewind_plans_to_evaluate:
+                    eval_questions = []
+                    eval_plans = []
+                    for item in rewind_plans_to_evaluate:
+                        p_idx = item["prompt_idx"]
+                        evaluation_question = original_text_prompt[p_idx]
+                        if "explicit_tasks" in meta_info and p_idx < len(meta_info["explicit_tasks"]) and meta_info["explicit_tasks"][p_idx]:
+                            evaluation_question = meta_info["explicit_tasks"][p_idx]
+                        eval_questions.append(evaluation_question)
+                        eval_plans.append(item["plan"])
+                    
+                    autorater_payload = {
+                        "prompts": eval_questions,
+                        "responses": eval_plans,
+                        "gt_answers": [""] * len(eval_plans),
+                        "template_types": ["plan_quality_evaluation"] * len(eval_plans),
+                    }
+                    
+                    autorater_decisions, autorater_explanations, autorater_raw_responses = call_autorater_service(self.plan_evaluation_service_url, autorater_payload, batch_size=len(eval_plans))
+                    
+                    for i, item in enumerate(rewind_plans_to_evaluate):
+                        p_idx = item["prompt_idx"]
+                        plan = item["plan"]
+                        response = item["response"]
+                        
+                        if i < len(autorater_decisions):
+                            decision = autorater_decisions[i]
+                            if isinstance(decision, bool):
+                                is_approved = decision
+                            elif isinstance(decision, str):
+                                is_approved = decision.upper() == "TRUE"
+                            else:
+                                is_approved = False
+                        else:
+                            is_approved = False
+                        
+                        if is_approved:
+                            approved_in_this_round.append(p_idx)
+                            
+                            # Add the full approved response (including thinking parts) to the current input
+                            full_response_ids = self.tokenizer.encode(response)
+                            curr_inputs[p_idx] = np.concatenate([init_inputs[p_idx].copy(), full_response_ids])
+                            
+                            # Update generation history
+                            generation_history[p_idx]["total_regeneration_attempts"] += rewind_attempts[p_idx]
+                            turn_data = {"turn_number": 1, "approved_plan": plan, "rejected_plans": rejected_plans_per_prompt[p_idx].copy(), "total_attempts": rewind_attempts[p_idx], "plan_approved": True}
+                            generation_history[p_idx]["turns"].append(turn_data)
+                            
+                            print(f"        ✓ Prompt {p_idx}: Plan approved after {rewind_attempts[p_idx]} rewind attempts")
+                        else:
+                            # Store the rejected plan
+                            rejected_plans_per_prompt[p_idx].append(plan)
+                            still_needing_rewind.append(original_text_prompt[p_idx])
+                            still_needing_rewind_indices.append(p_idx)
+                            rewind_attempts[p_idx] += 1
+                
                 # Print summary of this rewind round
                 print(f"      Rewind round {current_rewind_count} results:")
                 print(f"        ✅ Plans approved: {len(approved_in_this_round)} (indices: {approved_in_this_round})")
                 print(f"        🔄 Still needing rewind: {len(still_needing_rewind)} (indices: {still_needing_rewind_indices})")
 
+                # Update per-example rewind metrics arrays
+                if current_rewind_count == 1:
+                    for _idx in approved_in_this_round:
+                        first_rewind_approved_arr[_idx] = 1
+                    for _idx in still_needing_rewind_indices:
+                        needed_second_rewind_arr[_idx] = 1
+                elif current_rewind_count == 2:
+                    for _idx in approved_in_this_round:
+                        second_rewind_approved_arr[_idx] = 1
+                
                 # Update for next iteration
                 prompts_needing_rewind = still_needing_rewind
                 prompt_indices_needing_rewind = still_needing_rewind_indices
-
+            
             # Handle prompts that exceeded max rewind attempts - continue with most recent rejected plan
             exceeded_max_attempts = []
             for prompt_idx in prompt_indices_needing_rewind:
                 if rewind_attempts[prompt_idx] > max_rewind_attempts:
                     exceeded_max_attempts.append(prompt_idx)
-
-                    # Get the most recent rejected plan to continue generation
-                    rejected_plans = rejected_plans_per_prompt[prompt_idx]
-                    if rejected_plans:
-                        most_recent_plan = rejected_plans[-1]
-                        print(f"      Prompt {prompt_idx}: Using most recent rejected plan for continuation: {most_recent_plan[:100]}...")
-                        
-                        # Create a response with the rejected plan (wrapped in <answer> tags)
-                        rejected_response = f"<answer>{most_recent_plan}</answer><think>"
-                        rejected_response_ids = self.tokenizer.encode(rejected_response)
-                        
-                        # Add the rejected plan response to current input
-                        curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx].copy(), rejected_response_ids])
-                        
-                        # Update generation history
-                        generation_history[prompt_idx]["total_regeneration_attempts"] += max_rewind_attempts
-                        turn_data = {"turn_number": 1, "approved_plan": most_recent_plan, "rejected_plans": rejected_plans.copy(), "total_attempts": max_rewind_attempts, "plan_approved": False, "continued_with_rejected": True}
-                        generation_history[prompt_idx]["turns"].append(turn_data)
-                        
-                        print(f"        ✓ Continuing generation with rejected plan")
-                    else:
-                        # No rejected plans available, update history but don't continue
-                        generation_history[prompt_idx]["total_regeneration_attempts"] += max_rewind_attempts
-                        turn_data = {"turn_number": 1, "approved_plan": "", "rejected_plans": [], "total_attempts": max_rewind_attempts, "plan_approved": False, "continued_with_rejected": False}
-                        generation_history[prompt_idx]["turns"].append(turn_data)
-                        print(f"        ❌ No rejected plans available, stopping generation")
-
+            
+            # Get the most recent rejected plan to continue generation
+            for prompt_idx in exceeded_max_attempts:
+                rejected_plans = rejected_plans_per_prompt[prompt_idx]
+                if rejected_plans:
+                    most_recent_plan = rejected_plans[-1]
+                    print(f"      Prompt {prompt_idx}: Using most recent rejected plan for continuation: {most_recent_plan[:100]}...")
+                    
+                    # Create a response with the rejected plan (wrapped in <answer> tags)
+                    rejected_response = f"<answer>{most_recent_plan}</answer><think>"
+                    rejected_response_ids = self.tokenizer.encode(rejected_response)
+                    
+                    # Add the rejected plan response to current input
+                    curr_inputs[prompt_idx] = np.concatenate([init_inputs[prompt_idx].copy(), rejected_response_ids])
+                    
+                    # Update generation history
+                    generation_history[prompt_idx]["total_regeneration_attempts"] += max_rewind_attempts
+                    turn_data = {"turn_number": 1, "approved_plan": most_recent_plan, "rejected_plans": rejected_plans.copy(), "total_attempts": max_rewind_attempts, "plan_approved": False, "continued_with_rejected": True}
+                    generation_history[prompt_idx]["turns"].append(turn_data)
+                    
+                    print(f"        ✓ Continuing generation with rejected plan")
+                else:
+                    # No rejected plans available, update history but don't continue
+                    generation_history[prompt_idx]["total_regeneration_attempts"] += max_rewind_attempts
+                    turn_data = {"turn_number": 1, "approved_plan": "", "rejected_plans": [], "total_attempts": max_rewind_attempts, "plan_approved": False, "continued_with_rejected": False}
+                    generation_history[prompt_idx]["turns"].append(turn_data)
+                    print(f"        ❌ No rejected plans available, stopping generation")
+            
             if exceeded_max_attempts:
                 print(f"    ⚠️  Max rewind attempts exceeded for {len(exceeded_max_attempts)} prompts (indices: {exceeded_max_attempts})")
                 print(f"      Continuing generation with most recent rejected plans for these prompts")
+
+            # Store and print rewind metrics (as arrays for DataProto compatibility)
+            non_tensor_batch["needed_first_rewind"] = needed_first_rewind_arr
+            non_tensor_batch["first_rewind_approved"] = first_rewind_approved_arr
+            non_tensor_batch["needed_second_rewind"] = needed_second_rewind_arr
+            non_tensor_batch["second_rewind_approved"] = second_rewind_approved_arr
+
+            first_needed = int(needed_first_rewind_arr.sum())
+            first_approved = int(first_rewind_approved_arr.sum())
+            second_needed = int(needed_second_rewind_arr.sum())
+            second_approved = int(second_rewind_approved_arr.sum())
+            first_rate = (first_approved / first_needed * 100.0) if first_needed else 0.0
+            second_rate = (second_approved / second_needed * 100.0) if second_needed else 0.0
+            print(f"\n📈 Rewind Approval Metrics:")
+            print(f"  Needed first rewind: {first_needed}")
+            print(f"  First rewind approved: {first_approved} ({first_rate:.1f}%)")
+            print(f"  Needed second rewind: {second_needed}")
+            print(f"  Second rewind approved: {second_approved} ({second_rate:.1f}%)")
 
         # TURN 2: Answer Generation
         print(f"\n🔄 TURN 2: Answer Generation")
@@ -840,7 +854,7 @@ Please provide a new plan that addresses the question effectively."""
 
         # Add generation history to non_tensor_batch
         non_tensor_batch["generation_history"] = np.array(generation_history, dtype=object)
-        
+
         # Print summary of total tokens generated
         total_tokens_all_prompts = sum(gh["total_tokens_generated"] for gh in generation_history)
         tokens_per_prompt = [gh["total_tokens_generated"] for gh in generation_history]

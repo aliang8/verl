@@ -101,7 +101,6 @@ class CodeEvaluator:
                 code_snippet = code_snippets_extracted[i]
                 unit_test = unit_tests[i]
                 libs = rm_infos[i].get("libs", [])
-                import ipdb; ipdb.set_trace()
                 result = self._test_code_snippets(code_snippet, unit_test, libs)
                 sandbox_results.append(result)
         else:

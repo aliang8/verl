@@ -145,6 +145,9 @@ class vLLMRollout(BaseRollout):
             if max_position_embeddings is None:
                 raise ValueError("max_position_embeddings not found in model_hf_config")
 
+            print(f"max_position_embeddings: {max_position_embeddings}")
+            print(f"config.prompt_length: {config.prompt_length}")
+            print(f"config.response_length: {config.response_length}")
             assert max_position_embeddings >= config.prompt_length + config.response_length, "model context length should be greater than total sequence length"
 
         max_model_len = int(config.max_model_len or config.prompt_length + config.response_length)
